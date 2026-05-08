@@ -5,7 +5,7 @@ Follow-the-Gap (FTG) Navigation for Differential Drive Robot
 
 시나리오: 좌우 벽 + 중앙 장애물 통로를 멈추지 않고 부드럽게 통과
 
-흐름:
+흐름:이이잉이
   RPLidar C1  →  전처리 (FOV 클립 + 평활)  →  Safety Bubble
               →  Largest Gap 탐색  →  목표각 산출 + LPF
               →  (v, w) 계산  →  UART → Arduino ("v,w\n")
