@@ -18,7 +18,7 @@ import time
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
-from rplidar_c1 import RPLidar
+from rplidar c1 import RPLidar
 
 
 # ============================================================
