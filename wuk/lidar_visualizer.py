@@ -28,7 +28,8 @@ LIDAR_PORT      = '/dev/ttyUSB0'
 MAX_RANGE       = 3.5             # m, 표시 최대 거리
 MIN_VALID_RANGE = 0.10            # m, 노이즈 컷
 UPDATE_INTERVAL = 100             # ms, 화면 갱신 주기
-
+LIDAR_BAUDRATE  = 460800            # ← 이 줄 추가 (C1 전용)
+MAX_RANGE       = 3.5
 
 # ============================================================
 # 폴라 플롯 설정
@@ -72,11 +73,14 @@ front_text = ax.text(0.5, -0.08, '', transform=ax.transAxes,
 # LiDAR 연결
 # ============================================================
 print(f"[Visualizer] LiDAR 연결 중: {LIDAR_PORT}")
-lidar = RPLidar(LIDAR_PORT)
-info = lidar.get_info()
-print(f"[Visualizer] Info: {info}")
-health = lidar.get_health()
-print(f"[Visualizer] Health: {health}")
+lidar = RPLidar(LIDAR_PORT, baudrate=LIDAR_BAUDRATE)
+try:
+    info = lidar.get_info()
+    print(f"[Visualizer] Info: {info}")
+    health = lidar.get_health()
+    print(f"[Visualizer] Health: {health}")
+except Exception as e:
+    print(f"[Visualizer] Info/Health 조회 실패 (무시): {e}")
 
 scan_iter = lidar.iter_scans(max_buf_meas=2000, min_len=5)
 
