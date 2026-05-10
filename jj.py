@@ -264,7 +264,8 @@ def main():
     print(f"  전진 속도      : {FORWARD_SPEED} m/s")
     print(f"  로봇 반폭      : {ROBOT_HALF_WIDTH} mm")
     print(f"  충돌 판단 기준 : {ROBOT_HALF_WIDTH + SAFETY_MARGIN} mm (수평)")
-    print(f"  일반 위험구역  : 전방 {FORWARD_RANGE}mm × 수평 {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm (직사각형)")    print(f"  긴급 회피구역  : 전방 {EMERGENCY_FWD_RANGE}mm × 수평 {EMERGENCY_HORIZ_RANGE}mm (직사각형)")
+    print(f"  일반 위험구역  : 전방 {FORWARD_RANGE}mm × 수평 {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm (직사각형)")
+    print(f"  긴급 회피구역  : 전방 {EMERGENCY_FWD_RANGE}mm × 수평 {EMERGENCY_HORIZ_RANGE}mm (직사각형)")
     print(f"  최소 속도      : {EMERGENCY_MIN_SPEED} m/s (긴급 시)")
     print("=" * 48)
 
