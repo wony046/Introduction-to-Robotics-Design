@@ -139,13 +139,14 @@ def calculate_steering(scan_data):
     # ========================================================
     
     # ★ NEW: 비선형 yaw 게인 (작은 오차는 거의 무시, 큰 오차는 강하게)
+    # 수정 제안: yaw_err에 비례하여 부드럽게 증가하는 gain
     yaw_err = abs(yaw_acc_deg)
+
     if yaw_err < YAW_DEADBAND_DEG:
-        heading_gain = 0.5
-    elif yaw_err < YAW_NORMAL_DEG:
-        heading_gain = 2.0
+        heading_gain = 0.2
     else:
-        heading_gain = 4.0
+        # 오차가 커질수록 자연스럽게 gain이 증가 (최대 4.0으로 제한)
+        heading_gain = min(0.5 + (yaw_err / 30.0), 4.0) 
     
     # ★ NEW: 로봇 좌표계에서 GOAL이 위치한 각도
     # yaw_acc 가 +30°(좌측으로 30° 돌아감)이면 GOAL은 로봇 기준 -30° 방향
@@ -203,7 +204,7 @@ def calculate_steering(scan_data):
     else:
         last_avoid_dir = 0
 
-    steer_pwm = int(best_angle * STEER_GAIN)
+    steer_pwm = -int(best_angle * STEER_GAIN)
     
     # ========================================================
     # [3] 4단계 속도 결정 (기존과 동일)
