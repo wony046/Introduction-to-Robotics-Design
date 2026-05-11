@@ -48,52 +48,49 @@ ARDUINO_PORT     = "/dev/ttyS0"
 BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 9600
 
-# ── 로봇 파라미터 ─────────────────────────────────────────────────────────────
-ROBOT_HALF_WIDTH  = 110    # 라이다 중심 ~ 좌우 끝 (mm)
-ROBOT_FRONT_DIST  = 120    # 라이다 중심 ~ 정면 끝 (mm)  로봇 세로 230mm 중 앞쪽
-SAFETY_MARGIN     = 10     # threshold = 120mm
+# ── 라이다 보정 ───────────────────────────────────────────────────────────────
+LIDAR_OFFSET = 20      # mm: 라이다 측정값이 실제보다 20mm 짧으므로 보정
 
-# ── 직사각형 위험구역 ─────────────────────────────────────────────────────────
-DETECTION_RANGE       = 1500
-FORWARD_RANGE         = 800
-EMERGENCY_FWD_RANGE   = 125
-EMERGENCY_HORIZ_RANGE = 110
+# ── 로봇 파라미터 ─────────────────────────────────────────────────────────────
+ROBOT_HALF_WIDTH = 110   # 라이다 중심 ~ 좌우 끝 (mm)
+ROBOT_FRONT_DIST = 120   # 라이다 중심 ~ 정면 끝 (mm)
+SAFETY_MARGIN    = 10    # 수평 안전 여유 → threshold = 120mm
+
+# ── 위험구역 ──────────────────────────────────────────────────────────────────
+DETECTION_RANGE  = 1500  # mm: LiDAR 최대 신뢰 거리
+FORWARD_RANGE    = 800   # mm: 위험구역 전방 깊이
 
 # ── 속도 파라미터 ─────────────────────────────────────────────────────────────
-FORWARD_SPEED       = 0.20
-EMERGENCY_MIN_SPEED = 0.05
-W_GAIN              = 2.0
-MAX_W               = 2.0
-HORIZ_EXTRA         = 20
+FORWARD_SPEED    = 0.20  # m/s: 최고 선속도
+SLOW_START_DIST  = 400   # mm: 이 전방거리부터 감속 시작
+STOP_DIST        = 120   # mm: 이 전방거리 이하에서 선속도=0 (회전만)
+                          #     = ROBOT_FRONT_DIST (로봇 정면이 장애물에 닿는 거리)
+W_GAIN           = 2.0   # 수평오차 P 게인: w = W_GAIN × (threshold-horiz)/threshold
+MAX_W            = 2.0   # rad/s: 최대 각속도
 
-# ── 헤딩 우선 방향 (점수제) ──────────────────────────────────────────────────
-# 여유공간 점수에 헤딩 보정 보너스를 더해 방향 결정
-# 차이가 크면 여유공간이 이기고, 비슷하면 헤딩 감소 방향이 이김
-HEADING_WEIGHT = 1.5   # 헤딩 1도 = 여유공간 1.5도 상당 보너스
+# ── 헤딩 방향 점수제 ──────────────────────────────────────────────────────────
+HEADING_WEIGHT   = 1.5   # 헤딩 1° = 여유공간 1.5° 가중치
 
 # ── 헤딩 > 90° 능동 복귀 ─────────────────────────────────────────────────────
-HEADING_OVER_90  = 90.0   # deg: 이 이상이면 장애물 확인 후 복귀 회전
-CORRECTION_W     = 0.8    # rad/s: 복귀 회전 각속도
-CORRECTION_CHECK = 350    # mm: 복귀 방향 안전 확인 거리
+HEADING_OVER_90    = 90.0  # deg: 이 이상이면 LiDAR 확인 후 복귀 회전
+RECOVERY_W         = 0.8   # rad/s: 복귀 회전 각속도
+RECOVERY_SAFE_DIST = 350   # mm: 복귀 방향 장애물 판단 거리
 
-# ── 막힘 감지 (LiDAR 공간 기반) ──────────────────────────────────────────────
-# 열린 구간의 실제 물리 너비(코사인 법칙)로 로봇 통과 가능 여부 판단
-STUCK_CLEAR_DIST = 400    # mm: 이 거리 이상이면 열린 공간으로 간주
-STUCK_MAX_SAFETY = 30     # mm: 최대 안전 여유 (장애물 원거리 시 적용)
-                           #     경계 장애물과의 거리에 비례해 선형 감소
-                           #     d=0 이면 여유 0mm → 최소너비 = 로봇 폭(220mm)
-STUCK_TIMEOUT    = 2.0    # sec
+# ── 막힘 감지 ─────────────────────────────────────────────────────────────────
+STUCK_CLEAR_DIST = 400   # mm: 이 거리 이상이면 열린 공간으로 간주
+STUCK_MAX_SAFETY = 30    # mm: 최대 안전 여유 (거리 비례 감소, d=0이면 0mm)
+STUCK_TIMEOUT    = 2.0   # sec
 
 # ── 탈출 회전 ─────────────────────────────────────────────────────────────────
-ESCAPE_CLEAR_DIST  = 500   # mm: 탈출 방향 판단 최소 거리
-ESCAPE_W           = 1.0   # rad/s: 탈출 회전 각속도
-ESCAPE_TIMEOUT     = 15.0  # sec: 탈출 회전 최대 시간
-ESCAPE_TOLERANCE   = 8.0   # deg: 목표 각도 허용 오차
+ESCAPE_CLEAR_DIST = 500  # mm: 탈출 방향 판단 최소 거리
+ESCAPE_W          = 1.0  # rad/s: 탈출 회전 각속도
+ESCAPE_TIMEOUT    = 15.0 # sec: 탈출 회전 최대 시간
+ESCAPE_TOLERANCE  = 8.0  # deg: 목표 각도 허용 오차
 
 # ── 스캔 파라미터 ─────────────────────────────────────────────────────────────
-SCAN_HALF_ANGLE = 90
-ANGLE_STEP      = 5
-SEND_INTERVAL   = 0.1
+SCAN_HALF_ANGLE  = 90
+ANGLE_STEP       = 5
+SEND_INTERVAL    = 0.1
 # ─────────────────────────────────────────────────────────────────────────────
 
 arduino_heading_deg = 0.0
@@ -121,7 +118,7 @@ def parse_packet(data):
     angle_q6    = (data[1] >> 1) | (data[2] << 7)
     angle       = angle_q6 / 64.0
     distance_q2 = data[3] | (data[4] << 8)
-    distance    = distance_q2 / 4.0
+    distance    = distance_q2 / 4.0 + LIDAR_OFFSET   # +20mm 보정
     return angle, distance, quality
 
 
@@ -451,10 +448,22 @@ def select_direction(left_clear, right_clear, heading_deg):
 # v/w 명령 계산
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def find_vw_command(scan_points, heading_deg):
-    """정면 스캔 + 헤딩 → (v m/s, w rad/s) 반환"""
+    """
+    정면 스캔 + 헤딩 → (v m/s, w rad/s) 반환
+
+    [선속도 — 전방거리 기반 연속 감속]
+      n_fwd >= SLOW_START_DIST(400mm) → v = FORWARD_SPEED (최고속도)
+      n_fwd <= STOP_DIST(120mm)       → v = 0 (회전만)
+      그 사이                          → 선형 감소
+
+    [각속도 — 수평오차 P제어]
+      n_horiz < threshold(120mm) 인 동안 w 지속
+      w = sign × W_GAIN × (threshold - n_horiz) / threshold
+      n_horiz >= threshold → w = 0 (수평 여유 확보됨, 직진)
+    """
     threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN   # 120mm
 
-    # 위험 포인트 수집 (직사각형 구역)
+    # 위험 포인트 수집
     danger_points = []
     for angle_norm, dist in scan_points:
         if dist <= 0 or dist > DETECTION_RANGE:
@@ -467,57 +476,50 @@ def find_vw_command(scan_points, heading_deg):
         return FORWARD_SPEED, 0.0
 
     # 가장 가까운 장애물
-    nearest                              = min(danger_points, key=lambda p: p[1])
+    nearest = min(danger_points, key=lambda p: p[1])
     nearest_angle, ref_dist, n_horiz, n_fwd = nearest
 
     print(f"  [기준장애물] 각도:{nearest_angle:.1f}°  "
           f"직선:{ref_dist:.0f}mm  전방:{n_fwd:.0f}mm  수평:{n_horiz:.0f}mm")
 
-    # 긴급구역 판정
-    in_emergency = (n_fwd <= EMERGENCY_FWD_RANGE and n_horiz <= EMERGENCY_HORIZ_RANGE)
-    if in_emergency:
-        ratio       = n_fwd / EMERGENCY_FWD_RANGE
-        min_scale   = EMERGENCY_MIN_SPEED / FORWARD_SPEED
-        speed_scale = min_scale + (1.0 - min_scale) * ratio
-        v           = FORWARD_SPEED * speed_scale
-        print(f"  [긴급회피] 스케일:{speed_scale:.2f}  v={v:.2f}m/s")
+    # ── 선속도: 전방거리 기반 연속 감속 ─────────────────────────────────────
+    if n_fwd >= SLOW_START_DIST:
+        v = FORWARD_SPEED
+    elif n_fwd <= STOP_DIST:
+        v = 0.0
     else:
-        speed_scale = 1.0
-        v           = FORWARD_SPEED
+        ratio = (n_fwd - STOP_DIST) / (SLOW_START_DIST - STOP_DIST)
+        v = FORWARD_SPEED * ratio
 
-    # 좌우 여유공간
-    scan_dict = {}
-    for angle_norm, dist in scan_points:
-        if dist <= 0:
-            continue
-        bucket = round(angle_norm / ANGLE_STEP) * ANGLE_STEP
-        if bucket not in scan_dict or dist < scan_dict[bucket]:
-            scan_dict[bucket] = dist
+    # ── 각속도: 수평오차 P제어 ───────────────────────────────────────────────
+    horiz_error = threshold - n_horiz   # > 0: 아직 위험구역, ≤ 0: 안전
+    if horiz_error > 0:
+        # 좌우 여유공간
+        scan_dict = {}
+        for angle_norm, dist in scan_points:
+            if dist <= 0:
+                continue
+            bucket = round(angle_norm / ANGLE_STEP) * ANGLE_STEP
+            if bucket not in scan_dict or dist < scan_dict[bucket]:
+                scan_dict[bucket] = dist
 
-    left_clear = right_clear = 0
-    for a in range(-SCAN_HALF_ANGLE, 0, ANGLE_STEP):
-        if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
-            left_clear += ANGLE_STEP
-    for a in range(ANGLE_STEP, SCAN_HALF_ANGLE + 1, ANGLE_STEP):
-        if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
-            right_clear += ANGLE_STEP
+        left_clear = right_clear = 0
+        for a in range(-SCAN_HALF_ANGLE, 0, ANGLE_STEP):
+            if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
+                left_clear += ANGLE_STEP
+        for a in range(ANGLE_STEP, SCAN_HALF_ANGLE + 1, ANGLE_STEP):
+            if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
+                right_clear += ANGLE_STEP
 
-    print(f"  [여유공간] 왼쪽:{left_clear}°  오른쪽:{right_clear}°  헤딩:{heading_deg:.1f}°")
+        print(f"  [여유공간] 왼쪽:{left_clear}°  오른쪽:{right_clear}°  헤딩:{heading_deg:.1f}°")
 
-    # 회피각 계산: atan2(delta_h, n_fwd)
-    delta_horiz = threshold - n_horiz + HORIZ_EXTRA
-    avoid_angle = math.atan2(max(delta_horiz, 1.0), max(n_fwd, 1.0))
+        w_sign = select_direction(left_clear, right_clear, heading_deg)
+        w      = w_sign * min(W_GAIN * horiz_error / threshold, MAX_W)
+    else:
+        w = 0.0   # 수평거리 충분 → 직진
 
-    # 방향 결정 (헤딩 우선)
-    w_sign  = select_direction(left_clear, right_clear, heading_deg)
-    dir_str = "좌회전" if w_sign > 0 else "우회전"
-
-    # w 계산 + 긴급 스케일
-    w = w_sign * min(W_GAIN * avoid_angle, MAX_W) * speed_scale
-
-    print(f"  [회피] {dir_str}  각도:{math.degrees(avoid_angle):.1f}°  "
-          f"v:{v:.2f}  w:{w:.2f}"
-          + ("  [긴급]" if in_emergency else ""))
+    print(f"  [속도명령] v:{v:.2f}m/s  w:{w:.2f}rad/s  "
+          f"(fwd:{n_fwd:.0f}mm  horiz_err:{horiz_error:.0f}mm)")
 
     return v, w
 
@@ -528,9 +530,10 @@ def main():
     print("=== RPLIDAR 장애물 회피 v5 ===")
     print(f"  라이다 포트    : {LIDAR_PORT}")
     print(f"  아두이노 포트  : {ARDUINO_PORT}")
-    print(f"  충돌 기준      : {ROBOT_HALF_WIDTH + SAFETY_MARGIN} mm")
+    print(f"  라이다 보정    : +{LIDAR_OFFSET}mm")
     print(f"  위험구역       : 전방 {FORWARD_RANGE}mm × 수평 {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm")
-    print(f"  긴급구역       : 전방 {EMERGENCY_FWD_RANGE}mm × 수평 {EMERGENCY_HORIZ_RANGE}mm")
+    print(f"  선속도 감속    : {SLOW_START_DIST}mm부터 감속 → {STOP_DIST}mm에서 v=0")
+    print(f"  각속도 방식    : 수평오차 P제어 (horiz < {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm 동안 유지)")
     print(f"  막힘감지       : 열린구간 너비 < {ROBOT_HALF_WIDTH*2}~{ROBOT_HALF_WIDTH*2+STUCK_MAX_SAFETY}mm → {STUCK_TIMEOUT}초 지속 시 탈출")
     print(f"  탈출 각속도    : {ESCAPE_W} rad/s (최적 방향)")
     print("=" * 50)
@@ -563,31 +566,6 @@ def main():
 
             if s_flag == 1 and scan_points:
                 all_scan_points = list(scan_points)   # 전체 360도 스냅샷
-              
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # [추가] 라이다 중심점 확인용 거리 로그 출력
-                # 각 방향(정면, 좌, 우, 후) ±3도 범위 내의 최솟값을 찾습니다.
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                front_vals = [d for a, d in all_scan_points if -3 <= a <= 3 and d > 0]
-                left_vals  = [d for a, d in all_scan_points if -93 <= a <= -87 and d > 0]
-                right_vals = [d for a, d in all_scan_points if 87 <= a <= 93 and d > 0]
-                back_vals  = [d for a, d in all_scan_points if (a >= 177 or a <= -177) and d > 0]
-
-                front_d = min(front_vals) if front_vals else 0
-                left_d  = min(left_vals) if left_vals else 0
-                right_d = min(right_vals) if right_vals else 0
-                back_d  = min(back_vals) if back_vals else 0
-
-                # 1초에 너무 많이 출력되면 보기 힘드니 SEND_INTERVAL에 맞춰 출력
-                now = time.time()
-                if now - last_send >= SEND_INTERVAL:
-                    print(f"📏 [거리측정] 정면: {front_d:.0f}mm | 좌측: {left_d:.0f}mm | 우측: {right_d:.0f}mm | 후면: {back_d:.0f}mm")
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-                front_points    = [
-                    (a, d) for a, d in scan_points
-                    if is_in_front(a) and d > 0
-                ]
                 front_points    = [
                     (a, d) for a, d in scan_points
                     if is_in_front(a) and d > 0
