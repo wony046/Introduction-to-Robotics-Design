@@ -33,6 +33,7 @@ SAFE_DISTANCE    = 600    # mm — 이 이상 뚫려있어야 풀악셀
 MAX_SPEED        = 250    # 풀악셀 속도
 AVOID_SPEED      = 120    # 일반 회피 속도
 ESCAPE_SPEED     = 90     # 거북이 속도
+MIN_WHEEL_SPEED  = 30     # 회전 중에도 느린 쪽 바퀴가 유지할 최소 속도 (0 방지)
 STEER_GAIN       = 1.5    # 조향각(도) → PWM 변환 계수
 ROBOT_HALF_WIDTH = 115    # mm — 로봇 반폭 (230mm / 2)
 
@@ -333,9 +334,14 @@ def calculate_steering(scan_data: list) -> tuple[int, int]:
 
     # ── 6. steer_pwm 클램핑 ──────────────────────────────────
     # Arduino: left = speed + steer,  right = speed - steer
-    # |steer| > speed 이면 right = speed - steer < 0 → 역방향 회전 발생
-    # → steer를 ±speed 범위로 제한해 양쪽 바퀴가 항상 같은 방향으로 회전하도록 보장
-    steer_pwm = max(-speed, min(speed, steer_pwm))
+    #
+    # 이전 방식: max(-speed, min(speed, steer))
+    # → steer = speed 일 때 right = 0 (바퀴 정지), 히스테리시스로 계속 유지됨
+    #
+    # 수정: steer 상한을 (speed - MIN_WHEEL_SPEED)로 제한
+    # → 느린 쪽 바퀴 = speed - steer_max = MIN_WHEEL_SPEED 로 항상 회전 유지
+    max_steer = max(0, speed - MIN_WHEEL_SPEED)
+    steer_pwm = max(-max_steer, min(max_steer, steer_pwm))
 
     return speed, steer_pwm
 
