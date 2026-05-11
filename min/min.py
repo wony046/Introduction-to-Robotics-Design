@@ -39,11 +39,11 @@ ROBOT_HALF_WIDTH = 115    # mm — 로봇 반폭 (230mm / 2)
 # ============================================================
 # 3. VFH 파라미터
 # ============================================================
-ANGLE_STEP        = 5      # 히스토그램 해상도 (도)
+ANGLE_STEP        = 10     # 히스토그램 해상도 (도)
 MAX_OBSTACLE_DIST = 2000   # mm — 이 거리 이상은 히스토그램 기여 없음
 VALLEY_THRESHOLD  = 0.5    # 이 밀도 이하 빈을 "통과 가능"으로 판정
 VALLEY_MIN_WIDTH  = 20     # 도 — 로봇이 통과할 수 있는 최소 valley 폭
-SMOOTH_KERNEL     = [1, 2, 3, 2, 1]  # 가우시안 근사 평활화 커널 (±2빈 = ±10도)
+SMOOTH_KERNEL     = [1, 2, 3, 2, 1]  # 가우시안 근사 평활화 커널 (±2빈 = ±20도)
 
 # ============================================================
 # 4. 스캔 완료율 필터 파라미터
@@ -306,9 +306,9 @@ def calculate_steering(scan_data: list) -> tuple[int, int]:
     # Valley 방향이 결정됐어도 한쪽 벽이 바짝 붙으면 반대 방향 가중
     wall_offset = 0
     if right_wall_min < 200 and left_wall_min > right_wall_min + 40:
-        wall_offset = +5    # 우측 벽 → 좌측(양수)으로 5도 보정
+        wall_offset = +10   # 우측 벽 → 좌측(양수)으로 10도 보정
     elif left_wall_min < 200 and right_wall_min > left_wall_min + 40:
-        wall_offset = -5    # 좌측 벽 → 우측(음수)으로 5도 보정
+        wall_offset = -10   # 좌측 벽 → 우측(음수)으로 10도 보정
 
     final_angle = max(-90, min(90, target_angle + wall_offset))
 
@@ -323,12 +323,19 @@ def calculate_steering(scan_data: list) -> tuple[int, int]:
     steer_pwm = int(final_angle * STEER_GAIN)
 
     # ── 5. 속도 결정 (front_clear_x 기반 3단계) ─────────────
+    # ★ 속도를 먼저 결정해야 steer 클램핑 범위를 알 수 있음
     if front_clear_x <= 400:
         speed = ESCAPE_SPEED
     elif abs(final_angle) <= 15 and front_clear_x > SAFE_DISTANCE:
         speed = MAX_SPEED
     else:
         speed = AVOID_SPEED
+
+    # ── 6. steer_pwm 클램핑 ──────────────────────────────────
+    # Arduino: left = speed + steer,  right = speed - steer
+    # |steer| > speed 이면 right = speed - steer < 0 → 역방향 회전 발생
+    # → steer를 ±speed 범위로 제한해 양쪽 바퀴가 항상 같은 방향으로 회전하도록 보장
+    steer_pwm = max(-speed, min(speed, steer_pwm))
 
     return speed, steer_pwm
 
