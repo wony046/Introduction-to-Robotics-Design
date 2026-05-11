@@ -204,7 +204,7 @@ def calculate_steering(scan_data):
     else:
         last_avoid_dir = 0
 
-    steer_pwm = -int(best_angle * STEER_GAIN)
+    steer_pwm = int(best_angle * STEER_GAIN)
     
     # ========================================================
     # [3] 4단계 속도 결정 (기존과 동일)
