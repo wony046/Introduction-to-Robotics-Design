@@ -14,16 +14,15 @@ lidar_ser = serial.Serial(LIDAR_PORT, 460800, timeout=1)
 # ==========================================
 # 2. 자율 주행 파라미터
 # ==========================================
-SAFE_DISTANCE = 400      # 40cm (내 차폭 기준 앞길이 이만큼 뚫리면 풀악셀)
-MAX_SPEED = 250          # 뻥 뚫렸을 때 속도
-AVOID_SPEED = 150        # 정상 회피 속도
-ESCAPE_SPEED = 100        # 좁은 틈 거북이 속도
-STEER_GAIN = 1.7         # 조향 민감도
+SAFE_DISTANCE = 400      
+MAX_SPEED = 250          
+AVOID_SPEED = 150        
+ESCAPE_SPEED = 100       
+STEER_GAIN = 1.7         
 
-# 로봇 크기 설정 (가로세로 210mm)
-ROBOT_HALF_WIDTH = 120   # 230 / 2 (타이트하게 잡아 측면 오해 방지)
+ROBOT_HALF_WIDTH = 120   
 
-last_avoid_dir = 0       # 1(우회전), -1(좌회전), 0(직진)
+last_avoid_dir = 0       
 
 # ==========================================
 # 3. 핵심 회피 알고리즘
@@ -33,10 +32,10 @@ def calculate_steering(scan_data):
     
     bins = {angle: 9999 for angle in range(-90, 91, 10)}
     
-    front_emergency_dist = 9999  # 오직 -20 ~ +20도 사이의 순수 최단 거리 (비상 정지용)
-    front_clear_x = 9999         # 내 차폭 안으로 들어오는 X축 거리 (주행 판단용)
-    left_wall_min = 9999         # 좌측 벽 최단 Y거리
-    right_wall_min = 9999        # 우측 벽 최단 Y거리
+    front_emergency_dist = 9999  
+    front_clear_x = 9999         
+    left_wall_min = 9999         
+    right_wall_min = 9999        
     
     for angle, distance in scan_data:
         if angle > 180: angle -= 360
@@ -49,38 +48,48 @@ def calculate_steering(scan_data):
             x_pos = distance * math.cos(math.radians(angle))
             y_pos = distance * math.sin(math.radians(angle))
             
-            # [A] 진짜 코앞 비상 정지용 (-20도 ~ +20도)
             if -20 <= angle <= 20:
                 if distance < front_emergency_dist:
                     front_emergency_dist = distance
 
-            # [B] 궤적 투영: 내 차폭 안에 들어오는 전방 물체
             if x_pos > 50 and abs(y_pos) <= ROBOT_HALF_WIDTH:
                 if x_pos < front_clear_x:
                     front_clear_x = x_pos
                     
-            # [C] 측면 벽 감시 (거북이 모드 시 긁힘 방지용)
             if -100 < x_pos < 400:
-                if angle >= 30:   # 좌측 벽
+                if angle >= 30:   
                     if y_pos < left_wall_min: left_wall_min = y_pos
-                elif angle <= -30: # 우측 벽
+                elif angle <= -30: 
                     if abs(y_pos) < right_wall_min: right_wall_min = abs(y_pos)
 
     # ========================================================
-    # [1] 비상 회피 모드 (제자리 회전)
+    # [1] 스마트 비상 회피 모드 (180도 U턴 방지 적용)
     # ========================================================
     if front_emergency_dist < 200:
-        if last_avoid_dir == -1:
-            emergency_steer = 75   
-        elif last_avoid_dir == 1:
-            emergency_steer = -75  
+        # 좌우의 전체 개방감(빈 공간 총합)을 계산
+        left_openness = sum(bins[a] for a in range(10, 91, 10))
+        right_openness = sum(bins[a] for a in range(-90, 0, 10))
+
+        # ★ S자 코스 돌파: 반대쪽이 압도적으로(800 이상) 넓으면 관성 무시하고 핸들 꺾기!
+        if left_openness > right_openness + 800:
+            emergency_steer = 75
+            last_avoid_dir = -1
+        elif right_openness > left_openness + 800:
+            emergency_steer = -75
+            last_avoid_dir = 1
         else:
-            if left_wall_min > right_wall_min:
+            # 큰 차이가 없으면 기존 방향 유지 (와리가리 방지)
+            if last_avoid_dir == -1:
                 emergency_steer = 75
-                last_avoid_dir = -1
-            else:
+            elif last_avoid_dir == 1:
                 emergency_steer = -75
-                last_avoid_dir = 1
+            else:
+                if left_wall_min > right_wall_min:
+                    emergency_steer = 75
+                    last_avoid_dir = -1
+                else:
+                    emergency_steer = -75
+                    last_avoid_dir = 1
                 
         return 0, emergency_steer  
 
@@ -93,10 +102,11 @@ def calculate_steering(scan_data):
     for angle in range(-90, 91, 10):
         dist = bins[angle]
         
-        dist_score = min(dist, 400) * 1.0
+        # ★ 시야 확장: 400 -> 800으로 늘려서 저 멀리 뚫린 S자 출구를 보게 만듦!
+        dist_score = min(dist, 800) * 1.0
+        
         center_penalty = abs(angle) * 3.5
         
-        # 앞길이 어느 정도 열렸을 때 원래 길로 복귀
         hysteresis_bonus = 0
         if front_clear_x > 300: 
             if last_avoid_dir == 1 and angle > 10:
@@ -104,7 +114,6 @@ def calculate_steering(scan_data):
             elif last_avoid_dir == -1 and angle < -10:
                 hysteresis_bonus = 150
 
-        # 측면 벽 밀어내기 (Wall Repulsion)
         wall_repulsion_bonus = 0
         if right_wall_min < 200 and left_wall_min > right_wall_min + 40:
             if angle > 10: wall_repulsion_bonus = 150
@@ -129,15 +138,10 @@ def calculate_steering(scan_data):
     # ========================================================
     # [3] 4단계 속도 결정
     # ========================================================
-    # 거북이 모드: 차폭 내 앞길이 40cm 이내일 때 (비비며 탈출)
     if front_clear_x <= 400:
         current_speed = ESCAPE_SPEED
-        
-    # 풀악셀: 거의 직진 중이고, 내 차폭 기준 앞길이 60cm 이상 뻥 뚫렸을 때
     elif abs(best_angle) <= 15 and front_clear_x > SAFE_DISTANCE:
         current_speed = MAX_SPEED
-        
-    # 일반 회피: 정면은 40cm 이상 뚫렸지만 코너링 중일 때
     else:
         current_speed = AVOID_SPEED
     
