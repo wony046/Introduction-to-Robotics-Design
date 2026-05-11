@@ -7,9 +7,11 @@ import math
 # ==========================================
 ARDUINO_PORT = '/dev/ttyACM0'   
 LIDAR_PORT = '/dev/ttyUSB0'   
-
+print("[INIT] 통신 포트 연결 시도 중...")
 arduino = serial.Serial(ARDUINO_PORT, 115200, timeout=0.1)
 lidar_ser = serial.Serial(LIDAR_PORT, 460800, timeout=1)
+print("[INIT] 아두이노 부팅 대기 (2초)...")
+time.sleep(2)  # ★ 이 두 줄이 USB 직결 시 반드시 필요합니다!
 
 # ==========================================
 # 2. 자율 주행 파라미터
@@ -219,20 +221,20 @@ def calculate_steering(scan_data):
 # 4. 메인 루프
 # ==========================================
 def main():
-    print("[INFO] 라이다 초기화 중...")
-    lidar_ser.write(bytes([0xA5, 0x40])) # RESET
+    print("[INIT] 라이다 초기화(RESET) 명령 전송...")
+    lidar_ser.write(bytes([0xA5, 0x40])) 
     time.sleep(1)
-    lidar_ser.write(bytes([0xA5, 0x20])) # SCAN
+    
+    print("[INIT] 라이다 스캔(SCAN) 명령 전송...")
+    lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
     
-    # ★ NEW: 출발 직전 yaw 초기화 - 로봇을 GOAL 방향으로 정렬해 두기
-    print("[INFO] Yaw 초기화 중... 로봇을 통로와 정렬해 주세요.")
+    print("[INIT] 아두이노로 Yaw 초기화 명령 전송...")
     reset_yaw()
     
-    print("[INFO] 자율 주행 시작! (정지하려면 Ctrl+C)")
-
+    print("[INFO] 자율 주행 시작! (라이다 데이터 수신 대기 중...)")
     scan_data = []
-    debug_counter = 0   # ★ NEW: 디버그 프린트 카운터
+    debug_counter = 0
 
     try:
         while True:
