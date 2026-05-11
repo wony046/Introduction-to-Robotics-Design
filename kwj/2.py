@@ -18,7 +18,7 @@ SAFE_DISTANCE = 400
 MAX_SPEED = 250          
 AVOID_SPEED = 140        
 ESCAPE_SPEED = 90       
-STEER_GAIN = 1.7         
+STEER_GAIN = 1.6         
 
 ROBOT_HALF_WIDTH = 130   
 
@@ -70,11 +70,11 @@ def calculate_steering(scan_data):
         left_openness = sum(bins[a] for a in range(10, 91, 10))
         right_openness = sum(bins[a] for a in range(-90, 0, 10))
 
-        # ★ S자 코스 돌파: 반대쪽이 압도적으로(800 이상) 넓으면 관성 무시하고 핸들 꺾기!
-        if left_openness > right_openness + 800:
+        # ★ S자 코스 돌파: 반대쪽이 압도적으로(700 이상) 넓으면 관성 무시하고 핸들 꺾기!
+        if left_openness > right_openness + 700:
             emergency_steer = 75
             last_avoid_dir = -1
-        elif right_openness > left_openness + 800:
+        elif right_openness > left_openness + 700:
             emergency_steer = -75
             last_avoid_dir = 1
         else:
