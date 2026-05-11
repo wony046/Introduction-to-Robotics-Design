@@ -1,46 +1,41 @@
 """
-RPLIDAR C1 장애물 회피 코드 (v4)
+RPLIDAR C1 장애물 회피 코드 (v5)
 포트: 라이다 /dev/ttyUSB0 / 아두이노 /dev/ttyS0 (UART GPIO14/15)
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[통신 구조]
-  라즈베리파이 → 아두이노:
-    "v w\n"      : 정상 속도 명령  (예: "0.20 0.52\n")
-    "T180L\n"    : 왼쪽 180도 회전 명령
-    "T180R\n"    : 오른쪽 180도 회전 명령
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+[막힘 감지 - LiDAR 공간 기반]
 
-  아두이노 → 라즈베리파이:
-    "H:XX.X\n"   : 현재 헤딩 각도 (도), 200ms 주기 전송
-    "DONE:T180\n": 180도 회전 완료 신호
+  이전: |헤딩| > 60° + 4초 → 오판 가능성 높음
+  변경: 정면 180° 스캔에서 통과 가능한 경로가 없을 때
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-[추가된 알고리즘]
+  판단 방법:
+    각 방향에서 STUCK_CLEAR_DIST(400mm) 이상 → "열림"
+    연속으로 STUCK_CLEAR_ANGLE(30°) 이상 열린 구간 → 통과 가능
+    그런 구간이 하나도 없으면 → 전진 불가 → 막힘
 
-① 헤딩 우선 방향 선택
-  - 아두이노에서 수신한 헤딩값 활용
-  - |헤딩| > HEADING_CAUTION_DEG 이면 여유공간 무시하고
-    헤딩을 0으로 줄이는 방향을 우선 선택
-  - 예) 헤딩 +75° (왼쪽으로 많이 돌았음)
-        → 오른쪽(w < 0) 우선 선택 (헤딩 감소 방향)
+  단점 없이 장점:
+    - 헤딩과 무관하게 실제 공간으로 판단
+    - 코너 회전 중 오발동 없음
+    - 반응 시간 단축 (STUCK_TIMEOUT 2초)
 
-② 진행 불가 판단 → 180도 회전
-  - 판단 조건:
-      장애물이 위험구역에 STUCK_TIMEOUT 초 이상 지속
-      AND |헤딩| > HEADING_CAUTION_DEG (헤딩 한계 근접)
-  - 안전 방향 결정 (전체 360도 스캔 사용):
-      왼쪽 반구(0°~180°)와 오른쪽 반구(-180°~0°)에서
-      가장 가까운 장애물 거리 비교
-      → 더 멀리 비어있는 쪽으로 회전
-  - T180L 또는 T180R 명령 전송 후 DONE:T180 수신 대기
+[탈출 회전 - 최적 방향으로 최소 각도 회전]
 
-[회피각 계산]
-  delta_horiz = threshold - n_horiz + HORIZ_EXTRA
-  avoid_angle = atan2(delta_horiz, n_fwd)
-  → 실제 추가 필요 수평거리 기반, 더 정확한 회피각
+  이전: 항상 180도 고정 회전 (T180L/R)
+  변경: 360도 스캔에서 가장 넓은 열린 섹터를 찾아 그 방향으로 회전
 
-[직사각형 위험구역]
-  일반: 전방 800mm × 수평 120mm
-  긴급: 전방 125mm × 수평 110mm (속도 감소 + 전반 감속)
+  탈출 각도 계산:
+    전체 360도를 ANGLE_STEP 간격으로 순환 탐색
+    ESCAPE_CLEAR_DIST(500mm) 이상인 연속 구간 중 가장 넓은 섹터 선택
+    그 섹터 중심 방향이 목표 회전 각도
+
+  실행:
+    Arduino에 "ESC\n" 전송 → 헤딩 리셋 + 헤딩가드 일시 비활성
+    v=0, w=±ESCAPE_W 전송
+    Arduino 헤딩 피드백으로 목표 도달 확인 → 정지
+
+[통신]
+  RPi → Arduino: "v w\n" / "ESC\n"
+  Arduino → RPi: "H:XX.X\n"
 """
 
 import serial
@@ -54,40 +49,55 @@ BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 9600
 
 # ── 로봇 파라미터 ─────────────────────────────────────────────────────────────
-ROBOT_HALF_WIDTH = 110      # 라이다 중심 ~ 로봇 좌우 끝 (mm)
-SAFETY_MARGIN    = 10       # 장애물 인식 안전 여유 (mm) → threshold = 120mm
+ROBOT_HALF_WIDTH  = 110    # 라이다 중심 ~ 좌우 끝 (mm)
+ROBOT_FRONT_DIST  = 120    # 라이다 중심 ~ 정면 끝 (mm)  로봇 세로 230mm 중 앞쪽
+SAFETY_MARGIN     = 10     # threshold = 120mm
 
 # ── 직사각형 위험구역 ─────────────────────────────────────────────────────────
-DETECTION_RANGE     = 1500  # LiDAR 최대 신뢰 거리 (mm)
-FORWARD_RANGE       = 800   # 일반 위험구역 전방 깊이 (mm)
-EMERGENCY_FWD_RANGE = 125   # 긴급 회피구역 전방 깊이 (mm)
-EMERGENCY_HORIZ_RANGE = 110 # 긴급 회피구역 수평 깊이 (mm)
+DETECTION_RANGE       = 1500
+FORWARD_RANGE         = 800
+EMERGENCY_FWD_RANGE   = 125
+EMERGENCY_HORIZ_RANGE = 110
 
 # ── 속도 파라미터 ─────────────────────────────────────────────────────────────
-FORWARD_SPEED       = 0.20  # 기본 전진 선속도 (m/s)
-EMERGENCY_MIN_SPEED = 0.05  # 긴급 상황 최소 속도 (m/s)
-W_GAIN              = 2.0   # 회피각 → 각속도 게인
-MAX_W               = 2.0   # 최대 각속도 (rad/s)
-HORIZ_EXTRA         = 20    # 회피각 계산 수평 이동량 여유 (mm)
+FORWARD_SPEED       = 0.20
+EMERGENCY_MIN_SPEED = 0.05
+W_GAIN              = 2.0
+MAX_W               = 2.0
+HORIZ_EXTRA         = 20
 
-# ── 헤딩 우선 방향 파라미터 ──────────────────────────────────────────────────
-HEADING_CAUTION_DEG = 60.0  # 이 이상이면 헤딩 감소 방향 우선 (도)
+# ── 헤딩 우선 방향 (점수제) ──────────────────────────────────────────────────
+# 여유공간 점수에 헤딩 보정 보너스를 더해 방향 결정
+# 차이가 크면 여유공간이 이기고, 비슷하면 헤딩 감소 방향이 이김
+HEADING_WEIGHT = 1.5   # 헤딩 1도 = 여유공간 1.5도 상당 보너스
 
-# ── 진행 불가 / 180도 회전 파라미터 ──────────────────────────────────────────
-STUCK_TIMEOUT    = 4.0      # 위험구역 지속 + 헤딩 한계 근접 시 180도 회전 판단 (초)
-TURN180_W        = 1.2      # 180도 회전 시 각속도 (rad/s)
-TURN_SAFE_DIST   = 250      # 180도 회전 안전 확인 최소 장애물 거리 (mm)
-TURN180_TIMEOUT  = 8.0      # 180도 회전 최대 대기 시간 (초)
+# ── 헤딩 > 90° 능동 복귀 ─────────────────────────────────────────────────────
+HEADING_OVER_90  = 90.0   # deg: 이 이상이면 장애물 확인 후 복귀 회전
+CORRECTION_W     = 0.8    # rad/s: 복귀 회전 각속도
+CORRECTION_CHECK = 350    # mm: 복귀 방향 안전 확인 거리
+
+# ── 막힘 감지 (LiDAR 공간 기반) ──────────────────────────────────────────────
+# 열린 구간의 실제 물리 너비(코사인 법칙)로 로봇 통과 가능 여부 판단
+STUCK_CLEAR_DIST = 400    # mm: 이 거리 이상이면 열린 공간으로 간주
+STUCK_MAX_SAFETY = 30     # mm: 최대 안전 여유 (장애물 원거리 시 적용)
+                           #     경계 장애물과의 거리에 비례해 선형 감소
+                           #     d=0 이면 여유 0mm → 최소너비 = 로봇 폭(220mm)
+STUCK_TIMEOUT    = 2.0    # sec
+
+# ── 탈출 회전 ─────────────────────────────────────────────────────────────────
+ESCAPE_CLEAR_DIST  = 500   # mm: 탈출 방향 판단 최소 거리
+ESCAPE_W           = 1.0   # rad/s: 탈출 회전 각속도
+ESCAPE_TIMEOUT     = 15.0  # sec: 탈출 회전 최대 시간
+ESCAPE_TOLERANCE   = 8.0   # deg: 목표 각도 허용 오차
 
 # ── 스캔 파라미터 ─────────────────────────────────────────────────────────────
 SCAN_HALF_ANGLE = 90
 ANGLE_STEP      = 5
-SEND_INTERVAL   = 0.1       # 명령 전송 주기 (초)
+SEND_INTERVAL   = 0.1
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── 전역 상태 ─────────────────────────────────────────────────────────────────
-arduino_heading_deg = 0.0   # 아두이노에서 수신한 헤딩 (도)
-stuck_since         = None  # 막힘 시작 시각
+arduino_heading_deg = 0.0
+stuck_since         = None
 
 
 def normalize_angle(angle):
@@ -123,11 +133,7 @@ def decompose(angle_norm_deg, distance_mm):
 
 
 def read_arduino(arduino):
-    """
-    아두이노에서 데이터 수신 (non-blocking)
-    "H:XX.X\n" 형식으로 헤딩 수신 → arduino_heading_deg 업데이트
-    반환: 수신된 특수 메시지 문자열 또는 None
-    """
+    """아두이노 헤딩 데이터 수신 (non-blocking)"""
     global arduino_heading_deg
     msg = None
     while arduino.in_waiting > 0:
@@ -136,88 +142,319 @@ def read_arduino(arduino):
             if line.startswith('H:'):
                 arduino_heading_deg = float(line[2:])
             elif line:
-                msg = line   # DONE:T180 등 특수 메시지
+                msg = line
         except Exception:
             pass
     return msg
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 막힘 감지: LiDAR 공간 기반
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def is_path_blocked(front_scan_points):
+    """
+    정면 180도 스캔에서 로봇이 물리적으로 통과 가능한 열린 구간이 있는지 확인
+
+    [계산 방법 — 코사인 법칙]
+
+      라이다(원점), 열린 구간 왼쪽 경계 장애물(d_L, α), 오른쪽 경계 장애물(d_R, β)
+      두 장애물 사이의 실제 거리(열린 구간 너비):
+
+        w = √(d_L² + d_R² − 2·d_L·d_R·cos(θ))   θ = β − α
+
+      [너비 판정 — 거리 비례 안전 여유]
+      d_ref     = min(d_L, d_R)           (두 경계 중 더 가까운 쪽)
+      safety    = STUCK_MAX_SAFETY × min(d_ref / STUCK_CLEAR_DIST, 1.0)
+      min_gap   = ROBOT_HALF_WIDTH × 2 + safety
+
+      d_ref=0   → safety=0mm  → min_gap=220mm (로봇 폭 그대로, 코앞이면 통과 시도)
+      d_ref=400 → safety=30mm → min_gap=250mm (멀리 있으면 여유 있게 판단)
+
+    [경계 처리]
+      - 스캔 시작(-90°)이 열린 구간이면: 왼쪽 경계를 STUCK_CLEAR_DIST로 추정
+      - 스캔 끝(+90°)까지 열린 구간이면: 오른쪽 경계를 STUCK_CLEAR_DIST로 추정
+      → 보수적으로 처리 (실제보다 좁게 추정)
+
+    Returns: True(막힘) / False(통과 가능)
+    """
+    scan_dict = {}
+    for angle_norm, dist in front_scan_points:
+        if dist <= 0:
+            continue
+        bucket = round(angle_norm / ANGLE_STEP) * ANGLE_STEP
+        if bucket not in scan_dict or dist < scan_dict[bucket]:
+            scan_dict[bucket] = dist
+
+    angles  = list(range(-SCAN_HALF_ANGLE, SCAN_HALF_ANGLE + ANGLE_STEP, ANGLE_STEP))
+    in_open = False
+    l_angle = None   # 열린 구간 왼쪽 경계 장애물 각도
+    l_dist  = None   # 열린 구간 왼쪽 경계 장애물 거리
+
+    for idx, a in enumerate(angles):
+        d       = scan_dict.get(a, 0)
+        is_open = (d >= STUCK_CLEAR_DIST)
+
+        if not in_open:
+            if is_open:
+                # 열린 구간 시작 → 직전 버킷이 왼쪽 경계 장애물
+                in_open = True
+                if idx > 0:
+                    prev_a  = angles[idx - 1]
+                    l_angle = prev_a
+                    l_dist  = scan_dict.get(prev_a, 1) or 1
+                else:
+                    # 스캔 첫 번째부터 열림 → 왼쪽 경계를 보수적으로 추정
+                    l_angle = a - ANGLE_STEP
+                    l_dist  = STUCK_CLEAR_DIST
+
+        else:  # in_open
+            if not is_open:
+                # 열린 구간 종료 → 현재 버킷이 오른쪽 경계 장애물
+                r_angle = a
+                r_dist  = d or 1
+
+                theta = math.radians(r_angle - l_angle)
+                if theta > 0 and l_dist > 0:
+                    w = math.sqrt(l_dist**2 + r_dist**2
+                                  - 2 * l_dist * r_dist * math.cos(theta))
+                    # 거리 비례 안전 여유: 경계가 가까울수록 여유 줄어듦
+                    d_ref   = min(l_dist, r_dist)
+                    safety  = STUCK_MAX_SAFETY * min(d_ref / STUCK_CLEAR_DIST, 1.0)
+                    min_gap = ROBOT_HALF_WIDTH * 2 + safety
+                    print(f"  [열린구간] {l_angle}°~{r_angle-ANGLE_STEP}°  "
+                          f"d_L={l_dist:.0f} d_R={r_dist:.0f} "
+                          f"너비={w:.0f}mm 기준={min_gap:.0f}mm "
+                          + ("✓통과가능" if w >= min_gap else "✗협소"))
+                    if w >= min_gap:
+                        return False   # 통과 가능
+
+                in_open = False
+
+    # 스캔 끝까지 열린 구간인 경우
+    if in_open and l_dist:
+        r_angle = SCAN_HALF_ANGLE + ANGLE_STEP
+        r_dist  = STUCK_CLEAR_DIST   # 보수적 추정
+        theta   = math.radians(r_angle - l_angle)
+        if theta > 0:
+            w = math.sqrt(l_dist**2 + r_dist**2
+                          - 2 * l_dist * r_dist * math.cos(theta))
+            d_ref   = min(l_dist, r_dist)
+            safety  = STUCK_MAX_SAFETY * min(d_ref / STUCK_CLEAR_DIST, 1.0)
+            min_gap = ROBOT_HALF_WIDTH * 2 + safety
+            print(f"  [열린구간끝] {l_angle}°~{SCAN_HALF_ANGLE}°  "
+                  f"d_L={l_dist:.0f} 너비≈{w:.0f}mm 기준={min_gap:.0f}mm "
+                  + ("✓통과가능" if w >= min_gap else "✗협소"))
+            if w >= min_gap:
+                return False
+
+    return True   # 통과 가능한 구간 없음 → 막힘
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 탈출 방향 계산: 가장 넓은 열린 섹터 중심
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def find_escape_angle(all_scan_points):
+    """
+    360도 스캔에서 가장 넓은 열린 섹터를 찾아 그 중심 방향 반환
+
+    [알고리즘]
+    1. 전체 -180°~+180°를 ANGLE_STEP 간격으로 분할
+    2. 각 버킷이 ESCAPE_CLEAR_DIST 이상이면 "열림"
+    3. 순환 배열에서 가장 긴 연속 열린 구간 탐색
+    4. 그 구간의 중심 각도를 목표 방향으로 반환
+
+    Returns: target_angle_deg (현재 헤딩 0° 기준 상대 각도)
+    """
+    scan_dict = {}
+    for angle_norm, dist in all_scan_points:
+        if dist <= 0:
+            continue
+        bucket = round(angle_norm / ANGLE_STEP) * ANGLE_STEP
+        if bucket not in scan_dict or dist < scan_dict[bucket]:
+            scan_dict[bucket] = dist
+
+    # 전체 360도 각도 목록 (-180 ~ +175)
+    all_angles = list(range(-180, 180, ANGLE_STEP))
+    n = len(all_angles)
+
+    # 각 버킷의 열림 여부
+    open_flags = [
+        scan_dict.get(a, 0) >= ESCAPE_CLEAR_DIST
+        for a in all_angles
+    ]
+
+    # 순환 배열에서 가장 긴 연속 열린 구간 탐색
+    best_len   = 0
+    best_start = 0
+
+    for start in range(n):
+        length = 0
+        for i in range(n):
+            if open_flags[(start + i) % n]:
+                length += 1
+            else:
+                break
+        if length > best_len:
+            best_len   = length
+            best_start = start
+
+    if best_len == 0:
+        # 전 방향이 막힘 → 정반대(180°)로
+        print("  [탈출] 열린 공간 없음 → 180° 회전")
+        return 180.0
+
+    # 가장 넓은 섹터의 중심 인덱스
+    center_idx   = (best_start + best_len // 2) % n
+    target_angle = all_angles[center_idx]
+
+    print(f"  [탈출방향] 최대 열린 섹터 {best_len * ANGLE_STEP}°  "
+          f"→ 목표각도 {target_angle}°")
+    return float(target_angle)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 탈출 회전 실행
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def execute_escape_rotation(arduino, all_scan_points):
+    """
+    막힘 탈출 회전 실행
+
+    1. find_escape_angle()로 최적 탈출 각도 계산
+    2. 아두이노에 "ESC\\n" 전송 (헤딩 리셋 + 헤딩가드 비활성)
+    3. v=0, w=±ESCAPE_W 전송
+    4. 아두이노 헤딩 피드백으로 목표 각도 도달 확인
+    5. 정지 후 정상 모드 복귀
+    """
+    global arduino_heading_deg, stuck_since
+
+    print("\n" + "="*52)
+    print("[ESCAPE] 전진 불가 감지 → 최적 방향 탈출 회전")
+
+    # 1. 탈출 각도 계산
+    target_deg = find_escape_angle(all_scan_points)
+    target_rad = math.radians(target_deg)
+    w_sign     = 1.0 if target_deg >= 0 else -1.0
+    dir_str    = "왼쪽" if w_sign > 0 else "오른쪽"
+    print(f"  회전 방향: {dir_str}  목표: {target_deg:.1f}°")
+
+    # 2. 아두이노 탈출 모드 진입 (헤딩 리셋 + 가드 비활성)
+    arduino.write(b"ESC\n")
+    time.sleep(0.15)
+
+    # 3. 회전 실행 (헤딩 모니터링)
+    t_start = time.time()
+    while time.time() - t_start < ESCAPE_TIMEOUT:
+        read_arduino(arduino)
+
+        current_hdg = abs(arduino_heading_deg)
+        target_abs  = abs(target_deg)
+
+        # 목표 각도 도달 여부 (허용 오차 ±ESCAPE_TOLERANCE°)
+        if current_hdg >= target_abs - ESCAPE_TOLERANCE:
+            print(f"  [완료] 헤딩 {arduino_heading_deg:.1f}° → 목표 {target_deg:.1f}°")
+            break
+
+        cmd = f"0.00 {w_sign * ESCAPE_W:.2f}\n"
+        arduino.write(cmd.encode())
+        time.sleep(SEND_INTERVAL)
+
+    else:
+        print(f"  [타임아웃] 최대 시간 초과, 강제 종료")
+
+    # 4. 정지
+    arduino.write(b"0.00 0.00\n")
+    time.sleep(0.3)
+    stuck_since = None
+    print("="*52 + "\n")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 헤딩 > 90° 능동 복귀: 안전한 회전 방향 결정
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def get_recovery_direction(heading_deg, front_scan_points):
+    """
+    헤딩이 90°를 넘었을 때 0°로 복귀하는 안전한 방향 결정
+
+    [자연 방향]
+      heading > 0 (왼쪽으로 돌아있음) → 오른쪽(w<0)으로 회전해 0°로 복귀
+      heading < 0 (오른쪽으로 돌아있음) → 왼쪽(w>0)
+
+    [LiDAR 안전 확인]
+      회전할 방향 쪽 (오른쪽 회전 → 음수 각도 구간) 에
+      RECOVERY_SAFE_DIST 이내 장애물 있으면 → 반대 방향 시도
+
+    Returns: w 값 (+: 왼쪽, -: 오른쪽)
+    """
+    natural_sign = -1.0 if heading_deg > 0 else 1.0   # 자연 방향 부호
+
+    scan_dict = {}
+    for angle_norm, dist in front_scan_points:
+        if dist <= 0:
+            continue
+        bucket = round(angle_norm / ANGLE_STEP) * ANGLE_STEP
+        if bucket not in scan_dict or dist < scan_dict[bucket]:
+            scan_dict[bucket] = dist
+
+    def side_blocked(sign):
+        """sign < 0: 오른쪽(음수각도) 확인, sign > 0: 왼쪽(양수각도) 확인"""
+        if sign < 0:
+            check = range(-ANGLE_STEP, -SCAN_HALF_ANGLE - ANGLE_STEP, -ANGLE_STEP)
+        else:
+            check = range(ANGLE_STEP, SCAN_HALF_ANGLE + ANGLE_STEP, ANGLE_STEP)
+        return any(
+            0 < scan_dict.get(a, DETECTION_RANGE + 1) < RECOVERY_SAFE_DIST
+            for a in check
+        )
+
+    if not side_blocked(natural_sign):
+        dir_str = "오른쪽" if natural_sign < 0 else "왼쪽"
+        print(f"  [복귀] 헤딩:{heading_deg:.1f}° → {dir_str} 회전 (자연방향 안전)")
+        return natural_sign * RECOVERY_W
+    else:
+        alt_sign = -natural_sign
+        dir_str  = "오른쪽" if alt_sign < 0 else "왼쪽"
+        print(f"  [복귀] 자연방향 막힘 → {dir_str} 우회 회전")
+        return alt_sign * RECOVERY_W
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 회피 방향 결정 (점수제)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def select_direction(left_clear, right_clear, heading_deg):
     """
-    회피 방향 결정
+    여유공간 + 헤딩 보정 점수로 회피 방향 결정
 
-    우선순위:
-    1. 헤딩이 HEADING_CAUTION_DEG 초과 → 헤딩 감소 방향 강제
-       예) 헤딩 = +75° (좌회전 많이 됨) → 오른쪽(w < 0) 우선
-       예) 헤딩 = -75° (우회전 많이 됨) → 왼쪽(w > 0) 우선
-    2. 그 외 → 여유공간 넓은 쪽 선택
+    left_score  = left_clear  + max(0, -heading_deg) × HEADING_WEIGHT
+    right_score = right_clear + max(0,  heading_deg) × HEADING_WEIGHT
+
+    heading > 0 (왼쪽으로 돌아있음) → 오른쪽에 헤딩 보너스
+    heading < 0 (오른쪽으로 돌아있음) → 왼쪽에 헤딩 보너스
+
+    효과:
+      여유공간 차이가 크면 여유공간 방향이 이김
+      여유공간이 비슷하면 헤딩 감소 방향이 이김
+      헤딩이 클수록 보너스가 커져 자연스럽게 헤딩 복귀 유도
     """
-    if heading_deg > HEADING_CAUTION_DEG:
-        print(f"  [헤딩우선] 헤딩:{heading_deg:.1f}° > {HEADING_CAUTION_DEG}° → 오른쪽 강제")
-        return -1.0   # 오른쪽 (헤딩 감소 방향)
-    elif heading_deg < -HEADING_CAUTION_DEG:
-        print(f"  [헤딩우선] 헤딩:{heading_deg:.1f}° < -{HEADING_CAUTION_DEG}° → 왼쪽 강제")
-        return 1.0    # 왼쪽 (헤딩 증가 방향 = 헤딩 절댓값 감소)
-    else:
-        return 1.0 if left_clear >= right_clear else -1.0
+    left_score  = left_clear  + max(0.0, -heading_deg) * HEADING_WEIGHT
+    right_score = right_clear + max(0.0,  heading_deg) * HEADING_WEIGHT
+
+    bonus_side = "R" if heading_deg > 0 else "L"
+    bonus_val  = abs(heading_deg) * HEADING_WEIGHT
+    print(f"  [방향점수] L={left_score:.0f}  R={right_score:.0f}"
+          f"  (여유 L={left_clear}° R={right_clear}°"
+          f"  헤딩보너스 {bonus_side}+{bonus_val:.0f})")
+
+    return 1.0 if left_score >= right_score else -1.0
 
 
-def find_safe_180_direction(all_scan_points):
-    """
-    전체 360도 스캔에서 180도 회전에 안전한 방향 결정
-
-    [기하학적 의미]
-      왼쪽 회전(반시계): 로봇 왼쪽·후방 영역(0°~180°)이 쓸려감
-      오른쪽 회전(시계): 로봇 오른쪽·후방 영역(-180°~0°)이 쓸려감
-
-      각 반구에서 TURN_SAFE_DIST 이내 장애물 수 비교
-      → 장애물이 더 적고/멀리 있는 쪽으로 회전
-
-    반환: 'L' (왼쪽 회전) 또는 'R' (오른쪽 회전)
-    """
-    left_obstacles  = []   # 왼쪽 반구 (0°~180°) 장애물 거리
-    right_obstacles = []   # 오른쪽 반구 (-180°~0°) 장애물 거리
-
-    for angle_norm, dist in all_scan_points:
-        if dist <= 0 or dist > DETECTION_RANGE:
-            continue
-        if 0 < angle_norm <= 180:
-            left_obstacles.append(dist)
-        elif -180 <= angle_norm < 0:
-            right_obstacles.append(dist)
-
-    # 안전 거리 이내 장애물 수 비교
-    left_danger  = sum(1 for d in left_obstacles  if d < TURN_SAFE_DIST)
-    right_danger = sum(1 for d in right_obstacles if d < TURN_SAFE_DIST)
-
-    # 가장 가까운 장애물 거리 비교 (장애물 없으면 무한대)
-    left_min  = min(left_obstacles,  default=float('inf'))
-    right_min = min(right_obstacles, default=float('inf'))
-
-    print(f"  [T180판단] 왼쪽반구 위험{left_danger}개(최근:{left_min:.0f}mm) "
-          f"오른쪽반구 위험{right_danger}개(최근:{right_min:.0f}mm)")
-
-    # 위험 수가 같으면 최근접 장애물 거리로 판단
-    if left_danger < right_danger:
-        return 'L'
-    elif right_danger < left_danger:
-        return 'R'
-    else:
-        return 'L' if left_min >= right_min else 'R'
-
-
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# v/w 명령 계산
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def find_vw_command(scan_points, heading_deg):
-    """
-    정면 스캔 + 현재 헤딩 → (v, w, danger_with_heading_limit) 반환
-
-    반환: (v_m_s, w_rad_s, is_stuck_condition)
-      is_stuck_condition: True면 헤딩 한계+장애물 동시 조건 (막힘 카운터 증가용)
-    """
-    global arduino_heading_deg
-
+    """정면 스캔 + 헤딩 → (v m/s, w rad/s) 반환"""
     threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN   # 120mm
 
-    # ── 1. 직사각형 위험구역 장애물 수집 ────────────────────────────────────
+    # 위험 포인트 수집 (직사각형 구역)
     danger_points = []
     for angle_norm, dist in scan_points:
         if dist <= 0 or dist > DETECTION_RANGE:
@@ -227,29 +464,28 @@ def find_vw_command(scan_points, heading_deg):
             danger_points.append((angle_norm, dist, horiz, fwd))
 
     if not danger_points:
-        return FORWARD_SPEED, 0.0, False   # 장애물 없음 → 직진
+        return FORWARD_SPEED, 0.0
 
-    # ── 2. 가장 가까운 장애물 ────────────────────────────────────────────────
+    # 가장 가까운 장애물
     nearest                              = min(danger_points, key=lambda p: p[1])
     nearest_angle, ref_dist, n_horiz, n_fwd = nearest
 
     print(f"  [기준장애물] 각도:{nearest_angle:.1f}°  "
           f"직선:{ref_dist:.0f}mm  전방:{n_fwd:.0f}mm  수평:{n_horiz:.0f}mm")
 
-    # ── 3. 긴급 회피구역 판정 ────────────────────────────────────────────────
+    # 긴급구역 판정
     in_emergency = (n_fwd <= EMERGENCY_FWD_RANGE and n_horiz <= EMERGENCY_HORIZ_RANGE)
-
     if in_emergency:
         ratio       = n_fwd / EMERGENCY_FWD_RANGE
         min_scale   = EMERGENCY_MIN_SPEED / FORWARD_SPEED
         speed_scale = min_scale + (1.0 - min_scale) * ratio
         v           = FORWARD_SPEED * speed_scale
-        print(f"  [긴급회피] 전방:{n_fwd:.0f}mm  스케일:{speed_scale:.2f}  v={v:.2f}m/s")
+        print(f"  [긴급회피] 스케일:{speed_scale:.2f}  v={v:.2f}m/s")
     else:
         speed_scale = 1.0
         v           = FORWARD_SPEED
 
-    # ── 4. 좌우 여유공간 계산 ────────────────────────────────────────────────
+    # 좌우 여유공간
     scan_dict = {}
     for angle_norm, dist in scan_points:
         if dist <= 0:
@@ -268,99 +504,53 @@ def find_vw_command(scan_points, heading_deg):
 
     print(f"  [여유공간] 왼쪽:{left_clear}°  오른쪽:{right_clear}°  헤딩:{heading_deg:.1f}°")
 
-    # ── 5. 회피각 계산 (수평·수직 이동 기반 atan2) ──────────────────────────
-    #   delta_horiz = threshold - n_horiz + HORIZ_EXTRA
-    #     (실제 추가 필요 수평 이동량 + 여유 20mm)
-    #   avoid_angle = atan2(delta_horiz, n_fwd)
-    #     (이 각도만큼 꺾으면 obstacle을 여유 있게 통과)
+    # 회피각 계산: atan2(delta_h, n_fwd)
     delta_horiz = threshold - n_horiz + HORIZ_EXTRA
     avoid_angle = math.atan2(max(delta_horiz, 1.0), max(n_fwd, 1.0))
 
-    # ── 6. 회피 방향 결정 (헤딩 우선) ───────────────────────────────────────
-    w_sign = select_direction(left_clear, right_clear, heading_deg)
-    dir_str = "좌회전" if w_sign > 0 else "오른쪽"
+    # 방향 결정 (헤딩 우선)
+    w_sign  = select_direction(left_clear, right_clear, heading_deg)
+    dir_str = "좌회전" if w_sign > 0 else "우회전"
 
-    # ── 7. 각속도 계산 + 긴급 시 전반 감속 ──────────────────────────────────
-    w = w_sign * min(W_GAIN * avoid_angle, MAX_W)
-    w *= speed_scale   # 긴급 시 v와 동일 비율로 w도 감소
+    # w 계산 + 긴급 스케일
+    w = w_sign * min(W_GAIN * avoid_angle, MAX_W) * speed_scale
 
-    # ── 8. 막힘 조건 판단 ────────────────────────────────────────────────────
-    #   헤딩 한계에 근접 + 장애물 있음 → 막힘 가능성
-    is_stuck_cond = abs(heading_deg) > HEADING_CAUTION_DEG
+    print(f"  [회피] {dir_str}  각도:{math.degrees(avoid_angle):.1f}°  "
+          f"v:{v:.2f}  w:{w:.2f}"
+          + ("  [긴급]" if in_emergency else ""))
 
-    print(f"  [회피명령] {dir_str}  "
-          f"회피각:{math.degrees(avoid_angle):.1f}°  "
-          f"v:{v:.2f}m/s  w:{w:.2f}rad/s"
-          + ("  [긴급]" if in_emergency else "")
-          + ("  [헤딩한계]" if is_stuck_cond else ""))
-
-    return v, w, is_stuck_cond
-
-
-def execute_180_turn(arduino, lidar, all_scan_points):
-    """
-    180도 회전 실행
-
-    1. 전체 360도 스캔으로 안전 방향 결정
-    2. T180L 또는 T180R 명령 전송
-    3. DONE:T180 신호 수신 또는 타임아웃 대기
-    4. 완료 후 정상 모드 복귀
-    """
-    print("\n" + "="*50)
-    print("[STUCK] 진행 불가 감지 → 180도 회전 시작")
-
-    # 안전 방향 결정
-    turn_dir = find_safe_180_direction(all_scan_points)
-    cmd      = f"T180{turn_dir}\n"
-    arduino.write(cmd.encode())
-    print(f"[T180] {turn_dir} 방향 180도 회전 명령 전송")
-
-    # 완료 대기 (DONE:T180 수신 또는 타임아웃)
-    t_start = time.time()
-    while time.time() - t_start < TURN180_TIMEOUT:
-        msg = read_arduino(arduino)
-        if msg == "DONE:T180":
-            print("[T180] 180도 회전 완료 신호 수신")
-            break
-        time.sleep(0.05)
-    else:
-        print("[T180] 타임아웃 → 강제 복귀")
-        arduino.write(b"0.00 0.00\n")
-
-    print("="*50 + "\n")
+    return v, w
 
 
 def main():
     global stuck_since, arduino_heading_deg
 
-    print("=== RPLIDAR 장애물 회피 v4 ===")
+    print("=== RPLIDAR 장애물 회피 v5 ===")
     print(f"  라이다 포트    : {LIDAR_PORT}")
-    print(f"  아두이노 포트  : {ARDUINO_PORT}  (UART GPIO14/15)")
-    print(f"  전진 속도      : {FORWARD_SPEED} m/s")
-    print(f"  충돌 기준      : {ROBOT_HALF_WIDTH + SAFETY_MARGIN} mm (수평)")
-    print(f"  일반 위험구역  : 전방 {FORWARD_RANGE}mm × 수평 {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm")
-    print(f"  긴급 회피구역  : 전방 {EMERGENCY_FWD_RANGE}mm × 수평 {EMERGENCY_HORIZ_RANGE}mm")
-    print(f"  헤딩 우선 전환 : ±{HEADING_CAUTION_DEG}° 초과 시")
-    print(f"  막힘 판단 시간 : {STUCK_TIMEOUT}초")
-    print("=" * 48)
+    print(f"  아두이노 포트  : {ARDUINO_PORT}")
+    print(f"  충돌 기준      : {ROBOT_HALF_WIDTH + SAFETY_MARGIN} mm")
+    print(f"  위험구역       : 전방 {FORWARD_RANGE}mm × 수평 {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm")
+    print(f"  긴급구역       : 전방 {EMERGENCY_FWD_RANGE}mm × 수평 {EMERGENCY_HORIZ_RANGE}mm")
+    print(f"  막힘감지       : 열린구간 너비 < {ROBOT_HALF_WIDTH*2}~{ROBOT_HALF_WIDTH*2+STUCK_MAX_SAFETY}mm → {STUCK_TIMEOUT}초 지속 시 탈출")
+    print(f"  탈출 각속도    : {ESCAPE_W} rad/s (최적 방향)")
+    print("=" * 50)
 
     lidar   = serial.Serial(LIDAR_PORT,   BAUDRATE_LIDAR,   timeout=1)
     arduino = serial.Serial(ARDUINO_PORT, BAUDRATE_ARDUINO, timeout=1)
     time.sleep(2)
 
-    lidar.write(bytes([0xA5, 0x40]))    # RESET
+    lidar.write(bytes([0xA5, 0x40]))
     time.sleep(1)
-    lidar.write(bytes([0xA5, 0x20]))    # START SCAN
+    lidar.write(bytes([0xA5, 0x20]))
     print("스캔 시작...")
     lidar.read(7)
 
-    scan_points     = []            # 현재 스캔 버퍼 (360도 전체)
-    last_send       = time.time()
-    last_cmd_str    = ""
+    scan_points  = []
+    last_send    = time.time()
+    last_cmd_str = ""
 
     try:
         while True:
-            # 아두이노 데이터 수신 (헤딩 업데이트)
             read_arduino(arduino)
 
             raw    = lidar.read(5)
@@ -372,11 +562,8 @@ def main():
             s_flag = raw[0] & 0x01
 
             if s_flag == 1 and scan_points:
-                # 전체 스캔 스냅샷 저장 (180도 회전 방향 결정에 사용)
-                all_scan_points = list(scan_points)
-
-                # 정면 180도 포인트만 추출
-                front_points = [
+                all_scan_points = list(scan_points)   # 전체 360도 스냅샷
+                front_points    = [
                     (a, d) for a, d in scan_points
                     if is_in_front(a) and d > 0
                 ]
@@ -384,36 +571,50 @@ def main():
                 now = time.time()
                 if now - last_send >= SEND_INTERVAL:
 
-                    v, w, is_stuck_cond = find_vw_command(
-                        front_points, arduino_heading_deg
-                    )
+                    # ── ① 헤딩 > 90°: 능동 복귀 우선 ──────────────────────
+                    if abs(arduino_heading_deg) > HEADING_OVER_90:
+                        recovery_w = get_recovery_direction(
+                            arduino_heading_deg, front_points
+                        )
+                        cmd = f"0.00 {recovery_w:.2f}\n"
+                        arduino.write(cmd.encode())
+                        print(f"[복귀모드] 헤딩:{arduino_heading_deg:.1f}°  "
+                              f"v=0  w={recovery_w:.2f}")
+                        last_cmd_str = cmd
+                        last_send    = now
+                        scan_points  = []
+                        continue
 
-                    # ── 막힘 감지 및 180도 회전 ───────────────────────────
-                    if is_stuck_cond:
+                    # ── ② 막힘 감지 (LiDAR 공간 기반) ─────────────────────
+                    blocked = is_path_blocked(front_points)
+
+                    if blocked:
                         if stuck_since is None:
                             stuck_since = now
-                            print(f"  [막힘시작] 헤딩:{arduino_heading_deg:.1f}° 막힘 카운터 시작")
+                            print("  [막힘시작] 통과 가능한 열린 구간 없음")
                         elif now - stuck_since >= STUCK_TIMEOUT:
-                            # 180도 회전 실행
-                            execute_180_turn(arduino, lidar, all_scan_points)
-                            stuck_since = None
+                            # 탈출 회전 실행
+                            execute_escape_rotation(arduino, all_scan_points)
                             last_cmd_str = ""
-                            last_send = time.time()
-                            scan_points = []
+                            last_send    = time.time()
+                            scan_points  = []
                             continue
+                        else:
+                            remaining = STUCK_TIMEOUT - (now - stuck_since)
+                            print(f"  [막힘대기] {remaining:.1f}초 후 탈출 회전")
                     else:
                         if stuck_since is not None:
-                            print(f"  [막힘해제] 카운터 리셋")
+                            print("  [막힘해제] 경로 열림")
                         stuck_since = None
 
-                    # ── 정상 명령 전송 ────────────────────────────────────
-                    cmd = f"{v:.2f} {w:.2f}\n"
+                    # ── ③ 정상 v/w 명령 ────────────────────────────────────
+                    v, w = find_vw_command(front_points, arduino_heading_deg)
+                    cmd  = f"{v:.2f} {w:.2f}\n"
                     arduino.write(cmd.encode())
 
                     if cmd != last_cmd_str:
-                        print(f"[전송] v={v:.2f}m/s  w={w:.2f}rad/s  "
-                              f"헤딩={arduino_heading_deg:.1f}°  "
-                              f"(포인트:{len(front_points)})")
+                        print(f"[전송] v={v:.2f}  w={w:.2f}  "
+                              f"헤딩={arduino_heading_deg:.1f}°")
                         last_cmd_str = cmd
 
                     last_send = now
