@@ -77,7 +77,53 @@ def is_scan_valid(scan_size: int) -> bool:
 
 
 # ============================================================
-# 6. VFH 핵심 함수들
+# 6. 좌/우 바퀴 PWM 혼합 함수
+# ============================================================
+
+def mix_drive(speed: int, steer_pwm: int) -> tuple[int, int]:
+    """
+    speed와 steer_pwm을 좌/우 바퀴 PWM으로 변환.
+
+    Arduino 프로토콜: "left,right\\n" (기존 "speed,steer\\n" 에서 변경)
+    Arduino 측 수정 필요:
+        int left  = Serial.parseInt();
+        int right = Serial.parseInt();
+
+    [speed = 0] 제자리 회전 (비상 모드)
+        left = +steer, right = -steer → 양 바퀴 반대 방향 의도적 회전
+
+    [speed > 0] 일반 주행
+        1단계: left = speed + steer, right = speed - steer
+        2단계: 느린 쪽 < MIN_WHEEL_SPEED 이면 양쪽을 동일하게 올림 (비율 유지)
+        3단계: 빠른 쪽 > MAX_SPEED 이면 비율대로 내림
+        → 어떤 경우에도 역방향·정지 없이 MIN_WHEEL_SPEED ~ MAX_SPEED 범위 보장
+    """
+    if speed == 0:
+        # 제자리 회전: 양 바퀴 반대 방향
+        return steer_pwm, -steer_pwm
+
+    left  = speed + steer_pwm
+    right = speed - steer_pwm
+
+    # [2단계] 느린 쪽 바퀴 최솟값 보장
+    slowest = min(left, right)
+    if slowest < MIN_WHEEL_SPEED:
+        delta  = MIN_WHEEL_SPEED - slowest
+        left  += delta
+        right += delta
+
+    # [3단계] 빠른 쪽 바퀴 최댓값 보장 (비율 그대로 축소)
+    fastest = max(left, right)
+    if fastest > MAX_SPEED:
+        scale = MAX_SPEED / fastest
+        left  = int(left  * scale)
+        right = int(right * scale)
+
+    return int(left), int(right)
+
+
+# ============================================================
+# 7. VFH 핵심 함수들
 # ============================================================
 
 def build_polar_histogram(scan_data: list) -> dict:
@@ -270,18 +316,18 @@ def calculate_steering(scan_data: list) -> tuple[int, int]:
     # ── 2. 비상 회피 (20cm 이내 코앞 장애물) ────────────────
     if front_emergency_dist < 200:
         if last_avoid_dir == -1:
-            steer = 75          # 계속 좌회전
+            steer = 75
         elif last_avoid_dir == 1:
-            steer = -75         # 계속 우회전
+            steer = -75
         else:
-            # 측면 공간이 넓은 쪽으로 회전
             if left_wall_min > right_wall_min:
                 steer          = 75
                 last_avoid_dir = -1
             else:
                 steer          = -75
                 last_avoid_dir = 1
-        return 0, steer
+        # speed=0: mix_drive가 제자리 회전(좌우 반대)으로 처리
+        return mix_drive(0, steer)
 
     # ── 3. VFH: 히스토그램 → 평활화 → Valley 탐색 ──────────
     hist     = build_polar_histogram(scan_data)
@@ -291,14 +337,13 @@ def calculate_steering(scan_data: list) -> tuple[int, int]:
 
     # ── 4-A. Valley 없음 → 측면 공간 기반 탈출 회전 ─────────
     if best_v is None:
-        # 전방이 완전히 막혔을 때 측면 여유 방향으로 회전
         if left_wall_min > right_wall_min:
             steer          = 60
             last_avoid_dir = -1
         else:
             steer          = -60
             last_avoid_dir = 1
-        return ESCAPE_SPEED, steer
+        return mix_drive(ESCAPE_SPEED, steer)
 
     # ── 4-B. 조향각 결정 ─────────────────────────────────────
     target_angle = valley_to_angle(best_v, target=0)
@@ -324,7 +369,6 @@ def calculate_steering(scan_data: list) -> tuple[int, int]:
     steer_pwm = int(final_angle * STEER_GAIN)
 
     # ── 5. 속도 결정 (front_clear_x 기반 3단계) ─────────────
-    # ★ 속도를 먼저 결정해야 steer 클램핑 범위를 알 수 있음
     if front_clear_x <= 400:
         speed = ESCAPE_SPEED
     elif abs(final_angle) <= 15 and front_clear_x > SAFE_DISTANCE:
@@ -332,18 +376,8 @@ def calculate_steering(scan_data: list) -> tuple[int, int]:
     else:
         speed = AVOID_SPEED
 
-    # ── 6. steer_pwm 클램핑 ──────────────────────────────────
-    # Arduino: left = speed + steer,  right = speed - steer
-    #
-    # 이전 방식: max(-speed, min(speed, steer))
-    # → steer = speed 일 때 right = 0 (바퀴 정지), 히스테리시스로 계속 유지됨
-    #
-    # 수정: steer 상한을 (speed - MIN_WHEEL_SPEED)로 제한
-    # → 느린 쪽 바퀴 = speed - steer_max = MIN_WHEEL_SPEED 로 항상 회전 유지
-    max_steer = max(0, speed - MIN_WHEEL_SPEED)
-    steer_pwm = max(-max_steer, min(max_steer, steer_pwm))
-
-    return speed, steer_pwm
+    # ── 6. 좌/우 PWM 변환 (mix_drive) ────────────────────────
+    return mix_drive(speed, steer_pwm)
 
 
 # ============================================================
@@ -386,8 +420,8 @@ def main():
                 scan_size = len(scan_data)
 
                 if is_scan_valid(scan_size):
-                    speed, steer = calculate_steering(scan_data)
-                    arduino.write(f"{speed},{steer}\n".encode('utf-8'))
+                    left, right = calculate_steering(scan_data)
+                    arduino.write(f"{left},{right}\n".encode('utf-8'))
                 else:
                     skipped_scans += 1
                     if skipped_scans % 10 == 0 and scan_history:
