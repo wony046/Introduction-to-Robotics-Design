@@ -55,7 +55,8 @@ def ransac_remove_walls(pts, iterations=40, thresh=35, min_inliers=15):
             p1, p2 = subset[idx[0]], subset[idx[1]]
             denom = np.linalg.norm(p2 - p1)
             if denom < 1: continue
-            dists = np.abs(np.cross(p2 - p1, p1 - subset) / denom)
+            d = p2 - p1  # [dx, dy]
+            dists = np.abs((d[0] * (p1[1] - subset[:, 1]) - d[1] * (p1[0] - subset[:, 0])) / denom)
             inliers = np.where(dists < thresh)[0].tolist()
             if len(inliers) > len(best_inliers):
                 best_inliers = inliers
