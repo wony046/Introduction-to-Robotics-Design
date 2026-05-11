@@ -147,14 +147,17 @@ def find_valleys(smoothed: dict) -> list[tuple[int, int]]:
             valley_start = a
             in_valley    = True
         elif not passable and in_valley:
-            width = (a - ANGLE_STEP) - valley_start
+            # 마지막 통과 가능 빈은 (a - ANGLE_STEP).
+            # 폭 = 마지막 bin 끝 - 첫 bin 시작 = a - valley_start
+            width = a - valley_start
             if width >= VALLEY_MIN_WIDTH:
                 valleys.append((valley_start, a - ANGLE_STEP))
             in_valley = False
 
     # 마지막 valley가 +90도까지 이어진 경우
     if in_valley:
-        width = 90 - valley_start
+        # +90도 bin 자체의 너비도 포함 (+ANGLE_STEP)
+        width = 90 - valley_start + ANGLE_STEP
         if width >= VALLEY_MIN_WIDTH:
             valleys.append((valley_start, 90))
 
@@ -191,7 +194,9 @@ def valley_to_angle(valley: tuple[int, int], target: int = 0) -> int:
     start, end = valley
     if start <= target <= end:
         return target
-    center = (start + end) // 2
+    # 중심각을 ANGLE_STEP 격자에 맞게 반올림
+    # 예) start=-10, end=+5 → round(-2.5/5)*5 = 0° (직진 우선)
+    center = round((start + end) / 2 / ANGLE_STEP) * ANGLE_STEP
     return center
 
 
