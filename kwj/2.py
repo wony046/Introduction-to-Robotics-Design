@@ -16,11 +16,11 @@ lidar_ser = serial.Serial(LIDAR_PORT, 460800, timeout=1)
 # ==========================================
 SAFE_DISTANCE = 400      
 MAX_SPEED = 250          
-AVOID_SPEED = 150        
-ESCAPE_SPEED = 100       
+AVOID_SPEED = 140        
+ESCAPE_SPEED = 90       
 STEER_GAIN = 1.7         
 
-ROBOT_HALF_WIDTH = 120   
+ROBOT_HALF_WIDTH = 130   
 
 last_avoid_dir = 0       
 
