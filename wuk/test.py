@@ -5,7 +5,7 @@ import math
 # ==========================================
 # 1. 통신 포트 설정
 # ==========================================
-ARDUINO_PORT = '/dev/ttyACM0'   
+ARDUINO_PORT = '/dev/ttyS0'   
 LIDAR_PORT = '/dev/ttyUSB0'   
 print("[INIT] 통신 포트 연결 시도 중...")
 arduino = serial.Serial(ARDUINO_PORT, 115200, timeout=0.1)
