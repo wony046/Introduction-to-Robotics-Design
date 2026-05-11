@@ -77,16 +77,16 @@ def calculate_steering(scan_data):
     # ★ 오직 내 코앞(-20~20도)에 20cm 이내로 진짜 벽이 있을 때만 제자리 팽이 회전!
     if front_emergency_dist < 200:
         if last_avoid_dir == -1:
-            emergency_steer = 100   # 계속 좌회전
+            emergency_steer = 85   # 계속 좌회전
         elif last_avoid_dir == 1:
-            emergency_steer = -100  # 계속 우회전
+            emergency_steer = -85  # 계속 우회전
         else:
             # 막혔을 때 측면 공간이 더 넓은 쪽으로 회전
             if left_wall_min > right_wall_min:
-                emergency_steer = 100
+                emergency_steer = 85
                 last_avoid_dir = -1
             else:
-                emergency_steer = -100
+                emergency_steer = -85
                 last_avoid_dir = 1
                 
         return 0, emergency_steer  
