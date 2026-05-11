@@ -41,8 +41,8 @@ ROBOT_HALF_WIDTH = 115    # mm — 로봇 반폭 (230mm / 2)
 # 3. VFH 파라미터
 # ============================================================
 ANGLE_STEP        = 10     # 히스토그램 해상도 (도)
-MAX_OBSTACLE_DIST = 2000   # mm — 이 거리 이상은 히스토그램 기여 없음
-VALLEY_THRESHOLD  = 0.5    # 이 밀도 이하 빈을 "통과 가능"으로 판정
+MAX_OBSTACLE_DIST = 1500   # mm — 이 거리 이상 장애물은 무시 (넓은 공간 오판 방지)
+VALLEY_THRESHOLD  = 0.16   # certainty² 임계값 — 거리 환산: sqrt(0.16)=0.4 → 900mm 이내만 막힘
 VALLEY_MIN_WIDTH  = 20     # 도 — 로봇이 통과할 수 있는 최소 valley 폭
 SMOOTH_KERNEL     = [1, 2, 3, 2, 1]  # 가우시안 근사 평활화 커널 (±2빈 = ±20도)
 
@@ -130,9 +130,12 @@ def build_polar_histogram(scan_data: list) -> dict:
     """
     [VFH Step 1] 밀도 기반 극좌표 히스토그램 생성.
 
-    각 포인트의 기여도:
+    각 빈(bin)에 해당 방향의 최대 certainty^2 값을 기록.
+    (누적 합산 방식은 포인트 수가 많은 넓은 공간에서
+     멀리 있는 벽도 막힘으로 오판하는 문제가 있음)
+
         certainty = max(0, 1 - distance / MAX_OBSTACLE_DIST)
-        hist[bin] += certainty^2   (가까울수록 기여 급증)
+        hist[bin] = max(hist[bin], certainty^2)
 
     반환: {각도: 밀도} — 전방 ±90도, ANGLE_STEP 단위
     """
@@ -145,7 +148,7 @@ def build_polar_histogram(scan_data: list) -> dict:
 
         bin_angle = round(angle / ANGLE_STEP) * ANGLE_STEP
         certainty = max(0.0, 1.0 - distance / MAX_OBSTACLE_DIST)
-        hist[bin_angle] += certainty ** 2
+        hist[bin_angle] = max(hist[bin_angle], certainty ** 2)
 
     return hist
 
