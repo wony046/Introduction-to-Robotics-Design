@@ -1,341 +1,243 @@
 """
-snd_obstacle_avoider.py
-========================
-SND (Smooth Nearness Diagram) 기반 장애물 회피 — Raspberry Pi 측.
+rplidar_serial.py
+==================
+RPLIDAR C1 직접 시리얼 통신 드라이버.
+SDK / rplidar 라이브러리 없이 protocol 명세에 따라 packet 단위로 통신.
 
-References
-----------
-- Durham & Bullo, "Smooth Nearness-Diagram Navigation", IROS 2008
-- 이나라, 권순환, 유혜정, "2차원 라이다 센서 데이터 분류를 이용한 적응형
-  장애물 회피 알고리즘", J. Sens. Sci. Technol. 29(5), 2020
-  → 본 코드에선 적응형 Ds를 휴리스틱(고밀도/저밀도)으로 단순화하여 도입.
+수업자료 reference
+-----------------
+- 실습_04 LiDAR와 Serial통신.pdf
+  · practice1: RESET, SCAN 명령 송신 + raw hex 출력
+  · practice2: 5바이트 measurement packet 파싱 (quality, angle_q6, distance_q2)
+  · practice3: S, S̄, C 검증 비트 적용
+  · practice4: 시각화
 
-Hardware
---------
-- Raspberry Pi + RPLIDAR C1 (사용자 정의 rplidar_c1.py 드라이버)
-- Serial → Arduino (UNO R4 Minima)
+지원 명령
+---------
+- STOP   (0xA5 0x25) : No response.  ≥10 ms 대기 필요
+- RESET  (0xA5 0x40) : No response.  ≥500 ms 대기 필요
+- SCAN   (0xA5 0x20) : Multiple response. 5-byte measurement stream
 
-Protocol to Arduino
--------------------
-"C,<v_mps>,<heading_rel_rad>\\n"
-- v_mps        : 선속도 (m/s, +=전진, -=후진)
-- heading_rel  : 현재 헤딩 기준 상대 회전 목표 (rad, +=좌, -=우)
+Measurement packet (5 byte)
+---------------------------
+  Byte 0 : Quality(7..2) | S̄(1) | S(0)
+  Byte 1 : angle_q6[6:0](7..1) | C(0)
+  Byte 2 : angle_q6[14:7]
+  Byte 3 : distance_q2[7:0]
+  Byte 4 : distance_q2[15:8]
+
+  angle°    = angle_q6 / 64.0
+  distance  = distance_q2 / 4.0   (mm)
 """
 
-import math
 import time
 import serial
-import numpy as np
-
-# 사용자 환경의 RPLIDAR C1 드라이버 (기존)
-from rplidar_c1 import RPLidarC1
 
 
 # ============================================================
-# 설정 (튜닝 포인트는 # TUNE 표기)
+# Protocol constants
 # ============================================================
+SYNC_BYTE       = 0xA5
+SYNC_BYTE2      = 0x5A
+CMD_STOP        = 0x25
+CMD_RESET       = 0x40
+CMD_SCAN        = 0x20
 
-# --- 하드웨어 / 통신 ---
-LIDAR_PORT          = "/dev/ttyUSB0"
-LIDAR_BAUD          = 460800        # RPLIDAR C1 고정값
-ARDUINO_PORT        = "/dev/ttyACM0"
-ARDUINO_BAUD        = 115200
+DESCRIPTOR_LEN  = 7
+SCAN_PACKET_LEN = 5
 
-# --- 로봇 기하 ---
-ROBOT_RADIUS_M      = 0.09          # TUNE: 실측 로봇 반경 (외곽 포함)
-
-# --- SND 코어 파라미터 ---
-Ds_DEFAULT_M        = 0.30          # TUNE: 기본 안전거리
-USE_ADAPTIVE_Ds     = False         # 처음엔 False, 충분히 튜닝 후 True
-Ds_TIGHT_M          = 0.45          # TUNE: 고밀도(통로) Ds
-Ds_OPEN_M           = 0.18          # TUNE: 저밀도(개활) Ds
-DENSITY_NEAR_DIST_M = 0.40
-DENSITY_THRESHOLD   = 25            # TUNE: 전방 0.4m 이내 점 개수 임계
-
-# --- 속도 ---
-V_MAX_MPS           = 0.20          # TUNE: 직진 최대 속도
-V_MIN_MPS           = 0.06          # 근접 시 최소 속도
-SLOWDOWN_DIST_M     = 0.35          # 이 거리 이하 근접 시 감속
-
-# --- LiDAR 처리 ---
-FRONT_FOV_DEG       = 180           # 전방 ±90° 사용
-RANGE_MIN_M         = 0.05          # 노이즈/자기 자신 제거
-RANGE_MAX_M         = 2.50
-ANGLE_BIN_DEG       = 2             # 각도 빈 크기 (다운샘플링)
-
-# --- 제어 루프 ---
-LOOP_HZ             = 10
-MAX_HEADING_CMD_RAD = math.radians(60)   # 명령 헤딩 클램프
-
-# --- 디버그 / 안전 ---
-VERBOSE             = True
-DRY_RUN             = False         # True면 시리얼 송신 안함 (테스트용)
+STOP_DELAY_MS   = 15        # spec: ≥10
+RESET_DELAY_MS  = 800       # spec: ≥500, 여유 두고 800
+SCAN_WARMUP_MS  = 200       # 모터 회전 안정화 후 data 출력 시작까지 여유
 
 
 # ============================================================
-# 유틸: LiDAR 스캔 다운샘플링
+# 드라이버 클래스
 # ============================================================
+class RPLidarSerial:
+    """RPLIDAR C1 / A1 호환 직접 시리얼 드라이버."""
 
-def downsample_scan(scan_points,
-                    bin_deg=ANGLE_BIN_DEG,
-                    fov_deg=FRONT_FOV_DEG):
-    """
-    rplidar 스캔 → (angles_rad, dists_m) 배열.
+    def __init__(self, port="/dev/ttyUSB0", baudrate=460800, timeout=1.0):
+        self.port     = port
+        self.baudrate = baudrate
+        self._scanning = False
+        self.ser = serial.Serial(port, baudrate, timeout=timeout)
+        time.sleep(0.1)
 
-    좌표 약속
-    --------
-    - LiDAR 0° 방향이 로봇 정면이라고 가정 (RPLIDAR 장착 방향 확인 필요).
-    - 반시계방향이 +각도. 즉 angle=0 정면, +π/2 좌측, -π/2 우측.
-    - 각 angle bin 내에서 *최소* 거리만 보존 (가장 가까운 위험).
+    # ----------------------------------------------------------
+    # 저수준 송수신
+    # ----------------------------------------------------------
+    def _send_cmd(self, cmd_byte):
+        """Request packet: [0xA5 | CMD]  (payload-less 명령)."""
+        self.ser.write(bytes([SYNC_BYTE, cmd_byte]))
+        self.ser.flush()
 
-    Returns
-    -------
-    angles_rad : np.array (rad), 빈의 중심각
-    dists_m    : np.array (m), 그 빈의 최소 거리
-    """
-    half_fov = fov_deg / 2.0
-    n_bins   = int(fov_deg / bin_deg)
-    bins     = np.full(n_bins, np.inf)
+    def _read_descriptor(self):
+        """
+        Multiple Response Mode 명령 후 7 byte response descriptor 읽기.
 
-    for pt in scan_points:
-        # 일반적 rplidar 출력 형식: (quality, angle_deg, dist_mm)
-        # 사용자 드라이버 형식에 맞춰 unpack 수정 가능
-        _, angle_deg, dist_mm = pt
+        Format:
+            A5 5A  |  30-bit length | 2-bit mode  |  1 byte data_type
+            (SCAN은 length=5, mode=0x01(multiple), type=0x81)
+        """
+        data = self.ser.read(DESCRIPTOR_LEN)
+        if len(data) != DESCRIPTOR_LEN:
+            raise IOError(f"Descriptor 짧음: {len(data)} byte 받음 ({data.hex()})")
+        if data[0] != SYNC_BYTE or data[1] != SYNC_BYTE2:
+            raise IOError(f"Descriptor sync 불량: {data.hex()}")
+        return data
 
-        # angle을 [-180, 180]로 정규화 (RPLIDAR는 0~360 출력)
-        a = ((angle_deg + 180.0) % 360.0) - 180.0
-        if abs(a) > half_fov:
-            continue
+    def _drain_buffer(self, idle_ms=150, max_wait_ms=1500):
+        """
+        boot text 등 잔여 데이터 완전 비움.
+        idle_ms 동안 새 데이터가 없으면 종료.
+        """
+        deadline  = time.time() + max_wait_ms / 1000.0
+        last_data = time.time()
+        while time.time() < deadline:
+            n = self.ser.in_waiting
+            if n > 0:
+                self.ser.read(n)
+                last_data = time.time()
+            elif (time.time() - last_data) * 1000 > idle_ms:
+                return
+            time.sleep(0.01)
 
-        d_m = dist_mm / 1000.0
-        if d_m < RANGE_MIN_M or d_m > RANGE_MAX_M:
-            continue
-
-        idx = int((a + half_fov) // bin_deg)
-        idx = max(0, min(n_bins - 1, idx))
-        if d_m < bins[idx]:
-            bins[idx] = d_m
-
-    centers_deg = (np.arange(n_bins) + 0.5) * bin_deg - half_fov
-    angles_rad  = np.radians(centers_deg)
-
-    valid = bins < RANGE_MAX_M
-    return angles_rad[valid], bins[valid]
-
-
-# ============================================================
-# SND 코어 함수
-# ============================================================
-
-def find_largest_gap(angles, dists, gap_threshold_m):
-    """
-    'gap' = dists > gap_threshold_m 인 연속 빔 구간.
-    가장 넓은 (각도 폭이 가장 큰) gap의 중심각·폭 반환.
-
-    Returns
-    -------
-    center_angle_rad : 가장 넓은 gap의 bisector. 없으면 None.
-    width_rad        : 그 gap의 각도 폭 (rad).
-    """
-    is_gap = dists > gap_threshold_m
-    if not np.any(is_gap):
-        return None, 0.0
-
-    diff = np.diff(is_gap.astype(int))
-    starts = np.where(diff == 1)[0] + 1
-    ends   = np.where(diff == -1)[0] + 1
-
-    if is_gap[0]:
-        starts = np.concatenate(([0], starts))
-    if is_gap[-1]:
-        ends = np.concatenate((ends, [len(is_gap)]))
-
-    if len(starts) == 0:
-        return None, 0.0
-
-    best_width = -1.0
-    best_seg   = None
-    for s, e in zip(starts, ends):
-        if e - s < 1:
-            continue
-        width = angles[e - 1] - angles[s]
-        if width > best_width:
-            best_width = width
-            best_seg   = (s, e)
-
-    if best_seg is None:
-        return None, 0.0
-
-    s, e = best_seg
-    center = (angles[s] + angles[e - 1]) / 2.0
-    return float(center), float(best_width)
-
-
-def compute_avoidance_deflection(angles, dists, Ds, R):
-    """
-    SND 회피 편향 Δ_avoid.
-
-    각 점 i에 대해:
-      s_i = sat[0,1]( (Ds + R - D_i) / Ds )   ← 가까울수록 1에 근접
-      w_i = s_i^2
-    Δ_avoid = Σ w_i * (-θ_i) / Σ w_i
-       (장애물이 -θ쪽에 있으면 헤딩을 +θ로 밀어내는 방향)
-    """
-    s_i = np.clip((Ds + R - dists) / Ds, 0.0, 1.0)
-    w_i = s_i ** 2
-    sum_w = np.sum(w_i)
-
-    if sum_w < 1e-6:
-        return 0.0, 0
-
-    deflection = -np.sum(w_i * angles) / sum_w
-    near_count = int(np.sum(s_i > 0))
-    return float(deflection), near_count
-
-
-def select_Ds(angles, dists):
-    """
-    적응형 Ds. 전방 DENSITY_NEAR_DIST_M 이내 점 개수로
-    고밀도/저밀도 이진 판단.
-    """
-    if not USE_ADAPTIVE_Ds:
-        return Ds_DEFAULT_M
-    near = int(np.sum(dists < DENSITY_NEAR_DIST_M))
-    return Ds_TIGHT_M if near >= DENSITY_THRESHOLD else Ds_OPEN_M
-
-
-def select_speed(dists):
-    """ 근접 장애물 있으면 선형 감속. """
-    if len(dists) == 0:
-        return V_MIN_MPS
-    min_d = float(np.min(dists))
-    if min_d > SLOWDOWN_DIST_M:
-        return V_MAX_MPS
-    span = SLOWDOWN_DIST_M - ROBOT_RADIUS_M
-    if span < 1e-3:
-        return V_MIN_MPS
-    ratio = max(0.0, (min_d - ROBOT_RADIUS_M) / span)
-    v = V_MIN_MPS + (V_MAX_MPS - V_MIN_MPS) * ratio
-    return float(max(V_MIN_MPS, min(V_MAX_MPS, v)))
-
-
-# ============================================================
-# 메인 클래스
-# ============================================================
-
-class SNDAvoider:
-    def __init__(self):
-        print("[INIT] RPLIDAR C1 열기...")
-        self.lidar = RPLidarC1(port=LIDAR_PORT, baudrate=LIDAR_BAUD)
-
-        self.arduino = None
-        if not DRY_RUN:
-            print("[INIT] Arduino 시리얼 열기...")
-            self.arduino = serial.Serial(ARDUINO_PORT, ARDUINO_BAUD, timeout=0.1)
-            time.sleep(2.0)   # Arduino 리셋 대기
-
-        self.start_time = time.time()
-
-    # --------------------------------------------------------
-    def send_command(self, v_mps, heading_rel_rad):
-        v_mps           = max(-V_MAX_MPS, min(V_MAX_MPS, v_mps))
-        heading_rel_rad = max(-MAX_HEADING_CMD_RAD,
-                              min(MAX_HEADING_CMD_RAD, heading_rel_rad))
-        cmd = f"C,{v_mps:+.3f},{heading_rel_rad:+.4f}\n"
-        if self.arduino is not None:
-            self.arduino.write(cmd.encode("ascii"))
-        if VERBOSE:
-            print(f"[CMD] v={v_mps:+.3f}  θ={math.degrees(heading_rel_rad):+5.1f}°")
-
+    # ----------------------------------------------------------
+    # 공개 명령
+    # ----------------------------------------------------------
     def stop(self):
-        self.send_command(0.0, 0.0)
+        """STOP: scanning 종료, idle 상태로. 응답 없음."""
+        self._send_cmd(CMD_STOP)
+        self._scanning = False
+        time.sleep(STOP_DELAY_MS / 1000.0)
+        self.ser.reset_input_buffer()
 
-    # --------------------------------------------------------
-    def step(self):
-        """ 한 사이클: 스캔 → SND → 명령 송신. """
-        # 1) 스캔 획득
-        #    rplidar_c1 모듈 API에 따라 호출 변경:
-        #    - generator 패턴: next(self.lidar.iter_scans())
-        #    - 단발 패턴:       self.lidar.get_scan()
-        try:
-            scan = next(self.lidar.iter_scans())
-        except Exception as e:
-            print(f"[WARN] LiDAR 스캔 실패: {e}")
-            return
+    def reset(self):
+        """
+        RESET: core 재부팅. 응답 없음.
+        부팅 후 firmware banner 텍스트가 잠시 출력되므로 drain 까지 수행.
+        """
+        self._send_cmd(CMD_RESET)
+        time.sleep(RESET_DELAY_MS / 1000.0)
+        self._drain_buffer()
 
-        if not scan:
-            return
-
-        # 2) 다운샘플
-        angles, dists = downsample_scan(scan)
-        if len(angles) == 0:
-            self.send_command(V_MIN_MPS, 0.0)
-            return
-
-        # 3) Ds 결정
-        Ds = select_Ds(angles, dists)
-
-        # 4) θ_d : 가장 넓은 gap의 bisector
-        gap_th = Ds + ROBOT_RADIUS_M
-        theta_d, gap_w = find_largest_gap(angles, dists, gap_th)
-        if theta_d is None:
-            # 통과 가능한 gap 없음 → 일단 정지
-            # (향후: 회전 탐색 / 후진 로직 추가 가능)
-            self.send_command(0.0, 0.0)
-            if VERBOSE:
-                print("[WARN] 통과 가능한 gap 없음 → 정지")
-            return
-
-        # 5) Δ_avoid
-        delta_avoid, near_count = compute_avoidance_deflection(
-            angles, dists, Ds, ROBOT_RADIUS_M
-        )
-
-        # 6) 최종 헤딩
-        theta_target = theta_d + delta_avoid
-
-        # 7) 속도
-        v = select_speed(dists)
-
-        # 8) 송신
-        self.send_command(v, theta_target)
-
-        if VERBOSE:
-            print(f"      Ds={Ds:.2f}  θ_d={math.degrees(theta_d):+5.1f}°  "
-                  f"Δ={math.degrees(delta_avoid):+5.1f}°  "
-                  f"near={near_count}  gap_w={math.degrees(gap_w):.0f}°")
-
-    # --------------------------------------------------------
-    def run(self, duration_sec=60.0):
-        period = 1.0 / LOOP_HZ
-        print(f"[RUN] {duration_sec:.0f}s 동안 SND 실행 (period={period*1000:.0f}ms)")
-        try:
-            while time.time() - self.start_time < duration_sec:
-                t0 = time.time()
-                self.step()
-                dt = time.time() - t0
-                if dt < period:
-                    time.sleep(period - dt)
-                elif VERBOSE:
-                    print(f"[WARN] 사이클 초과: {dt*1000:.1f}ms > {period*1000:.0f}ms")
-        except KeyboardInterrupt:
-            print("\n[INFO] 사용자 인터럽트")
-        finally:
+    def start_scan(self):
+        """
+        SCAN 시작.
+        1) (이미 scanning이면) STOP
+        2) 입력 buffer flush
+        3) SCAN 명령 송신
+        4) 7-byte descriptor 검증
+        5) 모터 안정화 시간 대기
+        """
+        if self._scanning:
             self.stop()
-            time.sleep(0.3)
-            try:
-                self.lidar.stop()
-                self.lidar.disconnect()
-            except Exception:
-                pass
-            if self.arduino:
-                self.arduino.close()
-            print("[DONE]")
+        self.ser.reset_input_buffer()
+        self._send_cmd(CMD_SCAN)
+        self._read_descriptor()
+        time.sleep(SCAN_WARMUP_MS / 1000.0)
+        self._scanning = True
+
+    # ----------------------------------------------------------
+    # 데이터 iterator
+    # ----------------------------------------------------------
+    def iter_measurements(self):
+        """
+        5-byte measurement packet을 yield.
+
+        Yields
+        ------
+        (quality, angle_deg, distance_mm, start_flag)
+            quality    : 0~63
+            angle_deg  : 0.0 ~ 359.99
+            distance_mm: 0이면 invalid
+            start_flag : 1이면 새 360° scan의 첫 번째 점
+        """
+        if not self._scanning:
+            raise RuntimeError("start_scan() 호출 후에만 사용 가능")
+
+        while True:
+            data = self.ser.read(SCAN_PACKET_LEN)
+            if len(data) != SCAN_PACKET_LEN:
+                continue
+
+            # --- 검증 (practice3 패턴) ---
+            s_flag = data[0] & 0x01
+            s_inv  = (data[0] >> 1) & 0x01
+            if s_inv != (1 - s_flag):
+                # S, S̄ 불일치 → 손상.
+                # 1 byte 밀어서 재동기 (간단한 byte-level resync)
+                self.ser.read(1)
+                continue
+            c_bit = data[1] & 0x01
+            if c_bit != 1:
+                continue
+
+            # --- 파싱 ---
+            quality = data[0] >> 2
+            angle_q6 = (data[1] >> 1) | (data[2] << 7)
+            angle    = angle_q6 / 64.0
+            dist_q2  = data[3] | (data[4] << 8)
+            distance = dist_q2 / 4.0   # mm
+
+            yield (quality, angle, distance, s_flag)
+
+    def iter_scans(self, min_quality=0, min_dist_mm=10.0):
+        """
+        한 바퀴(360°)씩 묶어서 yield.
+
+        S=1 (start flag)이 검출되면 이전까지 누적된 scan을 반환.
+        반환 형식: [(quality, angle_deg, distance_mm), ...]
+        """
+        buf = []
+        for q, a, d, s in self.iter_measurements():
+            if s == 1 and buf:
+                yield buf
+                buf = []
+            if d >= min_dist_mm and q >= min_quality:
+                buf.append((q, a, d))
+
+    # ----------------------------------------------------------
+    def close(self):
+        try:
+            if self._scanning:
+                self.stop()
+        except Exception:
+            pass
+        try:
+            self.ser.close()
+        except Exception:
+            pass
 
 
 # ============================================================
-# 진입점
+# 단독 실행: 3초간 raw 데이터 출력하는 테스트
 # ============================================================
 if __name__ == "__main__":
-    avoider = SNDAvoider()
-    avoider.run(duration_sec=60.0)
+    import sys
+
+    port = sys.argv[1] if len(sys.argv) > 1 else "/dev/ttyUSB0"
+    print(f"[TEST] port = {port}")
+
+    lidar = RPLidarSerial(port)
+    try:
+        print("[TEST] RESET ...")
+        lidar.reset()
+        print("[TEST] SCAN  ...")
+        lidar.start_scan()
+
+        print("[TEST] 3초간 measurement 수신 (50개마다 출력)")
+        t_end = time.time() + 3.0
+        n = 0
+        for q, a, d, s in lidar.iter_measurements():
+            n += 1
+            if n % 50 == 0:
+                tag = "  ◀ START" if s == 1 else ""
+                print(f"  #{n:5d}  θ={a:6.2f}°  d={d:7.1f}mm  Q={q:2d}{tag}")
+            if time.time() > t_end:
+                break
+        print(f"[TEST] 총 {n}개 measurement")
+    finally:
+        lidar.close()
+        print("[TEST] 종료")
