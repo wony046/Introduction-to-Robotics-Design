@@ -81,8 +81,7 @@ RECOVERY_SAFE_DIST = 350   # mm: 복귀 방향 장애물 판단 거리
 
 # ── 막힘 감지 ─────────────────────────────────────────────────────────────────
 STUCK_CLEAR_DIST = 400   # mm: 이 거리 이상이면 열린 공간으로 간주
-STUCK_MAX_SAFETY = 30    # mm: 최대 안전 여유 (거리 비례 감소, d=0이면 0mm)
-STUCK_TIMEOUT    = 0.5   # sec
+STUCK_MAX_SAFETY = 30    # mm: 최대 안전 여유 (거리 비례 감소)
 
 # ── 탈출 회전 ─────────────────────────────────────────────────────────────────
 ESCAPE_CLEAR_DIST = 500  # mm: 탈출 방향 판단 최소 거리
@@ -97,7 +96,6 @@ SEND_INTERVAL    = 0.1
 # ─────────────────────────────────────────────────────────────────────────────
 
 arduino_heading_deg = 0.0
-stuck_since         = None
 
 
 def normalize_angle(angle):
@@ -233,7 +231,7 @@ def is_path_blocked(front_scan_points):
     # 스캔 끝까지 열린 구간인 경우
     if in_open and l_dist:
         r_angle = SCAN_HALF_ANGLE + ANGLE_STEP
-        r_dist  = STUCK_CLEAR_DIST   # 보수적 추정
+        r_dist  = STUCK_CLEAR_DIST
         theta   = math.radians(r_angle - l_angle)
         if theta > 0:
             w = math.sqrt(l_dist**2 + r_dist**2
@@ -325,7 +323,7 @@ def execute_escape_rotation(arduino, all_scan_points):
     4. 아두이노 헤딩 피드백으로 목표 각도 도달 확인
     5. 정지 후 정상 모드 복귀
     """
-    global arduino_heading_deg, stuck_since
+    global arduino_heading_deg
 
     print("\n" + "="*52)
     print("[ESCAPE] 전진 불가 감지 → 최적 방향 탈출 회전")
@@ -366,6 +364,31 @@ def execute_escape_rotation(arduino, all_scan_points):
     time.sleep(0.3)
     stuck_since = None
     print("="*52 + "\n")
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 정면(±45°) 열림 확인
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def is_frontal_clear(front_scan_points):
+    """
+    정면 ±45° 이내에 RECOVERY_SAFE_DIST 이상 열린 방향이 있는지 확인
+
+    헤딩 > 90° 복귀 시 판단:
+      True  → 직진 가능 (v=FORWARD_SPEED, Arduino P제어로 헤딩 자연 복귀)
+      False → 정면 막힘 (get_recovery_direction으로 회전 방향 결정)
+    """
+    scan_dict = {}
+    for angle_norm, dist in front_scan_points:
+        if dist <= 0:
+            continue
+        bucket = round(angle_norm / ANGLE_STEP) * ANGLE_STEP
+        if bucket not in scan_dict or dist < scan_dict[bucket]:
+            scan_dict[bucket] = dist
+
+    for a in range(-45, 50, ANGLE_STEP):
+        if scan_dict.get(a, 0) >= RECOVERY_SAFE_DIST:
+            return True   # 하나라도 열린 방향 있으면 직진 가능
+    return False
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -571,7 +594,7 @@ def main():
     print(f"  속도           : 최고 {FORWARD_SPEED}m/s  최저 {MIN_SPEED}m/s (완전정지 없음)")
     print(f"  선속도 감속    : {SLOW_START_DIST}mm부터 감속 → {STOP_FWD_RANGE}×{STOP_HORIZ_RANGE}mm 구역에서 최저속")
     print(f"  각속도 방식    : 수평오차 P제어 (horiz < {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm 동안 유지)")
-    print(f"  막힘감지       : 열린구간 너비 < {ROBOT_HALF_WIDTH*2}~{ROBOT_HALF_WIDTH*2+STUCK_MAX_SAFETY}mm → {STUCK_TIMEOUT}초 지속 시 탈출")
+    print(f"  막힘감지       : 전방 통과불가 즉시 탈출 회전")
     print(f"  탈출 각속도    : {ESCAPE_W} rad/s (최적 방향)")
     print("=" * 50)
 
@@ -611,41 +634,35 @@ def main():
                 now = time.time()
                 if now - last_send >= SEND_INTERVAL:
 
-                    # ── ① 헤딩 > 90°: 능동 복귀 우선 ──────────────────────
+                    # ── ① 헤딩 > 90°: 장애물 없는 방향으로 직진 우선 ────────
                     if abs(arduino_heading_deg) > HEADING_OVER_90:
-                        recovery_w = get_recovery_direction(
-                            arduino_heading_deg, front_points
-                        )
-                        cmd = f"0.00 {recovery_w:.2f}\n"
+                        if is_frontal_clear(front_points):
+                            # 정면 열림 → 직진 (Arduino P제어가 헤딩 복귀)
+                            cmd = f"{FORWARD_SPEED:.2f} 0.00\n"
+                            print(f"[헤딩복귀] {arduino_heading_deg:.1f}° "
+                                  f"→ 정면 열림, 직진으로 자연 복귀")
+                        else:
+                            # 정면 막힘 → LiDAR 확인 후 열린 방향으로 회전
+                            recovery_w = get_recovery_direction(
+                                arduino_heading_deg, front_points
+                            )
+                            cmd = f"0.00 {recovery_w:.2f}\n"
+                            print(f"[헤딩복귀] {arduino_heading_deg:.1f}° "
+                                  f"→ 정면 막힘, 회전 w={recovery_w:.2f}")
                         arduino.write(cmd.encode())
-                        print(f"[복귀모드] 헤딩:{arduino_heading_deg:.1f}°  "
-                              f"v=0  w={recovery_w:.2f}")
                         last_cmd_str = cmd
                         last_send    = now
                         scan_points  = []
                         continue
 
-                    # ── ② 막힘 감지 (LiDAR 공간 기반) ─────────────────────
-                    blocked = is_path_blocked(front_points)
-
-                    if blocked:
-                        if stuck_since is None:
-                            stuck_since = now
-                            print("  [막힘시작] 통과 가능한 열린 구간 없음")
-                        elif now - stuck_since >= STUCK_TIMEOUT:
-                            # 탈출 회전 실행
-                            execute_escape_rotation(arduino, all_scan_points)
-                            last_cmd_str = ""
-                            last_send    = time.time()
-                            scan_points  = []
-                            continue
-                        else:
-                            remaining = STUCK_TIMEOUT - (now - stuck_since)
-                            print(f"  [막힘대기] {remaining:.1f}초 후 탈출 회전")
-                    else:
-                        if stuck_since is not None:
-                            print("  [막힘해제] 경로 열림")
-                        stuck_since = None
+                    # ── ② 막힘 감지 → 즉시 탈출 ────────────────────────────
+                    if is_path_blocked(front_points):
+                        print("  [막힘감지] 즉시 탈출 회전 실행")
+                        execute_escape_rotation(arduino, all_scan_points)
+                        last_cmd_str = ""
+                        last_send    = time.time()
+                        scan_points  = []
+                        continue
 
                     # ── ③ 정상 v/w 명령 ────────────────────────────────────
                     v, w = find_vw_command(front_points, arduino_heading_deg)
