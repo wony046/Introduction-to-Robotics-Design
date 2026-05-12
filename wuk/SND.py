@@ -133,6 +133,18 @@ class SNDAvoider:
     def __init__(self):
         print("[INIT] RPLIDAR C1 열기...")
         self.lidar = RPLidarSerial(port=LIDAR_PORT, baudrate=LIDAR_BAUD)
+        
+        # ★ 추가된 부분: 라이다가 이전 실행에서 계속 돌고 있었을 수 있으므로 강제 초기화
+        print("[INIT] 라이다 초기화 및 잔여 버퍼 비우기...")
+        try:
+            self.lidar.stop()   # 1. 일단 멈춤 명령 전송
+            time.sleep(0.5)     # 2. 모터가 멈출 때까지 대기
+            self.lidar.reset()  # 3. 라이다 코어 리셋 및 시리얼 버퍼 완전히 비우기 (매우 중요)
+        except Exception as e:
+            print(f"[WARN] 라이다 초기화 중 예외 발생 (무시하고 진행): {e}")
+
+        # 잔여 데이터가 확실히 지워진 깨끗한 상태에서 스캔 시작
+        print("[INIT] 스캔 시작...")
         self.lidar.start_scan()
         self.scan_generator = self.lidar.iter_scans()
 
