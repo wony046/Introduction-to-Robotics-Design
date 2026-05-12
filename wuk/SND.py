@@ -38,7 +38,7 @@ import SND_rplidar_serial
 # --- 하드웨어 / 통신 ---
 LIDAR_PORT          = "/dev/ttyUSB0"
 LIDAR_BAUD          = 460800        # RPLIDAR C1 고정값
-ARDUINO_PORT        = "/dev/ttyACM0"
+ARDUINO_PORT        = '/dev/ttyAMA3'
 ARDUINO_BAUD        = 115200
 
 # --- 로봇 기하 ---
