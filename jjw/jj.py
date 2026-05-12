@@ -566,6 +566,32 @@ def main():
 
             if s_flag == 1 and scan_points:
                 all_scan_points = list(scan_points)   # 전체 360도 스냅샷
+
+              # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                # [추가] 라이다 중심점 확인용 거리 로그 출력
+                # 각 방향(정면, 좌, 우, 후) ±3도 범위 내의 최솟값을 찾습니다.
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+                front_vals = [d for a, d in all_scan_points if -3 <= a <= 3 and d > 0]
+                left_vals  = [d for a, d in all_scan_points if -93 <= a <= -87 and d > 0]
+                right_vals = [d for a, d in all_scan_points if 87 <= a <= 93 and d > 0]
+                back_vals  = [d for a, d in all_scan_points if (a >= 177 or a <= -177) and d > 0]
+
+                front_d = min(front_vals) if front_vals else 0
+                left_d  = min(left_vals) if left_vals else 0
+                right_d = min(right_vals) if right_vals else 0
+                back_d  = min(back_vals) if back_vals else 0
+
+                # 1초에 너무 많이 출력되면 보기 힘드니 SEND_INTERVAL에 맞춰 출력
+                now = time.time()
+                if now - last_send >= SEND_INTERVAL:
+                    print(f"📏 [거리측정] 정면: {front_d:.0f}mm | 좌측: {left_d:.0f}mm | 우측: {right_d:.0f}mm | 후면: {back_d:.0f}mm")
+                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+                front_points    = [
+                    (a, d) for a, d in scan_points
+                    if is_in_front(a) and d > 0
+                ]
+              
                 front_points    = [
                     (a, d) for a, d in scan_points
                     if is_in_front(a) and d > 0
