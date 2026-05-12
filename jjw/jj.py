@@ -336,10 +336,10 @@ def check_rotation_blocked(w_sign, scan_points):
         if bucket not in scan_dict or dist < scan_dict[bucket]:
             scan_dict[bucket] = dist
 
-    if w_sign < 0:   # 오른쪽 회전 → 오른쪽(양수) 반구
-        check = range(ANGLE_STEP, 180, ANGLE_STEP)
-    else:            # 왼쪽 회전 → 왼쪽(음수) 반구
-        check = range(-ANGLE_STEP, -180, -ANGLE_STEP)
+    if w_sign < 0:   # 오른쪽 회전 → 오른쪽 근거리(+5°~+60°) 확인
+        check = range(ANGLE_STEP, 61, ANGLE_STEP)
+    else:            # 왼쪽 회전 → 왼쪽 근거리(-5°~-60°) 확인
+        check = range(-ANGLE_STEP, -61, -ANGLE_STEP)
 
     return any(
         0 < scan_dict.get(a, DETECTION_RANGE + 1) < ESCAPE_ROTATION_SAFE
@@ -364,9 +364,10 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
 
     # ── 1. 목표 방향 + 측면 안전 확인 ────────────────────────────────────────
     target_deg = find_escape_angle(all_scan_points)
-    # 목표 각도에 ESCAPE_EXTRA_ANGLE 추가 (약간 더 회전해 열린 공간 중심으로)
     target_deg += ESCAPE_EXTRA_ANGLE * (1.0 if target_deg >= 0 else -1.0)
-    w_sign = 1.0 if target_deg >= 0 else -1.0
+
+    # target_deg > 0 → 오른쪽 공간 → 오른쪽으로 회전(w<0) 해야 face 가능
+    w_sign = -1.0 if target_deg >= 0 else 1.0
 
     if check_rotation_blocked(w_sign, all_scan_points):
         print(f"  [방향조정] {'오른쪽' if w_sign<0 else '왼쪽'} 막힘 → 반대 방향")
@@ -375,11 +376,13 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
 
     print(f"  방향: {'왼쪽' if w_sign>0 else '오른쪽'}  목표: {target_deg:.1f}°")
 
-    # ── 2. 후진 공간 확보 ─────────────────────────────────────────────────────
+    # ── 2. 후진 (워치독 방지: 명령 반복 전송) ────────────────────────────────
     print(f"  [후진] {BACKUP_SPEED}m/s × {BACKUP_DURATION}초 "
           f"(약 {BACKUP_SPEED*BACKUP_DURATION*1000:.0f}mm)")
-    arduino.write(f"{-BACKUP_SPEED:.2f} 0.00\n".encode())
-    time.sleep(BACKUP_DURATION)
+    t_backup = time.time()
+    while time.time() - t_backup < BACKUP_DURATION:
+        arduino.write(f"{-BACKUP_SPEED:.2f} 0.00\n".encode())
+        time.sleep(0.05)   # 50ms 주기 전송 (워치독 500ms 이내)
     arduino.write(b"0.00 0.00\n")
     time.sleep(0.1)
 
@@ -388,15 +391,14 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
     time.sleep(0.15)
 
     # ── 4. 회전 실행 (30° 마다 장애물 재확인) ────────────────────────────────
-    lidar_buf        = []          # 회전 중 수집된 LiDAR 포인트
-    last_check_angle = 0.0         # 마지막 재확인 시점의 헤딩
-    CHECK_INTERVAL   = 30          # deg: 재확인 주기
+    lidar_buf        = []
+    last_check_angle = 0.0
+    CHECK_INTERVAL   = 30
 
     t_start = time.time()
     while time.time() - t_start < ESCAPE_TIMEOUT:
         read_arduino(arduino)
 
-        # ── LiDAR 포인트 비블로킹 수집 ──────────────────────────────────────
         while lidar.in_waiting >= 5:
             raw = lidar.read(5)
             result = parse_packet(raw)
@@ -407,23 +409,22 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
 
         cur_angle = abs(arduino_heading_deg)
 
-        # ── 30° 마다 장애물 재확인 ───────────────────────────────────────────
         if (cur_angle - last_check_angle >= CHECK_INTERVAL
                 and len(lidar_buf) >= 20):
             last_check_angle = cur_angle
             if check_rotation_blocked(w_sign, lidar_buf):
                 print(f"  [재판단] {cur_angle:.0f}° 지점 장애물 감지 → 방향 재계산")
                 new_target = find_escape_angle(lidar_buf)
-                new_sign   = 1.0 if new_target >= 0 else -1.0
+                # 수정: 양수 target → 오른쪽 공간 → w_sign=-1 (오른쪽 회전)
+                new_sign   = -1.0 if new_target >= 0 else 1.0
                 if not check_rotation_blocked(new_sign, lidar_buf):
                     w_sign     = new_sign
                     target_deg = new_target + ESCAPE_EXTRA_ANGLE * (1.0 if new_target >= 0 else -1.0)
                     print(f"  [재판단] 새 목표: {'왼쪽' if w_sign>0 else '오른쪽'} {target_deg:.1f}°")
                 else:
                     print("  [재판단] 양쪽 막힘 → 현재 방향 유지")
-            lidar_buf = []   # 버퍼 초기화
+            lidar_buf = []
 
-        # ── 목표 도달 확인 ───────────────────────────────────────────────────
         if cur_angle >= abs(target_deg) - ESCAPE_TOLERANCE:
             print(f"  [완료] 헤딩 {arduino_heading_deg:.1f}° → 목표 {target_deg:.1f}°")
             break
