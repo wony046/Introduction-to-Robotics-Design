@@ -223,10 +223,22 @@ def select_speed(dists):
 # 메인 클래스
 # ============================================================
 
+# 수정 1: 정확한 파일명으로 임포트
+from rplidar_serial import RPLidarSerial
+
+# ============================================================
+# 메인 클래스
+# ============================================================
 class SNDAvoider:
     def __init__(self):
         print("[INIT] RPLIDAR C1 열기...")
         self.lidar = RPLidarSerial(port=LIDAR_PORT, baudrate=LIDAR_BAUD)
+        
+        # 수정 2: 라이다 모터 회전 및 스캔 명령 전송 (필수)
+        self.lidar.start_scan()
+        
+        # 수정 3: 제너레이터 객체를 한 번만 생성하여 저장
+        self.scan_generator = self.lidar.iter_scans()
 
         self.arduino = None
         if not DRY_RUN:
@@ -238,6 +250,7 @@ class SNDAvoider:
 
     # --------------------------------------------------------
     def send_command(self, v_mps, heading_rel_rad):
+        # (기존 코드와 동일)
         v_mps           = max(-V_MAX_MPS, min(V_MAX_MPS, v_mps))
         heading_rel_rad = max(-MAX_HEADING_CMD_RAD,
                               min(MAX_HEADING_CMD_RAD, heading_rel_rad))
@@ -254,11 +267,11 @@ class SNDAvoider:
     def step(self):
         """ 한 사이클: 스캔 → SND → 명령 송신. """
         # 1) 스캔 획득
-        #    rplidar_c1 모듈 API에 따라 호출 변경:
-        #    - generator 패턴: next(self.lidar.iter_scans())
-        #    - 단발 패턴:       self.lidar.get_scan()
         try:
-            scan = next(self.lidar.iter_scans())
+            # 수정 3: 미리 생성해둔 제너레이터에서 값을 꺼내옴
+            scan = next(self.scan_generator)
+        except StopIteration:
+            return
         except Exception as e:
             print(f"[WARN] LiDAR 스캔 실패: {e}")
             return
@@ -279,8 +292,6 @@ class SNDAvoider:
         gap_th = Ds + ROBOT_RADIUS_M
         theta_d, gap_w = find_largest_gap(angles, dists, gap_th)
         if theta_d is None:
-            # 통과 가능한 gap 없음 → 일단 정지
-            # (향후: 회전 탐색 / 후진 로직 추가 가능)
             self.send_command(0.0, 0.0)
             if VERBOSE:
                 print("[WARN] 통과 가능한 gap 없음 → 정지")
@@ -325,9 +336,10 @@ class SNDAvoider:
             time.sleep(0.3)
             try:
                 self.lidar.stop()
-                self.lidar.disconnect()
-            except Exception:
-                pass
+                # 수정 4: disconnect() 대신 close() 사용
+                self.lidar.close() 
+            except Exception as e:
+                print(f"[WARN] LiDAR 종료 오류: {e}")
             if self.arduino:
                 self.arduino.close()
             print("[DONE]")
