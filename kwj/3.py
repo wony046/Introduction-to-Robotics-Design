@@ -12,24 +12,21 @@ arduino = serial.Serial(ARDUINO_PORT, 115200, timeout=0.1)
 lidar_ser = serial.Serial(LIDAR_PORT, 460800, timeout=1)
 
 # ==========================================
-# 2. 자율 주행 파라미터 (★ 무정지 스무스 코너링 ★)
+# 2. 자율 주행 파라미터 
 # ==========================================
 SAFE_DISTANCE = 600      
 MAX_SPEED = 250          
 AVOID_SPEED = 150        
+CAUTION_SPEED = 110      # ★ 추가: 17cm 이내 장애물 감지 시 안전 속도
 ESCAPE_SPEED = 100       
 
-# ★ 수정 1: 조향 민감도 감소 (덜 예민하게)
 STEER_GAIN = 1.3         
-
-# ★ 추가: 조향 부드러움 계수 (0.0 ~ 1.0)
-# 1.0에 가까울수록 즉시 꺾고, 낮을수록 서서히 꺾습니다.
 SMOOTHING_FACTOR = 0.5   
 
 ROBOT_HALF_WIDTH = 115   
 
 last_avoid_dir = 0       
-last_steer_pwm = 0       # ★ 추가: 이전 프레임의 핸들 각도 기억용
+last_steer_pwm = 0       
 
 # ==========================================
 # 3. 핵심 회피 알고리즘
@@ -43,11 +40,16 @@ def calculate_steering(scan_data):
     front_clear_x = 9999         
     left_wall_min = 9999         
     right_wall_min = 9999        
+    closest_dist = 9999          # ★ 추가: 내 주변 270도 모든 방향의 최단 거리
     
     for angle, distance in scan_data:
         if angle > 180: angle -= 360
             
         if -135 <= angle <= 135 and distance > 0:
+            # 주변 전체 최단 거리 추적 (감속용)
+            if distance < closest_dist:
+                closest_dist = distance
+
             bin_angle = round(angle / 10) * 10
             if bin_angle in bins and distance < bins[bin_angle]:
                 bins[bin_angle] = distance
@@ -70,38 +72,39 @@ def calculate_steering(scan_data):
                     if abs(y_pos) < right_wall_min: right_wall_min = abs(y_pos)
 
     # ========================================================
-    # [1] 피벗 턴 (Pivot Turn) 모드 - 코앞 발동 거리 축소
+    # [1] 피벗 턴 (Pivot Turn) 모드
     # ========================================================
-    # ★ 수정 2: 발동 거리를 200으로 낮춰 스무스 코너링 공간 확보
-    if front_emergency_dist < 200 or front_clear_x < 200:
+    # ★ 수정: 정면에 너무 예민하게 반응하여 홱 꺾는 것을 막기 위해 150(15cm)으로 하향
+    if front_emergency_dist < 150 or front_clear_x < 150:
         left_openness = sum(bins[a] for a in range(10, 91, 10) if a in bins)
         right_openness = sum(bins[a] for a in range(-90, 0, 10) if a in bins)
 
-        # 피벗 턴 각도도 100 -> 80으로 살짝 부드럽게 조정
+        # 홱 꺾는 각도도 80에서 70으로 살짝 부드럽게 완화
         if left_openness > right_openness + 500:
             last_avoid_dir = -1
-            pivot_steer = 80
+            pivot_steer = 70
         elif right_openness > left_openness + 500:
             last_avoid_dir = 1
-            pivot_steer = -80
+            pivot_steer = -70
         else:
             if last_avoid_dir == -1:
-                pivot_steer = 80
+                pivot_steer = 70
             elif last_avoid_dir == 1:
-                pivot_steer = -80
+                pivot_steer = -70
             else:
                 if left_wall_min > right_wall_min:
-                    pivot_steer = 80
+                    pivot_steer = 70
                     last_avoid_dir = -1
                 else:
-                    pivot_steer = -80
+                    pivot_steer = -70
                     last_avoid_dir = 1
         
         last_steer_pwm = pivot_steer
-        return 100, pivot_steer
+        # 거리가 가까우면 피벗 턴 시에도 안전 속도(110)를 사용합니다.
+        return CAUTION_SPEED, pivot_steer
 
     # ========================================================
-    # [2] 거리 비례 스코어링 모드
+    # [2] 거리 비례 스코어링 모드 (길 찾기 & 측면 철벽 방어)
     # ========================================================
     best_angle = 0
     best_score = -99999
@@ -121,17 +124,20 @@ def calculate_steering(scan_data):
 
         wall_repulsion_bonus = 0
         
+        # [Case 1] 골목길 모드: 양쪽 벽이 모두 20cm 이내일 때 (직진성 유지)
         if left_wall_min <= 200 and right_wall_min <= 200:
             if right_wall_min < left_wall_min - 20:
                 if angle > 0: wall_repulsion_bonus = 80  
             elif left_wall_min < right_wall_min - 20:
                 if angle < 0: wall_repulsion_bonus = 80  
+        # [Case 2] 측면 긴급 회피 모드
         else:
-            # ★ 수정 3: 긴급 회피 가중치를 200 -> 150으로 완화하여 과조향 방지
+            # ★ 수정: 정면 길 찾기 점수를 씹어먹을 수 있도록 밀어내기 가중치를 250점으로 대폭 상향!
+            # 코너를 돌다가도 측면이 13cm 이내로 긁힐 것 같으면 즉시 핸들을 풀고 차체를 방어합니다.
             if right_wall_min <= 130 and left_wall_min > right_wall_min + 30:
-                if angle >= 15: wall_repulsion_bonus = 150
+                if angle >= 15: wall_repulsion_bonus = 250
             elif left_wall_min <= 130 and right_wall_min > left_wall_min + 30:
-                if angle <= -15: wall_repulsion_bonus = 150
+                if angle <= -15: wall_repulsion_bonus = 250
                 
         score = dist_score - center_penalty + hysteresis_bonus + wall_repulsion_bonus
         
@@ -146,29 +152,30 @@ def calculate_steering(scan_data):
     else:
         last_avoid_dir = 0
 
-    # 목표로 하는 원본 조향값 계산
     target_steer_pwm = int(best_angle * STEER_GAIN)
     
     # ========================================================
     # [3] 4단계 속도 결정 및 조향 한계/스무딩 필터 적용
     # ========================================================
-    if front_clear_x <= 450:
+    
+    # ★ 추가: 주변 17cm(170mm) 이내에 무언가 감지되면 속도를 즉시 110으로 줄입니다.
+    if closest_dist <= 170:
+        current_speed = CAUTION_SPEED
+    elif front_clear_x <= 450:
         current_speed = ESCAPE_SPEED
     elif abs(best_angle) <= 15 and front_clear_x > SAFE_DISTANCE:
         current_speed = MAX_SPEED
     else:
         current_speed = AVOID_SPEED
     
-    # ★ 핵심 1: 조향 한계 (Steering Limit)
-    # 조향값이 현재 속도의 70%를 넘지 않도록 제한하여, 안쪽 바퀴가 멈추는 급회전을 막습니다.
+    # 조향값이 현재 속도의 70%를 넘지 않도록 제한 (오버스티어 방지)
     max_allowed_steer = int(current_speed * 0.7)
     if target_steer_pwm > max_allowed_steer:
         target_steer_pwm = max_allowed_steer
     elif target_steer_pwm < -max_allowed_steer:
         target_steer_pwm = -max_allowed_steer
 
-    # ★ 핵심 2: 조향 부드러움 필터 (Low-Pass Filter)
-    # 확 꺾지 않고, 이전 핸들 각도와 새로운 목표 각도를 섞어 스무스하게 돌립니다.
+    # 조향 부드러움 필터 (로우패스 필터)
     steer_pwm = int((SMOOTHING_FACTOR * target_steer_pwm) + ((1.0 - SMOOTHING_FACTOR) * last_steer_pwm))
     last_steer_pwm = steer_pwm
 
@@ -183,7 +190,7 @@ def main():
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
-    print("[INFO] 스무스 코너링 자율 주행 시작! (정지하려면 Ctrl+C)")
+    print("[INFO] 측면 방어 최우선 주행 시작! (정지하려면 Ctrl+C)")
 
     scan_data = []
 
