@@ -190,6 +190,10 @@ class SNDAvoider:
             time.sleep(2.0)
 
         self.start_time = time.time()
+
+        self.smoothed_theta_target = 0.0  
+        self.max_theta_step_rad = math.radians(10)  # 1루프당 최대 10도까지만 변화 허용 (튜닝 가능)
+        self.lpf_alpha = 0.3                        # 로우패스 필터 계수 (0.1~0.5 사이. 작을수록 묵직함)
         
         # ★ 5Hz 갱신을 위한 타이머 및 상태 변수 추가
         self.last_ds_update_time = 0
