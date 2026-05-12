@@ -44,8 +44,8 @@ MAX_HEADING_CMD_RAD = math.radians(60)
 
 # --- 디버그 / 안전 ---
 VERBOSE             = True
-DRY_RUN             = True        # 실제 모터 구동
-USE_VIS             = True        # 시각화 켜기/끄기
+DRY_RUN             = False        # 실제 모터 구동
+USE_VIS             = False        # 시각화 켜기/끄기
 
 
 # ============================================================
