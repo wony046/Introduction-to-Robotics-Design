@@ -266,13 +266,26 @@ class SNDAvoider:
             delta_avoid, near_count = compute_avoidance_deflection(
                 angles, dists, Ds, ROBOT_RADIUS_M
             )
-            theta_target = theta_d + delta_avoid
+            
+            # 1. 라이다가 계산한 날것(Raw)의 목표 각도
+            raw_theta_target = theta_d + delta_avoid
+            
+            # ★ 2. 변화율 제한 (Slew Rate Limiter)
+            diff = raw_theta_target - self.smoothed_theta_target
+            diff = max(-self.max_theta_step_rad, min(self.max_theta_step_rad, diff))
+            limited_theta = self.smoothed_theta_target + diff
+            
+            # ★ 3. 로우패스 필터 적용 (Low-Pass Filter)
+            self.smoothed_theta_target = (1.0 - self.lpf_alpha) * self.smoothed_theta_target + (self.lpf_alpha * limited_theta)
+            
             v = select_speed(dists)
-            self.send_command(v, theta_target)
+            
+            # 필터링을 거친 '부드러운 각도'를 아두이노로 최종 전송
+            self.send_command(v, self.smoothed_theta_target)
 
             if VERBOSE:
-                print(f"      Ds={Ds:.2f}  Th_d={math.degrees(theta_d):+5.1f}deg  "
-                      f"Del={math.degrees(delta_avoid):+5.1f}deg  gap_w={math.degrees(gap_w):.0f}deg")
+                print(f"      Ds={Ds:.2f}  Raw_Th={math.degrees(raw_theta_target):+5.1f}deg  "
+                      f"Smooth_Th={math.degrees(self.smoothed_theta_target):+5.1f}deg")
 
         if USE_VIS:
             x_pts = dists * np.sin(angles)
