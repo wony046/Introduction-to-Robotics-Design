@@ -226,7 +226,7 @@ def select_speed(dists):
 class SNDAvoider:
     def __init__(self):
         print("[INIT] RPLIDAR C1 열기...")
-        self.lidar = RPLidarC1(port=LIDAR_PORT, baudrate=LIDAR_BAUD)
+        self.lidar = SND_rplidar_serial(port=LIDAR_PORT, baudrate=LIDAR_BAUD)
 
         self.arduino = None
         if not DRY_RUN:
