@@ -17,7 +17,7 @@ lidar_ser = serial.Serial(LIDAR_PORT, 460800, timeout=1)
 SAFE_DISTANCE = 600      
 MAX_SPEED = 250          
 AVOID_SPEED = 150        
-CAUTION_SPEED = 110      # ★ 추가: 17cm 이내 장애물 감지 시 안전 속도
+CAUTION_SPEED = 110      
 ESCAPE_SPEED = 100       
 
 STEER_GAIN = 1.3         
@@ -40,13 +40,12 @@ def calculate_steering(scan_data):
     front_clear_x = 9999         
     left_wall_min = 9999         
     right_wall_min = 9999        
-    closest_dist = 9999          # ★ 추가: 내 주변 270도 모든 방향의 최단 거리
+    closest_dist = 9999          
     
     for angle, distance in scan_data:
         if angle > 180: angle -= 360
             
         if -135 <= angle <= 135 and distance > 0:
-            # 주변 전체 최단 거리 추적 (감속용)
             if distance < closest_dist:
                 closest_dist = distance
 
@@ -72,39 +71,37 @@ def calculate_steering(scan_data):
                     if abs(y_pos) < right_wall_min: right_wall_min = abs(y_pos)
 
     # ========================================================
-    # [1] 피벗 턴 (Pivot Turn) 모드
+    # [1] 피벗 턴 (Pivot Turn) 모드 - 발동 기준 및 강도 완화
     # ========================================================
-    # ★ 수정: 정면에 너무 예민하게 반응하여 홱 꺾는 것을 막기 위해 150(15cm)으로 하향
     if front_emergency_dist < 150 or front_clear_x < 150:
         left_openness = sum(bins[a] for a in range(10, 91, 10) if a in bins)
         right_openness = sum(bins[a] for a in range(-90, 0, 10) if a in bins)
 
-        # 홱 꺾는 각도도 80에서 70으로 살짝 부드럽게 완화
+        # 홱 꺾는 현상 방지를 위해 강도를 65로 더 낮춤
         if left_openness > right_openness + 500:
             last_avoid_dir = -1
-            pivot_steer = 70
+            pivot_steer = 65
         elif right_openness > left_openness + 500:
             last_avoid_dir = 1
-            pivot_steer = -70
+            pivot_steer = -65
         else:
             if last_avoid_dir == -1:
-                pivot_steer = 70
+                pivot_steer = 65
             elif last_avoid_dir == 1:
-                pivot_steer = -70
+                pivot_steer = -65
             else:
                 if left_wall_min > right_wall_min:
-                    pivot_steer = 70
+                    pivot_steer = 65
                     last_avoid_dir = -1
                 else:
-                    pivot_steer = -70
+                    pivot_steer = -65
                     last_avoid_dir = 1
         
         last_steer_pwm = pivot_steer
-        # 거리가 가까우면 피벗 턴 시에도 안전 속도(110)를 사용합니다.
         return CAUTION_SPEED, pivot_steer
 
     # ========================================================
-    # [2] 거리 비례 스코어링 모드 (길 찾기 & 측면 철벽 방어)
+    # [2] 거리 비례 스코어링 모드 (★ 비례 제어 알고리즘 적용 ★)
     # ========================================================
     best_angle = 0
     best_score = -99999
@@ -122,22 +119,27 @@ def calculate_steering(scan_data):
             elif last_avoid_dir == -1 and angle < -10:
                 hysteresis_bonus = 150
 
+        # ====================================================
+        # ★ 새로운 수학적 측면 방어 (비례 제어: Proportional Repulsion)
+        # ====================================================
         wall_repulsion_bonus = 0
         
-        # [Case 1] 골목길 모드: 양쪽 벽이 모두 20cm 이내일 때 (직진성 유지)
-        if left_wall_min <= 200 and right_wall_min <= 200:
-            if right_wall_min < left_wall_min - 20:
-                if angle > 0: wall_repulsion_bonus = 80  
-            elif left_wall_min < right_wall_min - 20:
-                if angle < 0: wall_repulsion_bonus = 80  
-        # [Case 2] 측면 긴급 회피 모드
-        else:
-            # ★ 수정: 정면 길 찾기 점수를 씹어먹을 수 있도록 밀어내기 가중치를 250점으로 대폭 상향!
-            # 코너를 돌다가도 측면이 13cm 이내로 긁힐 것 같으면 즉시 핸들을 풀고 차체를 방어합니다.
-            if right_wall_min <= 130 and left_wall_min > right_wall_min + 30:
-                if angle >= 15: wall_repulsion_bonus = 250
-            elif left_wall_min <= 130 and right_wall_min > left_wall_min + 30:
-                if angle <= -15: wall_repulsion_bonus = 250
+        # 1. 오른쪽 벽이 22cm(220mm) 이내로 들어올 때
+        if right_wall_min < 220:
+            # 가까워질수록(right_wall_min이 작아질수록) repel_force가 선형적으로 커짐
+            repel_force = (220 - right_wall_min) * 1.5
+            if angle > 0:   # 좌회전(회피) 각도에 보너스 부여
+                wall_repulsion_bonus += repel_force
+            elif angle < 0: # 우회전(충돌) 각도에 페널티 부여
+                wall_repulsion_bonus -= repel_force
+
+        # 2. 왼쪽 벽이 22cm(220mm) 이내로 들어올 때
+        if left_wall_min < 220:
+            repel_force = (220 - left_wall_min) * 1.5
+            if angle < 0:   # 우회전(회피) 각도에 보너스 부여
+                wall_repulsion_bonus += repel_force
+            elif angle > 0: # 좌회전(충돌) 각도에 페널티 부여
+                wall_repulsion_bonus -= repel_force
                 
         score = dist_score - center_penalty + hysteresis_bonus + wall_repulsion_bonus
         
@@ -157,8 +159,6 @@ def calculate_steering(scan_data):
     # ========================================================
     # [3] 4단계 속도 결정 및 조향 한계/스무딩 필터 적용
     # ========================================================
-    
-    # ★ 추가: 주변 17cm(170mm) 이내에 무언가 감지되면 속도를 즉시 110으로 줄입니다.
     if closest_dist <= 170:
         current_speed = CAUTION_SPEED
     elif front_clear_x <= 450:
@@ -168,14 +168,14 @@ def calculate_steering(scan_data):
     else:
         current_speed = AVOID_SPEED
     
-    # 조향값이 현재 속도의 70%를 넘지 않도록 제한 (오버스티어 방지)
-    max_allowed_steer = int(current_speed * 0.7)
+    # ★ 수정: 조향값이 속도의 55%를 넘지 못하게 하여 날카로운 코너링 원천 차단 (0.7 -> 0.55)
+    max_allowed_steer = int(current_speed * 0.55)
     if target_steer_pwm > max_allowed_steer:
         target_steer_pwm = max_allowed_steer
     elif target_steer_pwm < -max_allowed_steer:
         target_steer_pwm = -max_allowed_steer
 
-    # 조향 부드러움 필터 (로우패스 필터)
+    # 조향 부드러움 필터
     steer_pwm = int((SMOOTHING_FACTOR * target_steer_pwm) + ((1.0 - SMOOTHING_FACTOR) * last_steer_pwm))
     last_steer_pwm = steer_pwm
 
@@ -190,7 +190,7 @@ def main():
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
-    print("[INFO] 측면 방어 최우선 주행 시작! (정지하려면 Ctrl+C)")
+    print("[INFO] 비례 제어(Proportional) 스무스 주행 시작! (정지하려면 Ctrl+C)")
 
     scan_data = []
 
