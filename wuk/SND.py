@@ -267,8 +267,8 @@ class SNDAvoider:
             self.send_command(v, theta_target)
 
             if VERBOSE:
-                print(f"      폭기반 Ds={Ds:.2f}  θ_d={math.degrees(theta_d):+5.1f}°  "
-                      f"Δ={math.degrees(delta_avoid):+5.1f}°  gap_w={math.degrees(gap_w):.0f}°")
+                print(f"      Ds={Ds:.2f}  Th_d={math.degrees(theta_d):+5.1f}deg  "
+                      f"Del={math.degrees(delta_avoid):+5.1f}deg  gap_w={math.degrees(gap_w):.0f}deg")
 
         if USE_VIS:
             x_pts = dists * np.sin(angles)
