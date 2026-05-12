@@ -119,7 +119,7 @@ def parse_packet(data):
     angle_q6    = (data[1] >> 1) | (data[2] << 7)
     angle       = angle_q6 / 64.0
     distance_q2 = data[3] | (data[4] << 8)
-    distance    = distance_q2 / 4.0 + LIDAR_OFFSET   # +20mm 보정
+    distance    = distance_q2 / 4.0   # 보정은 유효값 확인 후 적용
     return angle, distance, quality
 
 
@@ -644,7 +644,8 @@ def main():
 
                 scan_points = []
 
-            scan_points.append((normalize_angle(angle_raw), distance))
+            scan_points.append((normalize_angle(angle_raw),
+                                distance + LIDAR_OFFSET if distance > 0 else 0))
 
     except KeyboardInterrupt:
         print("\n종료 중...")
