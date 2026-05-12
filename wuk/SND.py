@@ -23,7 +23,7 @@ ROBOT_RADIUS_M      = 0.09          # TUNE: 실측 로봇 반경 (외곽 포함)
 
 # --- SND 코어 파라미터 ---
 Ds_DEFAULT_M        = 0.30          # TUNE: 기본 안전거리
-USE_ADAPTIVE_Ds     = False         # 처음엔 False, 충분히 튜닝 후 True
+USE_ADAPTIVE_Ds     = True         # 처음엔 False, 충분히 튜닝 후 True
 Ds_TIGHT_M          = 0.45          # TUNE: 고밀도(통로) Ds
 Ds_OPEN_M           = 0.18          # TUNE: 저밀도(개활) Ds
 DENSITY_NEAR_DIST_M = 0.40
@@ -224,13 +224,13 @@ class SNDAvoider:
         if USE_VIS:
             # 1. 라이다 점들을 2D 좌표(X, Y)로 변환
             # (수학 공식: 앞이 Y축, 왼쪽이 -X축이 되도록 변환)
-            x_pts = -dists * np.sin(angles)
+            x_pts = dists * np.sin(angles)
             y_pts = dists * np.cos(angles)
             self.plot_pts.set_data(x_pts, y_pts)
             
             # 2. 안전거리(Ds) 반원 그리기
             arc_angles = np.linspace(-math.pi/2, math.pi/2, 50)
-            x_ds = -Ds * np.sin(arc_angles)
+            x_ds = Ds * np.sin(arc_angles)
             y_ds = Ds * np.cos(arc_angles)
             self.plot_ds.set_data(x_ds, y_ds)
             
