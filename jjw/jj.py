@@ -80,8 +80,10 @@ RECOVERY_W         = 0.8   # rad/s: 복귀 회전 각속도
 RECOVERY_SAFE_DIST = 350   # mm: 복귀 방향 장애물 판단 거리
 
 # ── 막힘 감지 ─────────────────────────────────────────────────────────────────
-STUCK_CLEAR_DIST = 400   # mm: 이 거리 이상이면 열린 공간으로 간주
-STUCK_MAX_SAFETY = 30    # mm: 최대 안전 여유 (거리 비례 감소)
+STUCK_CLEAR_DIST    = 400   # mm
+STUCK_MAX_SAFETY    = 30    # mm
+STUCK_TRIGGER_COUNT = 3     # 회: 이 횟수 연속 막힘 판정 시 탈출 실행
+                             #     정상 회피 중 단발 막힘 오판 방지
 
 # ── 탈출 회전 ─────────────────────────────────────────────────────────────────
 ESCAPE_CLEAR_DIST    = 500   # mm
@@ -100,6 +102,7 @@ SEND_INTERVAL    = 0.1
 # ─────────────────────────────────────────────────────────────────────────────
 
 arduino_heading_deg = 0.0
+stuck_count         = 0     # 연속 막힘 판정 횟수
 
 
 def normalize_angle(angle):
@@ -320,8 +323,10 @@ def find_escape_angle(all_scan_points):
 def check_rotation_blocked(w_sign, scan_points):
     """
     회전 방향 측면에 ESCAPE_ROTATION_SAFE 이내 장애물 있는지 확인
-    w_sign > 0: 왼쪽 회전 → 왼쪽(양수) 반구 확인
-    w_sign < 0: 오른쪽 회전 → 오른쪽(음수) 반구 확인
+
+    LiDAR 각도 규칙: 양수(+) = 오른쪽,  음수(-) = 왼쪽
+    오른쪽 회전(w<0) → 오른쪽 반구(양수 각도) 확인
+    왼쪽  회전(w>0) → 왼쪽  반구(음수 각도) 확인
     """
     scan_dict = {}
     for angle_norm, dist in scan_points:
@@ -331,10 +336,10 @@ def check_rotation_blocked(w_sign, scan_points):
         if bucket not in scan_dict or dist < scan_dict[bucket]:
             scan_dict[bucket] = dist
 
-    if w_sign < 0:
-        check = range(-ANGLE_STEP, -180, -ANGLE_STEP)
-    else:
+    if w_sign < 0:   # 오른쪽 회전 → 오른쪽(양수) 반구
         check = range(ANGLE_STEP, 180, ANGLE_STEP)
+    else:            # 왼쪽 회전 → 왼쪽(음수) 반구
+        check = range(-ANGLE_STEP, -180, -ANGLE_STEP)
 
     return any(
         0 < scan_dict.get(a, DETECTION_RANGE + 1) < ESCAPE_ROTATION_SAFE
@@ -352,7 +357,7 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
     4. 회전 실행 (30° 마다 LiDAR로 재확인 → 필요 시 방향 재계산)
     5. 정지
     """
-    global arduino_heading_deg
+    global arduino_heading_deg, stuck_count
 
     print("\n" + "="*52)
     print("[ESCAPE] 전진 불가 → 탈출 회전 시작")
@@ -472,15 +477,17 @@ def get_heading_recovery_cmd(heading_deg, front_scan_points):
     )
 
     # 보정 방향 장애물 확인
-    if natural_sign < 0:  # 오른쪽 보정 → 음수 각도 구간 확인
-        correction_blocked = any(
-            0 < scan_dict.get(a, DETECTION_RANGE + 1) < RECOVERY_SAFE_DIST
-            for a in range(-ANGLE_STEP, -SCAN_HALF_ANGLE - ANGLE_STEP, -ANGLE_STEP)
-        )
-    else:                 # 왼쪽 보정 → 양수 각도 구간 확인
+    # 오른쪽 보정(natural_sign<0, w<0) → 오른쪽(양수 각도) 확인
+    # 왼쪽  보정(natural_sign>0, w>0) → 왼쪽 (음수 각도) 확인
+    if natural_sign < 0:  # 오른쪽 보정 → 오른쪽(양수) 반구
         correction_blocked = any(
             0 < scan_dict.get(a, DETECTION_RANGE + 1) < RECOVERY_SAFE_DIST
             for a in range(ANGLE_STEP, SCAN_HALF_ANGLE + ANGLE_STEP, ANGLE_STEP)
+        )
+    else:                 # 왼쪽 보정 → 왼쪽(음수) 반구
+        correction_blocked = any(
+            0 < scan_dict.get(a, DETECTION_RANGE + 1) < RECOVERY_SAFE_DIST
+            for a in range(-ANGLE_STEP, -SCAN_HALF_ANGLE - ANGLE_STEP, -ANGLE_STEP)
         )
 
     corr_dir = "오른쪽" if natural_sign < 0 else "왼쪽"
@@ -712,14 +719,21 @@ def main():
                         scan_points  = []
                         continue
 
-                    # ── ② 막힘 감지 → 즉시 탈출 ────────────────────────────
+                    # ── ② 막힘 감지 → 연속 N회 판정 시 탈출 ─────────────────
                     if is_path_blocked(front_points):
-                        print("  [막힘감지] 즉시 탈출 회전 실행")
-                        execute_escape_rotation(arduino, lidar, all_scan_points)
-                        last_cmd_str = ""
-                        last_send    = time.time()
-                        scan_points  = []
-                        continue
+                        stuck_count += 1
+                        print(f"  [막힘감지] {stuck_count}/{STUCK_TRIGGER_COUNT}회")
+                        if stuck_count >= STUCK_TRIGGER_COUNT:
+                            execute_escape_rotation(arduino, lidar, all_scan_points)
+                            stuck_count  = 0
+                            last_cmd_str = ""
+                            last_send    = time.time()
+                            scan_points  = []
+                            continue
+                    else:
+                        if stuck_count > 0:
+                            print(f"  [막힘해제] 카운터 리셋 ({stuck_count}회)")
+                        stuck_count = 0
 
                     # ── ③ 정상 v/w 명령 ────────────────────────────────────
                     v, w = find_vw_command(front_points, arduino_heading_deg)
