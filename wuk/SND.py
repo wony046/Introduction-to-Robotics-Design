@@ -46,8 +46,8 @@ MAX_HEADING_CMD_RAD = math.radians(60)   # 명령 헤딩 클램프
 
 # --- 디버그 / 안전 ---
 VERBOSE             = True
-DRY_RUN             = True          # 시각화 테스트 시 True(모터정지) 권장
-USE_VIS             = True          # ★ 실시간 시각화 켜기/끄기
+DRY_RUN             = False          # 시각화 테스트 시 True(모터정지) 권장
+USE_VIS             = False          # ★ 실시간 시각화 켜기/끄기
 
 
 # ============================================================
