@@ -61,16 +61,18 @@ DETECTION_RANGE  = 1500  # mm: LiDAR 최대 신뢰 거리
 FORWARD_RANGE    = 800   # mm: 위험구역 전방 깊이
 
 # ── 속도 파라미터 ─────────────────────────────────────────────────────────────
-FORWARD_SPEED    = 0.20  # m/s: 최고 선속도
-SLOW_START_DIST  = 400   # mm: 이 전방거리부터 감속 시작
-# v=0 판정: 전방 STOP_FWD_RANGE × 수평 STOP_HORIZ_RANGE 직사각형 안에 장애물 있을 때
-STOP_FWD_RANGE   = 125   # mm: v=0 구역 전방 깊이 (구 긴급구역 전방)
-STOP_HORIZ_RANGE = 110   # mm: v=0 구역 수평 폭   (구 긴급구역 수평)
-W_GAIN           = 2.0   # 수평오차 P 게인
-MAX_W            = 2.0   # rad/s: 최대 각속도
+FORWARD_SPEED    = 0.35  # m/s: 최고 선속도 (기존 0.20에서 상향)
+MIN_SPEED        = 0.07  # m/s: 최소 선속도 (완전 정지 방지)
+SLOW_START_DIST  = 250   # mm: 이 전방거리부터 감속 시작 (기존 400에서 단축)
+STOP_FWD_RANGE   = 125   # mm: 최소속도 구역 전방 깊이
+STOP_HORIZ_RANGE = 110   # mm: 최소속도 구역 수평 폭
+W_GAIN           = 1.2   # 수평오차 P 게인 (기존 2.0에서 낮춰 부드럽게)
+MAX_W            = 1.5   # rad/s: 최대 각속도 (기존 2.0에서 낮춤)
 
 # ── 헤딩 방향 점수제 ──────────────────────────────────────────────────────────
-HEADING_WEIGHT   = 1.5   # 헤딩 1° = 여유공간 1.5° 가중치
+HEADING_WEIGHT   = 1.0   # 헤딩 1° = 여유공간 1.0° 가중치 (기존 1.5에서 낮춤)
+MIN_VIABLE_CLEAR = 25    # deg: 이 미만이면 해당 방향 진입 불가로 판단
+                          #      헤딩 보너스 무시하고 반대 방향 강제 → oscillation 방지
 
 # ── 헤딩 > 90° 능동 복귀 ─────────────────────────────────────────────────────
 HEADING_OVER_90    = 90.0  # deg: 이 이상이면 LiDAR 확인 후 복귀 회전
@@ -80,7 +82,7 @@ RECOVERY_SAFE_DIST = 350   # mm: 복귀 방향 장애물 판단 거리
 # ── 막힘 감지 ─────────────────────────────────────────────────────────────────
 STUCK_CLEAR_DIST = 400   # mm: 이 거리 이상이면 열린 공간으로 간주
 STUCK_MAX_SAFETY = 30    # mm: 최대 안전 여유 (거리 비례 감소, d=0이면 0mm)
-STUCK_TIMEOUT    = 2.0   # sec
+STUCK_TIMEOUT    = 0.5   # sec
 
 # ── 탈출 회전 ─────────────────────────────────────────────────────────────────
 ESCAPE_CLEAR_DIST = 500  # mm: 탈출 방향 판단 최소 거리
@@ -422,17 +424,31 @@ def select_direction(left_clear, right_clear, heading_deg):
     """
     여유공간 + 헤딩 보정 점수로 회피 방향 결정
 
-    left_score  = left_clear  + max(0, -heading_deg) × HEADING_WEIGHT
-    right_score = right_clear + max(0,  heading_deg) × HEADING_WEIGHT
+    [갇힘 방지 — MIN_VIABLE_CLEAR]
+      한쪽 여유공간이 MIN_VIABLE_CLEAR(25°) 미만이면 진입 불가로 판단
+      헤딩 보너스 무시하고 열린 쪽 강제 선택
+      → 헤딩 때문에 막힌 쪽으로 계속 꺾으려는 oscillation 방지
 
-    heading > 0 (왼쪽으로 돌아있음) → 오른쪽에 헤딩 보너스
-    heading < 0 (오른쪽으로 돌아있음) → 왼쪽에 헤딩 보너스
-
-    효과:
-      여유공간 차이가 크면 여유공간 방향이 이김
-      여유공간이 비슷하면 헤딩 감소 방향이 이김
-      헤딩이 클수록 보너스가 커져 자연스럽게 헤딩 복귀 유도
+    [점수제 — 양쪽 모두 통과 가능할 때]
+      left_score  = left_clear  + max(0, -heading_deg) × HEADING_WEIGHT
+      right_score = right_clear + max(0,  heading_deg) × HEADING_WEIGHT
     """
+    # 한쪽이 막혀있으면 열린 쪽 강제 (헤딩 무시)
+    left_ok  = left_clear  >= MIN_VIABLE_CLEAR
+    right_ok = right_clear >= MIN_VIABLE_CLEAR
+
+    if left_ok and not right_ok:
+        print(f"  [방향] 오른쪽 막힘({right_clear}°) → 왼쪽 강제")
+        return 1.0
+    if right_ok and not left_ok:
+        print(f"  [방향] 왼쪽 막힘({left_clear}°) → 오른쪽 강제")
+        return -1.0
+    if not left_ok and not right_ok:
+        # 양쪽 모두 좁음 → 그나마 넓은 쪽
+        print(f"  [방향] 양쪽 협소 → {'왼쪽' if left_clear >= right_clear else '오른쪽'} 선택")
+        return 1.0 if left_clear >= right_clear else -1.0
+
+    # 양쪽 모두 통과 가능 → 점수제
     left_score  = left_clear  + max(0.0, -heading_deg) * HEADING_WEIGHT
     right_score = right_clear + max(0.0,  heading_deg) * HEADING_WEIGHT
 
@@ -504,12 +520,12 @@ def find_vw_command(scan_points, heading_deg):
 
     # ── 선속도 계산 ──────────────────────────────────────────────────────────
     if stop_points:
-        v = 0.0   # 정지 직사각형 안에 장애물 → 회전만
+        v = MIN_SPEED  # 정지 구역 내 장애물 → 최솟값 유지 (완전 정지 금지)
     elif n_fwd_ref >= SLOW_START_DIST:
         v = FORWARD_SPEED
     else:
         ratio = (n_fwd_ref - STOP_FWD_RANGE) / (SLOW_START_DIST - STOP_FWD_RANGE)
-        v = FORWARD_SPEED * max(ratio, 0.0)
+        v = max(FORWARD_SPEED * ratio, MIN_SPEED)
 
     # ── 각속도 계산 (수평오차 P제어) ─────────────────────────────────────────
     horiz_error = threshold - n_horiz
@@ -552,7 +568,8 @@ def main():
     print(f"  아두이노 포트  : {ARDUINO_PORT}")
     print(f"  라이다 보정    : +{LIDAR_OFFSET}mm")
     print(f"  위험구역       : 전방 {FORWARD_RANGE}mm × 수평 {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm")
-    print(f"  선속도 감속    : {SLOW_START_DIST}mm부터 감속 → {STOP_FWD_RANGE}×{STOP_HORIZ_RANGE}mm 구역에서 v=0")
+    print(f"  속도           : 최고 {FORWARD_SPEED}m/s  최저 {MIN_SPEED}m/s (완전정지 없음)")
+    print(f"  선속도 감속    : {SLOW_START_DIST}mm부터 감속 → {STOP_FWD_RANGE}×{STOP_HORIZ_RANGE}mm 구역에서 최저속")
     print(f"  각속도 방식    : 수평오차 P제어 (horiz < {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm 동안 유지)")
     print(f"  막힘감지       : 열린구간 너비 < {ROBOT_HALF_WIDTH*2}~{ROBOT_HALF_WIDTH*2+STUCK_MAX_SAFETY}mm → {STUCK_TIMEOUT}초 지속 시 탈출")
     print(f"  탈출 각속도    : {ESCAPE_W} rad/s (최적 방향)")
