@@ -14,13 +14,13 @@ lidar_ser = serial.Serial(LIDAR_PORT, 460800, timeout=1)
 # ==========================================
 # 2. 자율 주행 파라미터 (★ 무정지 전진 전용 ★)
 # ==========================================
-SAFE_DISTANCE = 600      # 60cm (이 거리가 뚫려있어야 풀악셀)
-MAX_SPEED = 250          # 뻥 뚫렸을 때 속도
-AVOID_SPEED = 150        # 정상 회피 속도
-ESCAPE_SPEED = 100       # 좁은 틈 거북이 속도 (절대 0이 되지 않음!)
-STEER_GAIN = 1.7         # 조향 민감도
+SAFE_DISTANCE = 600      
+MAX_SPEED = 250          
+AVOID_SPEED = 150        
+ESCAPE_SPEED = 100       
+STEER_GAIN = 1.7         
 
-ROBOT_HALF_WIDTH = 115   # 로봇의 좌우 반경
+ROBOT_HALF_WIDTH = 115   # 로봇 폭 절반
 
 last_avoid_dir = 0       
 
@@ -30,7 +30,8 @@ last_avoid_dir = 0
 def calculate_steering(scan_data):
     global last_avoid_dir
     
-    bins = {angle: 9999 for angle in range(-90, 91, 10)}
+    # ★ 270도 시야각을 담을 수 있도록 Bins 범위 확장 (-140 ~ +140)
+    bins = {angle: 9999 for angle in range(-140, 141, 10)}
     
     front_emergency_dist = 9999  
     front_clear_x = 9999         
@@ -40,7 +41,8 @@ def calculate_steering(scan_data):
     for angle, distance in scan_data:
         if angle > 180: angle -= 360
             
-        if -90 <= angle <= 90 and distance > 0:
+        # ★ 270도 시야 확보 (-135도 ~ +135도)
+        if -135 <= angle <= 135 and distance > 0:
             bin_angle = round(angle / 10) * 10
             if bin_angle in bins and distance < bins[bin_angle]:
                 bins[bin_angle] = distance
@@ -48,28 +50,31 @@ def calculate_steering(scan_data):
             x_pos = distance * math.cos(math.radians(angle))
             y_pos = distance * math.sin(math.radians(angle))
             
-            # [A] 코앞 비상 감지 (정지 불가능하므로 기준 거리를 200->250으로 상향!)
+            # [A] 코앞 비상 감지 (25cm 이내)
             if -20 <= angle <= 20:
                 if distance < front_emergency_dist:
                     front_emergency_dist = distance
 
+            # [B] 내 궤적 내 방해물 (전방 직진 시)
             if x_pos > 50 and abs(y_pos) <= ROBOT_HALF_WIDTH:
                 if x_pos < front_clear_x:
                     front_clear_x = x_pos
                     
-            if -100 < x_pos < 400:
+            # [C] ★ 270도 측면 긁힘 감시 (로봇 뒤쪽 20cm부터 전방 40cm까지) ★
+            # 회전할 때 바깥쪽으로 밀리는 엉덩이나 뒷바퀴가 벽에 긁히는 것을 감지합니다.
+            if -200 < x_pos < 400:
                 if angle >= 30:   
                     if y_pos < left_wall_min: left_wall_min = y_pos
                 elif angle <= -30: 
                     if abs(y_pos) < right_wall_min: right_wall_min = abs(y_pos)
 
     # ========================================================
-    # [1] 피벗 턴 (Pivot Turn) 모드: 정지/제자리 회전 절대 불가!
+    # [1] 피벗 턴 (Pivot Turn) 모드: 정지/제자리 회전 절대 불가
     # ========================================================
-    # 코앞 25cm에 벽이 나타나면 멈추지 않고, 전진하며 날카롭게 꺾어버립니다.
     if front_emergency_dist < 250 or front_clear_x < 250:
-        left_openness = sum(bins[a] for a in range(10, 91, 10))
-        right_openness = sum(bins[a] for a in range(-90, 0, 10))
+        # 피벗 턴 방향 결정 시에는 정면(90도 이내) 데이터만 참고합니다.
+        left_openness = sum(bins[a] for a in range(10, 91, 10) if a in bins)
+        right_openness = sum(bins[a] for a in range(-90, 0, 10) if a in bins)
 
         if left_openness > right_openness + 500:
             last_avoid_dir = -1
@@ -90,7 +95,6 @@ def calculate_steering(scan_data):
                     pivot_steer = -100
                     last_avoid_dir = 1
         
-        # ★ Speed 100, Steer 100을 주면 -> 한 바퀴는 0, 다른 바퀴는 200으로 '전진 피벗 회전' 합니다.
         return 100, pivot_steer
 
     # ========================================================
@@ -99,11 +103,12 @@ def calculate_steering(scan_data):
     best_angle = 0
     best_score = -99999
     
+    # 조향(핸들) 점수는 정면(-90 ~ 90)만 계산합니다. (뒤로 조향할 순 없으므로)
     for angle in range(-90, 91, 10):
         dist = bins[angle]
         
-        # 거리를 600까지만 봐서 헛것을 보지 않되, 함정에 빠지기 전에 피할 시야는 확보
-        dist_score = min(dist, 600) * 1.0
+        # ★ 1m 시야 확보: 코너 탈출구를 미리 보고 부드럽게 진입합니다!
+        dist_score = min(dist, 1000) * 1.0
         center_penalty = abs(angle) * 3.5
         
         hysteresis_bonus = 0
@@ -114,10 +119,12 @@ def calculate_steering(scan_data):
                 hysteresis_bonus = 150
 
         wall_repulsion_bonus = 0
-        if right_wall_min < 200 and left_wall_min > right_wall_min + 40:
-            if angle > 10: wall_repulsion_bonus = 150
-        elif left_wall_min < 200 and right_wall_min > left_wall_min + 40:
-            if angle < -10: wall_repulsion_bonus = 150
+        # ★ 측면 긁힘 철벽 방어 (Wall Repulsion 강화) ★
+        # 벽이 차체 중앙에서 18cm 이내(약 6.5cm 여유)로 가까워지면 즉시 강한 보너스(250점)를 주어 밀어냅니다!
+        if right_wall_min < 180 and left_wall_min > right_wall_min + 40:
+            if angle > 15: wall_repulsion_bonus = 250
+        elif left_wall_min < 180 and right_wall_min > left_wall_min + 40:
+            if angle < -15: wall_repulsion_bonus = 250
                 
         score = dist_score - center_penalty + hysteresis_bonus + wall_repulsion_bonus
         
@@ -135,7 +142,7 @@ def calculate_steering(scan_data):
     steer_pwm = int(best_angle * STEER_GAIN)
     
     # ========================================================
-    # [3] 4단계 속도 결정 및 ★ 역회전 방지 잠금장치 ★
+    # [3] 4단계 속도 결정 및 역회전 방지 잠금장치
     # ========================================================
     if front_clear_x <= 450:
         current_speed = ESCAPE_SPEED
@@ -144,8 +151,6 @@ def calculate_steering(scan_data):
     else:
         current_speed = AVOID_SPEED
     
-    # ★ 핵심 규정 방어: 조향값이 현재 속도보다 커지면 바퀴 하나가 음수(후진)가 됩니다.
-    # 이를 원천 차단하기 위해 steer_pwm을 current_speed 범위 안으로 가둡니다.
     if steer_pwm > current_speed:
         steer_pwm = current_speed
     elif steer_pwm < -current_speed:
@@ -154,7 +159,7 @@ def calculate_steering(scan_data):
     return current_speed, steer_pwm
 
 # ==========================================
-# 4. 메인 루프 (라이다 데이터 파싱 및 전송)
+# 4. 메인 루프
 # ==========================================
 def main():
     print("[INFO] 라이다 초기화 중...")
@@ -162,7 +167,7 @@ def main():
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
-    print("[INFO] 무정지 전진 자율 주행 시작! (정지하려면 Ctrl+C)")
+    print("[INFO] 무정지 270도 시야 자율 주행 시작! (정지하려면 Ctrl+C)")
 
     scan_data = []
 
