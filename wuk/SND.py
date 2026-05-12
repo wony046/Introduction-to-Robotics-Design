@@ -28,7 +28,7 @@ import serial
 import numpy as np
 
 # 사용자 환경의 RPLIDAR C1 드라이버 (기존)
-import SND_rplidar_serial
+import RPLidarSerial
 
 
 # ============================================================
