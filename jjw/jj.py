@@ -655,7 +655,7 @@ def find_vw_command(scan_points, heading_deg):
 
 
 def main():
-    global stuck_since, arduino_heading_deg
+    global arduino_heading_deg, stuck_count
 
     print("=== RPLIDAR 장애물 회피 v5 ===")
     print(f"  라이다 포트    : {LIDAR_PORT}")
