@@ -63,9 +63,10 @@ FORWARD_RANGE    = 800   # mm: 위험구역 전방 깊이
 # ── 속도 파라미터 ─────────────────────────────────────────────────────────────
 FORWARD_SPEED    = 0.20  # m/s: 최고 선속도
 SLOW_START_DIST  = 400   # mm: 이 전방거리부터 감속 시작
-STOP_DIST        = 120   # mm: 이 전방거리 이하에서 선속도=0 (회전만)
-                          #     = ROBOT_FRONT_DIST (로봇 정면이 장애물에 닿는 거리)
-W_GAIN           = 2.0   # 수평오차 P 게인: w = W_GAIN × (threshold-horiz)/threshold
+# v=0 판정: 전방 STOP_FWD_RANGE × 수평 STOP_HORIZ_RANGE 직사각형 안에 장애물 있을 때
+STOP_FWD_RANGE   = 125   # mm: v=0 구역 전방 깊이 (구 긴급구역 전방)
+STOP_HORIZ_RANGE = 110   # mm: v=0 구역 수평 폭   (구 긴급구역 수평)
+W_GAIN           = 2.0   # 수평오차 P 게인
 MAX_W            = 2.0   # rad/s: 최대 각속도
 
 # ── 헤딩 방향 점수제 ──────────────────────────────────────────────────────────
@@ -451,15 +452,21 @@ def find_vw_command(scan_points, heading_deg):
     """
     정면 스캔 + 헤딩 → (v m/s, w rad/s) 반환
 
-    [선속도 — 전방거리 기반 연속 감속]
-      n_fwd >= SLOW_START_DIST(400mm) → v = FORWARD_SPEED (최고속도)
+    [기준 장애물 분리]
+      v 기준: 정면 45° 이내(fwd >= horiz) 장애물의 최소 n_fwd
+              → 옆 벽(n_fwd ≈ 0)이 v를 0으로 만드는 것을 방지
+      w 기준: n_horiz가 가장 작은 장애물 (로봇 경로에 가장 걸리는 것)
+              → 가장 위험한 방향으로 회전
+
+    [선속도 — 전방거리 연속 감속]
+      n_fwd >= SLOW_START_DIST(400mm) → v = FORWARD_SPEED
       n_fwd <= STOP_DIST(120mm)       → v = 0 (회전만)
       그 사이                          → 선형 감소
 
     [각속도 — 수평오차 P제어]
-      n_horiz < threshold(120mm) 인 동안 w 지속
-      w = sign × W_GAIN × (threshold - n_horiz) / threshold
-      n_horiz >= threshold → w = 0 (수평 여유 확보됨, 직진)
+      horiz_error = threshold - n_horiz
+      horiz_error > 0 인 동안: w = sign × W_GAIN × horiz_error / threshold
+      horiz_error ≤ 0           : w = 0 (수평 여유 확보, 직진)
     """
     threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN   # 120mm
 
@@ -475,24 +482,37 @@ def find_vw_command(scan_points, heading_deg):
     if not danger_points:
         return FORWARD_SPEED, 0.0
 
-    # 가장 가까운 장애물
-    nearest = min(danger_points, key=lambda p: p[1])
-    nearest_angle, ref_dist, n_horiz, n_fwd = nearest
-
-    print(f"  [기준장애물] 각도:{nearest_angle:.1f}°  "
-          f"직선:{ref_dist:.0f}mm  전방:{n_fwd:.0f}mm  수평:{n_horiz:.0f}mm")
-
-    # ── 선속도: 전방거리 기반 연속 감속 ─────────────────────────────────────
-    if n_fwd >= SLOW_START_DIST:
-        v = FORWARD_SPEED
-    elif n_fwd <= STOP_DIST:
-        v = 0.0
+    # ── v 기준: 정면 직사각형(STOP_FWD × STOP_HORIZ) 안의 장애물 ──────────────
+    # 구 긴급구역 범위 재활용 → 옆 벽은 제외하고 진짜 정면 장애물만 판별
+    stop_points = [
+        p for p in danger_points
+        if p[3] <= STOP_FWD_RANGE and p[2] <= STOP_HORIZ_RANGE
+    ]
+    # 감속 기준: 전체 danger_points 중 정면 방향(fwd >= horiz) 최소 n_fwd
+    frontal = [p for p in danger_points if p[3] >= p[2]]
+    if frontal:
+        n_fwd_ref = min(p[3] for p in frontal)
     else:
-        ratio = (n_fwd - STOP_DIST) / (SLOW_START_DIST - STOP_DIST)
-        v = FORWARD_SPEED * ratio
+        n_fwd_ref = SLOW_START_DIST + 1   # 정면 장애물 없음 → 전속
 
-    # ── 각속도: 수평오차 P제어 ───────────────────────────────────────────────
-    horiz_error = threshold - n_horiz   # > 0: 아직 위험구역, ≤ 0: 안전
+    # ── w 기준: n_horiz 최소 장애물 (경로에 가장 걸리는 것) ──────────────────
+    horiz_ref = min(danger_points, key=lambda p: p[2])
+    nearest_angle, ref_dist, n_horiz, _ = horiz_ref
+
+    print(f"  [v기준] 전방:{n_fwd_ref:.0f}mm  정지구역내:{len(stop_points)}개  "
+          f"[w기준] 각도:{nearest_angle:.1f}°  수평:{n_horiz:.0f}mm")
+
+    # ── 선속도 계산 ──────────────────────────────────────────────────────────
+    if stop_points:
+        v = 0.0   # 정지 직사각형 안에 장애물 → 회전만
+    elif n_fwd_ref >= SLOW_START_DIST:
+        v = FORWARD_SPEED
+    else:
+        ratio = (n_fwd_ref - STOP_FWD_RANGE) / (SLOW_START_DIST - STOP_FWD_RANGE)
+        v = FORWARD_SPEED * max(ratio, 0.0)
+
+    # ── 각속도 계산 (수평오차 P제어) ─────────────────────────────────────────
+    horiz_error = threshold - n_horiz
     if horiz_error > 0:
         # 좌우 여유공간
         scan_dict = {}
@@ -519,7 +539,7 @@ def find_vw_command(scan_points, heading_deg):
         w = 0.0   # 수평거리 충분 → 직진
 
     print(f"  [속도명령] v:{v:.2f}m/s  w:{w:.2f}rad/s  "
-          f"(fwd:{n_fwd:.0f}mm  horiz_err:{horiz_error:.0f}mm)")
+          f"(전방:{n_fwd_ref:.0f}mm  수평오차:{horiz_error:.0f}mm)")
 
     return v, w
 
@@ -532,7 +552,7 @@ def main():
     print(f"  아두이노 포트  : {ARDUINO_PORT}")
     print(f"  라이다 보정    : +{LIDAR_OFFSET}mm")
     print(f"  위험구역       : 전방 {FORWARD_RANGE}mm × 수평 {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm")
-    print(f"  선속도 감속    : {SLOW_START_DIST}mm부터 감속 → {STOP_DIST}mm에서 v=0")
+    print(f"  선속도 감속    : {SLOW_START_DIST}mm부터 감속 → {STOP_FWD_RANGE}×{STOP_HORIZ_RANGE}mm 구역에서 v=0")
     print(f"  각속도 방식    : 수평오차 P제어 (horiz < {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm 동안 유지)")
     print(f"  막힘감지       : 열린구간 너비 < {ROBOT_HALF_WIDTH*2}~{ROBOT_HALF_WIDTH*2+STUCK_MAX_SAFETY}mm → {STUCK_TIMEOUT}초 지속 시 탈출")
     print(f"  탈출 각속도    : {ESCAPE_W} rad/s (최적 방향)")
@@ -566,32 +586,6 @@ def main():
 
             if s_flag == 1 and scan_points:
                 all_scan_points = list(scan_points)   # 전체 360도 스냅샷
-
-              # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                # [추가] 라이다 중심점 확인용 거리 로그 출력
-                # 각 방향(정면, 좌, 우, 후) ±3도 범위 내의 최솟값을 찾습니다.
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-                front_vals = [d for a, d in all_scan_points if -3 <= a <= 3 and d > 0]
-                left_vals  = [d for a, d in all_scan_points if -93 <= a <= -87 and d > 0]
-                right_vals = [d for a, d in all_scan_points if 87 <= a <= 93 and d > 0]
-                back_vals  = [d for a, d in all_scan_points if (a >= 177 or a <= -177) and d > 0]
-
-                front_d = min(front_vals) if front_vals else 0
-                left_d  = min(left_vals) if left_vals else 0
-                right_d = min(right_vals) if right_vals else 0
-                back_d  = min(back_vals) if back_vals else 0
-
-                # 1초에 너무 많이 출력되면 보기 힘드니 SEND_INTERVAL에 맞춰 출력
-                now = time.time()
-                if now - last_send >= SEND_INTERVAL:
-                    print(f"📏 [거리측정] 정면: {front_d:.0f}mm | 좌측: {left_d:.0f}mm | 우측: {right_d:.0f}mm | 후면: {back_d:.0f}mm")
-                # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-                front_points    = [
-                    (a, d) for a, d in scan_points
-                    if is_in_front(a) and d > 0
-                ]
-              
                 front_points    = [
                     (a, d) for a, d in scan_points
                     if is_in_front(a) and d > 0
