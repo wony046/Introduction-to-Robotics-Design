@@ -48,9 +48,9 @@ Ds_OPEN_M           = 0.18
 GAP_PASS_TH_M       = ROBOT_RADIUS_M + 0.05   # = 0.20 m
 
 # --- ★ 위급도 임계 ---
-WARNING_DIST_M      = 0.40        # 이 이하부터 응급 모드 점진 진입
-EMERGENCY_DIST_M    = 0.22        # 이 이하면 완전 응급 (urgency=1.0)
-COLLISION_GUARD_M   = 0.18        # 즉시 정지 + 큰 회전 (안전망)
+WARNING_DIST_M      = 0.45        # 이 이하부터 응급 모드 점진 진입
+EMERGENCY_DIST_M    = 0.25        # 이 이하면 완전 응급 (urgency=1.0)
+COLLISION_GUARD_M   = 0.23        # 즉시 정지 + 큰 회전 (안전망)
 
 # --- 속도 ---
 V_MAX_MPS           = 0.20        # 최대 직진 속도 (필요시 0.25까지 증가 가능)
@@ -67,13 +67,13 @@ ANGLE_BIN_DEG       = 2
 # --- 제어 루프 ---
 LOOP_HZ             = 10
 DS_UPDATE_HZ        = 5
-MAX_HEADING_CMD_RAD = math.radians(70)    # ★ 60 → 70 (위급 회피용)
+MAX_HEADING_CMD_RAD = math.radians(50)    # ★ 60 → 70 (위급 회피용)
 
 # --- ★ 동적 필터 (urgency 0~1 사이에서 보간) ---
 STEP_DEG_CALM       = 10          # 평상시 1루프당 회전 한계
-STEP_DEG_PANIC      = 60          # 위급 시
-LPF_ALPHA_CALM      = 0.30
-LPF_ALPHA_PANIC     = 0.90
+STEP_DEG_PANIC      = 25          # 위급 시
+LPF_ALPHA_CALM      = 0.20
+LPF_ALPHA_PANIC     = 0.60
 
 # --- ★ 데드락 (gap 없을 때) ---
 NO_GAP_TRY_FORWARD_S = 1.0        # 전진 유지 + 큰 회전 시도
@@ -84,6 +84,9 @@ NO_GAP_ESCAPE_ANGLE  = math.radians(55)
 VERBOSE             = True
 DRY_RUN             = False
 USE_VIS             = False
+
+# --- 척력 스케일링 ---
+delta_avoid_Scale   = 0.7 
 
 
 # ============================================================
@@ -113,11 +116,8 @@ def downsample_scan(scan_points, bin_deg=ANGLE_BIN_DEG, fov_deg=FRONT_FOV_DEG):
 # ============================================================
 # SND 코어 함수
 # ============================================================
-def find_largest_gap(angles, dists, gap_threshold_m):
-    """
-    ★ 변경: 각도 폭이 아니라 (각도 폭 × 평균 거리) = 호 길이로 점수화.
-    멀리 있는 작은 gap이 가까이 있는 큰 gap을 이기는 문제 방지.
-    """
+# 파라미터에 current_heading 추가
+def find_largest_gap(angles, dists, gap_threshold_m, current_heading=0.0):
     is_gap = dists > gap_threshold_m
     if not np.any(is_gap):
         return None, 0.0
@@ -136,15 +136,20 @@ def find_largest_gap(angles, dists, gap_threshold_m):
         if e - s < 1: continue
         ang_width = angles[e - 1] - angles[s]
         avg_dist  = float(np.mean(dists[s:e]))
-        score     = ang_width * avg_dist        # ★ 호 길이 근사
+        center    = (angles[s] + angles[e - 1]) / 2.0
+        
+        # ★ 관성(Hysteresis) 패널티 적용: 현재 방향과 멀어질수록 점수 삭감
+        alignment_penalty = abs(center - current_heading) / math.pi
+        score = (ang_width * avg_dist) * (1.0 - 0.4 * alignment_penalty) 
+
         if score > best_score:
             best_score = score
-            best_seg   = (s, e, ang_width)
+            best_seg   = (s, e, ang_width, center)
 
     if best_seg is None:
         return None, 0.0
-    s, e, ang_width = best_seg
-    center = (angles[s] + angles[e - 1]) / 2.0
+    
+    _, _, ang_width, center = best_seg
     return float(center), float(ang_width)
 
 
@@ -387,7 +392,7 @@ class SNDAvoider:
         # ============================================
         # ④ Gap 찾기 (★ Ds와 분리된 임계)
         # ============================================
-        theta_d, gap_w = find_largest_gap(angles, dists, GAP_PASS_TH_M)
+        theta_d, gap_w = find_largest_gap(angles, dists, GAP_PASS_TH_M, self.smoothed_theta_target)
 
         # ============================================
         # ⑤ Gap 없음 → 데드락 정책
@@ -405,7 +410,7 @@ class SNDAvoider:
         delta_avoid, near_count = compute_avoidance_deflection(
             angles, dists, Ds, ROBOT_RADIUS_M
         )
-        raw_theta = theta_d + delta_avoid
+        raw_theta = theta_d + (delta_avoid * delta_avoid_Scale)
         out_theta = self._apply_dynamic_filter(raw_theta, urgency)
 
         # ============================================
