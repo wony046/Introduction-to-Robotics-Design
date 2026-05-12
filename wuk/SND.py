@@ -298,9 +298,9 @@ class SNDAvoider:
             self.plot_ds.set_data(x_ds, y_ds)
             
             line_len = 0.8
-            # ★ 초록 화살표 좌우 반전 오타 완전 제거 완료
-            self.plot_target.set_data([0, line_len * math.sin(theta_target)],
-                                      [0, line_len * math.cos(theta_target)])
+            # ★ 변수명을 필터링된 최종 목표 각도로 변경 (NameError 방지)
+            self.plot_target.set_data([0, line_len * math.sin(self.smoothed_theta_target)],
+                                      [0, line_len * math.cos(self.smoothed_theta_target)])
             plt.pause(0.001)
 
     def run(self, duration_sec=60.0):
