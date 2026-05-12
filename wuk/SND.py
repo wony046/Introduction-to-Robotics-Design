@@ -19,7 +19,7 @@ ARDUINO_PORT        = "/dev/ttyACM0"
 ARDUINO_BAUD        = 115200
 
 # --- 로봇 기하 ---
-ROBOT_RADIUS_M      = 0.09          # TUNE: 실측 로봇 반경 (외곽 포함)
+ROBOT_RADIUS_M      = 0.15          # TUNE: 실측 로봇 반경 (외곽 포함)
 
 # --- SND 코어 파라미터 ---
 Ds_DEFAULT_M        = 0.30          # TUNE: 기본 안전거리
