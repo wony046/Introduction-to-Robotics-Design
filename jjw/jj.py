@@ -367,48 +367,26 @@ def execute_escape_rotation(arduino, all_scan_points):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 정면(±45°) 열림 확인
+# 헤딩 > 90° 복귀 명령 결정 (v, w 동시 반환)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def is_frontal_clear(front_scan_points):
+def get_heading_recovery_cmd(heading_deg, front_scan_points):
     """
-    정면 ±45° 이내에 RECOVERY_SAFE_DIST 이상 열린 방향이 있는지 확인
+    헤딩이 90°를 넘었을 때 0°로 복귀하는 v, w 결정
 
-    헤딩 > 90° 복귀 시 판단:
-      True  → 직진 가능 (v=FORWARD_SPEED, Arduino P제어로 헤딩 자연 복귀)
-      False → 정면 막힘 (get_recovery_direction으로 회전 방향 결정)
+    [A안: 직진 + 보정 회전 동시 적용]
+      직진(v=FORWARD_SPEED)하면서 헤딩 감소 방향으로 약한 w 추가
+      → 부드러운 곡선으로 전진하며 자연스럽게 헤딩 복귀
+
+    [판단 순서]
+      1. 정면 ±45° 열려있는지 확인
+      2. 헤딩 감소 방향(보정 방향)에 장애물 있는지 확인
+
+      정면 열림 + 보정 안전 → v=전진,  w=보정회전  (A안 정상)
+      정면 열림 + 보정 막힘 → v=전진,  w=0          (직진만, 기회 기다림)
+      정면 막힘 + 보정 안전 → v=0,     w=보정회전   (제자리 회전 복귀)
+      정면 막힘 + 보정 막힘 → v=0,     w=반대방향   (우회 회전)
     """
-    scan_dict = {}
-    for angle_norm, dist in front_scan_points:
-        if dist <= 0:
-            continue
-        bucket = round(angle_norm / ANGLE_STEP) * ANGLE_STEP
-        if bucket not in scan_dict or dist < scan_dict[bucket]:
-            scan_dict[bucket] = dist
-
-    for a in range(-45, 50, ANGLE_STEP):
-        if scan_dict.get(a, 0) >= RECOVERY_SAFE_DIST:
-            return True   # 하나라도 열린 방향 있으면 직진 가능
-    return False
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 헤딩 > 90° 능동 복귀: 안전한 회전 방향 결정
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def get_recovery_direction(heading_deg, front_scan_points):
-    """
-    헤딩이 90°를 넘었을 때 0°로 복귀하는 안전한 방향 결정
-
-    [자연 방향]
-      heading > 0 (왼쪽으로 돌아있음) → 오른쪽(w<0)으로 회전해 0°로 복귀
-      heading < 0 (오른쪽으로 돌아있음) → 왼쪽(w>0)
-
-    [LiDAR 안전 확인]
-      회전할 방향 쪽 (오른쪽 회전 → 음수 각도 구간) 에
-      RECOVERY_SAFE_DIST 이내 장애물 있으면 → 반대 방향 시도
-
-    Returns: w 값 (+: 왼쪽, -: 오른쪽)
-    """
-    natural_sign = -1.0 if heading_deg > 0 else 1.0   # 자연 방향 부호
+    natural_sign = -1.0 if heading_deg > 0 else 1.0  # 헤딩 감소 방향 부호
 
     scan_dict = {}
     for angle_norm, dist in front_scan_points:
@@ -418,26 +396,43 @@ def get_recovery_direction(heading_deg, front_scan_points):
         if bucket not in scan_dict or dist < scan_dict[bucket]:
             scan_dict[bucket] = dist
 
-    def side_blocked(sign):
-        """sign < 0: 오른쪽(음수각도) 확인, sign > 0: 왼쪽(양수각도) 확인"""
-        if sign < 0:
-            check = range(-ANGLE_STEP, -SCAN_HALF_ANGLE - ANGLE_STEP, -ANGLE_STEP)
-        else:
-            check = range(ANGLE_STEP, SCAN_HALF_ANGLE + ANGLE_STEP, ANGLE_STEP)
-        return any(
+    # 정면 ±45° 열림 확인
+    frontal_open = any(
+        scan_dict.get(a, 0) >= RECOVERY_SAFE_DIST
+        for a in range(-45, 50, ANGLE_STEP)
+    )
+
+    # 보정 방향 장애물 확인
+    if natural_sign < 0:  # 오른쪽 보정 → 음수 각도 구간 확인
+        correction_blocked = any(
             0 < scan_dict.get(a, DETECTION_RANGE + 1) < RECOVERY_SAFE_DIST
-            for a in check
+            for a in range(-ANGLE_STEP, -SCAN_HALF_ANGLE - ANGLE_STEP, -ANGLE_STEP)
+        )
+    else:                 # 왼쪽 보정 → 양수 각도 구간 확인
+        correction_blocked = any(
+            0 < scan_dict.get(a, DETECTION_RANGE + 1) < RECOVERY_SAFE_DIST
+            for a in range(ANGLE_STEP, SCAN_HALF_ANGLE + ANGLE_STEP, ANGLE_STEP)
         )
 
-    if not side_blocked(natural_sign):
-        dir_str = "오른쪽" if natural_sign < 0 else "왼쪽"
-        print(f"  [복귀] 헤딩:{heading_deg:.1f}° → {dir_str} 회전 (자연방향 안전)")
-        return natural_sign * RECOVERY_W
-    else:
-        alt_sign = -natural_sign
-        dir_str  = "오른쪽" if alt_sign < 0 else "왼쪽"
-        print(f"  [복귀] 자연방향 막힘 → {dir_str} 우회 회전")
-        return alt_sign * RECOVERY_W
+    corr_dir = "오른쪽" if natural_sign < 0 else "왼쪽"
+
+    if frontal_open and not correction_blocked:
+        print(f"  [헤딩복귀-A] 직진+보정회전({corr_dir})  "
+              f"v={FORWARD_SPEED:.2f} w={natural_sign*RECOVERY_W:.2f}")
+        return FORWARD_SPEED, natural_sign * RECOVERY_W
+
+    elif frontal_open and correction_blocked:
+        print(f"  [헤딩복귀] 직진만 (보정방향 {corr_dir} 막힘)")
+        return FORWARD_SPEED, 0.0
+
+    elif not frontal_open and not correction_blocked:
+        print(f"  [헤딩복귀] 제자리 보정회전({corr_dir})  w={natural_sign*RECOVERY_W:.2f}")
+        return 0.0, natural_sign * RECOVERY_W
+
+    else:  # 정면 막힘 + 보정 막힘
+        alt_dir = "왼쪽" if natural_sign < 0 else "오른쪽"
+        print(f"  [헤딩복귀] 양쪽 막힘 → 우회({alt_dir}) 회전")
+        return 0.0, -natural_sign * RECOVERY_W
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -634,22 +629,15 @@ def main():
                 now = time.time()
                 if now - last_send >= SEND_INTERVAL:
 
-                    # ── ① 헤딩 > 90°: 장애물 없는 방향으로 직진 우선 ────────
+                    # ── ① 헤딩 > 90°: 직진+보정회전으로 복귀 ───────────────
                     if abs(arduino_heading_deg) > HEADING_OVER_90:
-                        if is_frontal_clear(front_points):
-                            # 정면 열림 → 직진 (Arduino P제어가 헤딩 복귀)
-                            cmd = f"{FORWARD_SPEED:.2f} 0.00\n"
-                            print(f"[헤딩복귀] {arduino_heading_deg:.1f}° "
-                                  f"→ 정면 열림, 직진으로 자연 복귀")
-                        else:
-                            # 정면 막힘 → LiDAR 확인 후 열린 방향으로 회전
-                            recovery_w = get_recovery_direction(
-                                arduino_heading_deg, front_points
-                            )
-                            cmd = f"0.00 {recovery_w:.2f}\n"
-                            print(f"[헤딩복귀] {arduino_heading_deg:.1f}° "
-                                  f"→ 정면 막힘, 회전 w={recovery_w:.2f}")
+                        rec_v, rec_w = get_heading_recovery_cmd(
+                            arduino_heading_deg, front_points
+                        )
+                        cmd = f"{rec_v:.2f} {rec_w:.2f}\n"
                         arduino.write(cmd.encode())
+                        print(f"[헤딩복귀] {arduino_heading_deg:.1f}°  "
+                              f"v={rec_v:.2f}  w={rec_w:.2f}")
                         last_cmd_str = cmd
                         last_send    = now
                         scan_points  = []
