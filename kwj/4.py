@@ -23,8 +23,7 @@ ESCAPE_SPEED = 100
 STEER_GAIN = 1.3         
 SMOOTHING_FACTOR = 0.5   
 
-# ★ 수정 1: 직진 궤적 자체도 모서리 스윕을 감안해 1cm(10mm) 더 여유를 줍니다. (115 -> 125)
-ROBOT_HALF_WIDTH = 125   
+ROBOT_HALF_WIDTH = 125   # 모서리 스윕 대비 1cm 추가 여유
 
 last_avoid_dir = 0       
 last_steer_pwm = 0       
@@ -35,7 +34,6 @@ last_steer_pwm = 0
 def calculate_steering(scan_data):
     global last_avoid_dir, last_steer_pwm
     
-    # ★ 수정 2: 10도 -> 5도 단위로 해상도 2배 업그레이드! (촘촘한 그물망)
     bins = {angle: 9999 for angle in range(-140, 141, 5)}
     
     front_emergency_dist = 9999  
@@ -51,7 +49,6 @@ def calculate_steering(scan_data):
             if distance < closest_dist:
                 closest_dist = distance
 
-            # ★ 5도 단위 반올림
             bin_angle = round(angle / 5) * 5
             if bin_angle in bins and distance < bins[bin_angle]:
                 bins[bin_angle] = distance
@@ -77,7 +74,6 @@ def calculate_steering(scan_data):
     # [1] 피벗 턴 (Pivot Turn) 모드
     # ========================================================
     if front_emergency_dist < 150 or front_clear_x < 150:
-        # ★ 5도 단위 검색에 맞게 step을 5로 수정
         left_openness = sum(bins[a] for a in range(5, 91, 5) if a in bins)
         right_openness = sum(bins[a] for a in range(-90, 0, 5) if a in bins)
 
@@ -109,7 +105,6 @@ def calculate_steering(scan_data):
     best_angle = 0
     best_score = -99999
     
-    # ★ 조향 각도 탐색도 5도 단위로 더 세밀하게 스무스 코너링
     for angle in range(-90, 91, 5):
         dist = bins[angle]
         
@@ -125,20 +120,30 @@ def calculate_steering(scan_data):
 
         wall_repulsion_bonus = 0
         
-        # ★ 수정 3: 대각선 모서리 스윕(Swept)을 고려해 밀어내기 반응 거리를 22cm -> 24cm(240)로 상향
+        # ====================================================
+        # ★ 수정: 18cm 이내 폭발적 2단계 비례 제어 도입 ★
+        # ====================================================
+        # 오른쪽 벽 감시
         if right_wall_min < 240:
             repel_force = (240 - right_wall_min) * 1.5
-            if angle > 0:   
+            if right_wall_min < 180:
+                repel_force += (180 - right_wall_min) * 4.0  # 18cm 이내 폭발적 점수 증가!
+            
+            if angle > 0:   # 좌회전(회피)
                 wall_repulsion_bonus += repel_force
-            elif angle < 0: 
-                wall_repulsion_bonus -= repel_force
+            elif angle < 0: # 우회전(모서리로 파고들기)
+                wall_repulsion_bonus -= (repel_force * 1.5)  # 파고드는 조향엔 더 가혹한 페널티!
 
+        # 왼쪽 벽 감시
         if left_wall_min < 240:
             repel_force = (240 - left_wall_min) * 1.5
-            if angle < 0:   
+            if left_wall_min < 180:
+                repel_force += (180 - left_wall_min) * 4.0   # 18cm 이내 폭발적 점수 증가!
+                
+            if angle < 0:   # 우회전(회피)
                 wall_repulsion_bonus += repel_force
-            elif angle > 0: 
-                wall_repulsion_bonus -= repel_force
+            elif angle > 0: # 좌회전(모서리로 파고들기)
+                wall_repulsion_bonus -= (repel_force * 1.5)  # 파고드는 조향엔 더 가혹한 페널티!
                 
         score = dist_score - center_penalty + hysteresis_bonus + wall_repulsion_bonus
         
@@ -187,7 +192,7 @@ def main():
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
-    print("[INFO] 5도 고해상도 자율 주행 시작! (정지하려면 Ctrl+C)")
+    print("[INFO] 폭발적 측면 방어 자율 주행 시작! (정지하려면 Ctrl+C)")
 
     scan_data = []
 
