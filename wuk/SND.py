@@ -5,7 +5,7 @@ import numpy as np
 import matplotlib.pyplot as plt  # 시각화를 위한 라이브러리 추가
 
 # 사용자 환경의 RPLIDAR C1 드라이버 (기존)
-from rplidar_serial import RPLidarSerial
+from SND_rplidar_serial import RPLidarSerial
 
 
 # ============================================================
