@@ -17,13 +17,13 @@ lidar_ser = serial.Serial(LIDAR_PORT, 460800, timeout=1)
 SAFE_DISTANCE = 600      
 MAX_SPEED = 250          
 AVOID_SPEED = 150        
-CAUTION_SPEED = 110      
+CAUTION_SPEED = 120      
 ESCAPE_SPEED = 100       
 
 STEER_GAIN = 1.3         
 SMOOTHING_FACTOR = 0.5   
 
-ROBOT_HALF_WIDTH = 125   # 모서리 스윕 대비 1cm 추가 여유
+ROBOT_HALF_WIDTH = 125   
 
 last_avoid_dir = 0       
 last_steer_pwm = 0       
@@ -97,7 +97,7 @@ def calculate_steering(scan_data):
                     last_avoid_dir = 1
         
         last_steer_pwm = pivot_steer
-        return CAUTION_SPEED, pivot_steer
+        return ESCAPE_SPEED, pivot_steer # 긴급 회전 시 거북이 모드로 고정
 
     # ========================================================
     # [2] 거리 비례 스코어링 모드 (5도 해상도)
@@ -105,10 +105,21 @@ def calculate_steering(scan_data):
     best_angle = 0
     best_score = -99999
     
+    # ★ C자 코스 대응: 좌우 전체 공간 볼륨(Volume) 비교
+    # 최대 거리를 1000으로 제한하여 좌/우 공간의 총합을 구함
+    left_vol = sum(min(bins[a], 1000) for a in range(10, 91, 5) if a in bins)
+    right_vol = sum(min(bins[a], 1000) for a in range(-90, 0, 5) if a in bins)
+    
     for angle in range(-90, 91, 5):
         dist = bins[angle]
+        raw_dist = min(dist, 1000)
         
-        dist_score = min(dist, 1000) * 1.0
+        # ★ 먼 거리 현혹 방지 (Piecewise Scoring): 60cm 넘으면 0.5배율!
+        if raw_dist <= 600:
+            dist_score = raw_dist * 1.0
+        else:
+            dist_score = 600 + (raw_dist - 600) * 0.5
+            
         center_penalty = abs(angle) * 3.5
         
         hysteresis_bonus = 0
@@ -118,34 +129,39 @@ def calculate_steering(scan_data):
             elif last_avoid_dir == -1 and angle < -5:
                 hysteresis_bonus = 150
 
+        # ★ C자 코스 거시적 방향 보너스 부여
+        # 한쪽 공간의 총합이 압도적(1500 이상 차이)으로 크면 그쪽 방향 각도에 보너스!
+        macro_bonus = 0
+        if left_vol > right_vol + 1500:
+            if angle > 0: macro_bonus = 80
+        elif right_vol > left_vol + 1500:
+            if angle < 0: macro_bonus = 80
+
+        # ★ 측면 방어 (배율 8.0 -> 3.0으로 완화)
         wall_repulsion_bonus = 0
         
-        # ====================================================
-        # ★ 수정: 18cm 이내 폭발적 2단계 비례 제어 도입 ★
-        # ====================================================
-        # 오른쪽 벽 감시
         if right_wall_min < 240:
             repel_force = (240 - right_wall_min) * 1.5
             if right_wall_min < 180:
-                repel_force += (180 - right_wall_min) * 4.0  # 18cm 이내 폭발적 점수 증가!
+                repel_force += (180 - right_wall_min) * 3.0  
             
-            if angle > 0:   # 좌회전(회피)
+            if angle > 0:   
                 wall_repulsion_bonus += repel_force
-            elif angle < 0: # 우회전(모서리로 파고들기)
-                wall_repulsion_bonus -= (repel_force * 1.5)  # 파고드는 조향엔 더 가혹한 페널티!
+            elif angle < 0: 
+                wall_repulsion_bonus -= (repel_force * 1.5)
 
-        # 왼쪽 벽 감시
         if left_wall_min < 240:
             repel_force = (240 - left_wall_min) * 1.5
             if left_wall_min < 180:
-                repel_force += (180 - left_wall_min) * 4.0   # 18cm 이내 폭발적 점수 증가!
+                repel_force += (180 - left_wall_min) * 3.0   
                 
-            if angle < 0:   # 우회전(회피)
+            if angle < 0:   
                 wall_repulsion_bonus += repel_force
-            elif angle > 0: # 좌회전(모서리로 파고들기)
-                wall_repulsion_bonus -= (repel_force * 1.5)  # 파고드는 조향엔 더 가혹한 페널티!
+            elif angle > 0: 
+                wall_repulsion_bonus -= (repel_force * 1.5)
                 
-        score = dist_score - center_penalty + hysteresis_bonus + wall_repulsion_bonus
+        # 총점 합산 (macro_bonus 추가)
+        score = dist_score - center_penalty + hysteresis_bonus + wall_repulsion_bonus + macro_bonus
         
         if score > best_score:
             best_score = score
@@ -163,16 +179,18 @@ def calculate_steering(scan_data):
     # ========================================================
     # [3] 속도 결정 및 조향 한계/스무딩 필터
     # ========================================================
-    if closest_dist <= 170:
-        current_speed = CAUTION_SPEED
-    elif front_clear_x <= 450:
+    # ★ 18cm 이내 위험 구역 감지 시 "즉시 거북이 모드(100)" 발동
+    if closest_dist <= 180:
         current_speed = ESCAPE_SPEED
+    elif front_clear_x <= 450:
+        current_speed = CAUTION_SPEED
     elif abs(best_angle) <= 15 and front_clear_x > SAFE_DISTANCE:
         current_speed = MAX_SPEED
     else:
         current_speed = AVOID_SPEED
     
-    max_allowed_steer = int(current_speed * 0.55)
+    # ★ 조향 한계를 속도의 55%에서 80%로 대폭 상향! (시원한 코너링)
+    max_allowed_steer = int(current_speed * 0.80)
     if target_steer_pwm > max_allowed_steer:
         target_steer_pwm = max_allowed_steer
     elif target_steer_pwm < -max_allowed_steer:
@@ -192,7 +210,7 @@ def main():
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
-    print("[INFO] 폭발적 측면 방어 자율 주행 시작! (정지하려면 Ctrl+C)")
+    print("[INFO] C자 코스 최적화 자율 주행 시작! (정지하려면 Ctrl+C)")
 
     scan_data = []
 
