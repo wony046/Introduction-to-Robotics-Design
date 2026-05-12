@@ -44,7 +44,7 @@ import math
 
 # ── 포트 ─────────────────────────────────────────────────────────────────────
 LIDAR_PORT       = "/dev/ttyUSB0"
-ARDUINO_PORT     = "/dev/ttyS0"
+ARDUINO_PORT     = "/dev/ttyAMA3"
 BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 9600
 
