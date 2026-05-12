@@ -20,7 +20,7 @@ AVOID_SPEED = 150
 ESCAPE_SPEED = 100       
 STEER_GAIN = 1.7         
 
-ROBOT_HALF_WIDTH = 115   # 로봇 폭 절반
+ROBOT_HALF_WIDTH = 115   
 
 last_avoid_dir = 0       
 
@@ -30,7 +30,6 @@ last_avoid_dir = 0
 def calculate_steering(scan_data):
     global last_avoid_dir
     
-    # ★ 270도 시야각을 담을 수 있도록 Bins 범위 확장 (-140 ~ +140)
     bins = {angle: 9999 for angle in range(-140, 141, 10)}
     
     front_emergency_dist = 9999  
@@ -41,7 +40,6 @@ def calculate_steering(scan_data):
     for angle, distance in scan_data:
         if angle > 180: angle -= 360
             
-        # ★ 270도 시야 확보 (-135도 ~ +135도)
         if -135 <= angle <= 135 and distance > 0:
             bin_angle = round(angle / 10) * 10
             if bin_angle in bins and distance < bins[bin_angle]:
@@ -50,18 +48,14 @@ def calculate_steering(scan_data):
             x_pos = distance * math.cos(math.radians(angle))
             y_pos = distance * math.sin(math.radians(angle))
             
-            # [A] 코앞 비상 감지 (25cm 이내)
             if -20 <= angle <= 20:
                 if distance < front_emergency_dist:
                     front_emergency_dist = distance
 
-            # [B] 내 궤적 내 방해물 (전방 직진 시)
             if x_pos > 50 and abs(y_pos) <= ROBOT_HALF_WIDTH:
                 if x_pos < front_clear_x:
                     front_clear_x = x_pos
                     
-            # [C] ★ 270도 측면 긁힘 감시 (로봇 뒤쪽 20cm부터 전방 40cm까지) ★
-            # 회전할 때 바깥쪽으로 밀리는 엉덩이나 뒷바퀴가 벽에 긁히는 것을 감지합니다.
             if -200 < x_pos < 400:
                 if angle >= 30:   
                     if y_pos < left_wall_min: left_wall_min = y_pos
@@ -69,10 +63,9 @@ def calculate_steering(scan_data):
                     if abs(y_pos) < right_wall_min: right_wall_min = abs(y_pos)
 
     # ========================================================
-    # [1] 피벗 턴 (Pivot Turn) 모드: 정지/제자리 회전 절대 불가
+    # [1] 피벗 턴 (Pivot Turn) 모드
     # ========================================================
     if front_emergency_dist < 250 or front_clear_x < 250:
-        # 피벗 턴 방향 결정 시에는 정면(90도 이내) 데이터만 참고합니다.
         left_openness = sum(bins[a] for a in range(10, 91, 10) if a in bins)
         right_openness = sum(bins[a] for a in range(-90, 0, 10) if a in bins)
 
@@ -98,16 +91,14 @@ def calculate_steering(scan_data):
         return 100, pivot_steer
 
     # ========================================================
-    # [2] 거리 비례 스코어링 모드 (길 찾기)
+    # [2] 거리 비례 스코어링 모드
     # ========================================================
     best_angle = 0
     best_score = -99999
     
-    # 조향(핸들) 점수는 정면(-90 ~ 90)만 계산합니다. (뒤로 조향할 순 없으므로)
     for angle in range(-90, 91, 10):
         dist = bins[angle]
         
-        # ★ 1m 시야 확보: 코너 탈출구를 미리 보고 부드럽게 진입합니다!
         dist_score = min(dist, 1000) * 1.0
         center_penalty = abs(angle) * 3.5
         
@@ -118,13 +109,27 @@ def calculate_steering(scan_data):
             elif last_avoid_dir == -1 and angle < -10:
                 hysteresis_bonus = 150
 
+        # ====================================================
+        # ★ 2단계 스마트 측면 제어 (중앙 정렬 vs 긴급 회피) ★
+        # ====================================================
         wall_repulsion_bonus = 0
-        # ★ 측면 긁힘 철벽 방어 (Wall Repulsion 강화) ★
-        # 벽이 차체 중앙에서 18cm 이내(약 6.5cm 여유)로 가까워지면 즉시 강한 보너스(250점)를 주어 밀어냅니다!
-        if right_wall_min < 180 and left_wall_min > right_wall_min + 40:
-            if angle > 15: wall_repulsion_bonus = 250
-        elif left_wall_min < 180 and right_wall_min > left_wall_min + 40:
-            if angle < -15: wall_repulsion_bonus = 250
+        
+        # [Case 1] 골목길 모드: 양쪽 벽이 모두 20cm 이내일 때
+        if left_wall_min <= 200 and right_wall_min <= 200:
+            # 좌우 간격 차이가 2cm(20mm) 이상 나면 중앙으로 "부드럽게(80점)" 유도
+            # 보너스 점수가 낮아서 로봇이 10도 이상 크게 꺾지 않고 직진성을 유지합니다.
+            if right_wall_min < left_wall_min - 20:
+                if angle > 0: wall_repulsion_bonus = 80  
+            elif left_wall_min < right_wall_min - 20:
+                if angle < 0: wall_repulsion_bonus = 80  
+                
+        # [Case 2] 일반 주행 모드: 한쪽 벽만 바짝 다가왔을 때
+        else:
+            # 13cm(130mm) 이하로 위험하게 붙으면 어깨가 닿지 않도록 "강하게(200점)" 밀어냄
+            if right_wall_min <= 130 and left_wall_min > right_wall_min + 30:
+                if angle >= 15: wall_repulsion_bonus = 200
+            elif left_wall_min <= 130 and right_wall_min > left_wall_min + 30:
+                if angle <= -15: wall_repulsion_bonus = 200
                 
         score = dist_score - center_penalty + hysteresis_bonus + wall_repulsion_bonus
         
@@ -167,7 +172,7 @@ def main():
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
-    print("[INFO] 무정지 270도 시야 자율 주행 시작! (정지하려면 Ctrl+C)")
+    print("[INFO] 무정지 중앙 정렬 자율 주행 시작! (정지하려면 Ctrl+C)")
 
     scan_data = []
 
