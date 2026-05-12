@@ -66,8 +66,10 @@ MIN_SPEED        = 0.07  # m/s: 최소 선속도 (완전 정지 방지)
 SLOW_START_DIST  = 250   # mm: 이 전방거리부터 감속 시작 (기존 400에서 단축)
 STOP_FWD_RANGE   = 125   # mm: 최소속도 구역 전방 깊이
 STOP_HORIZ_RANGE = 110   # mm: 최소속도 구역 수평 폭
-W_GAIN           = 1.2   # 수평오차 P 게인 (기존 2.0에서 낮춰 부드럽게)
-MAX_W            = 1.5   # rad/s: 최대 각속도 (기존 2.0에서 낮춤)
+W_GAIN           = 1.2
+MAX_W            = 1.5
+W_SMOOTH         = 0.6   # w 저역통과 필터 (0=이전값 유지, 1=필터 없음)
+                          # 좁은 공간에서 급격한 방향 전환 → 진동 방지
 
 # ── 헤딩 방향 점수제 ──────────────────────────────────────────────────────────
 HEADING_WEIGHT   = 1.0   # 헤딩 1° = 여유공간 1.0° 가중치 (기존 1.5에서 낮춤)
@@ -102,7 +104,8 @@ SEND_INTERVAL    = 0.1
 # ─────────────────────────────────────────────────────────────────────────────
 
 arduino_heading_deg = 0.0
-stuck_count         = 0     # 연속 막힘 판정 횟수
+stuck_count         = 0
+prev_w              = 0.0   # w 저역통과 필터용 이전값
 
 
 def normalize_angle(angle):
@@ -438,6 +441,7 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
     # ── 5. 정지 ──────────────────────────────────────────────────────────────
     arduino.write(b"0.00 0.00\n")
     time.sleep(0.3)
+    prev_w = 0.0   # w 필터 리셋
     print("="*52 + "\n")
 
 
@@ -656,7 +660,7 @@ def find_vw_command(scan_points, heading_deg):
 
 
 def main():
-    global arduino_heading_deg, stuck_count
+    global arduino_heading_deg, stuck_count, prev_w
 
     print("=== RPLIDAR 장애물 회피 v5 ===")
     print(f"  라이다 포트    : {LIDAR_PORT}")
@@ -738,7 +742,12 @@ def main():
 
                     # ── ③ 정상 v/w 명령 ────────────────────────────────────
                     v, w = find_vw_command(front_points, arduino_heading_deg)
-                    cmd  = f"{v:.2f} {w:.2f}\n"
+
+                    # w 저역통과 필터: 급격한 방향 전환 완화
+                    w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
+                    prev_w = w
+
+                    cmd = f"{v:.2f} {w:.2f}\n"
                     arduino.write(cmd.encode())
 
                     if cmd != last_cmd_str:
