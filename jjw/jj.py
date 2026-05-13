@@ -70,7 +70,7 @@ STOP_BACKUP_TIME = 0.3   # sec: 위험구역 진입 시 후진 시간 (약 15mm)
 W_GAIN           = 1.2
 MAX_W            = 1.5
 W_SMOOTH         = 0.6
-SIDE_ROTATE_SAFE = 150   # mm: 측면 장애물 수평거리가 이 미만이면 해당 방향 회전 금지
+SIDE_ROTATE_SAFE = 125   # mm: 측면 장애물 수평거리가 이 미만이면 해당 방향 회전 금지
                           #     ROBOT_HALF_WIDTH(110mm) + 여유(40mm)
 SIDE_CHECK_ANGLE = 60    # deg: 측면 확인 각도 범위 (±60°)
 
