@@ -64,8 +64,9 @@ FORWARD_RANGE    = 800   # mm: 위험구역 전방 깊이
 FORWARD_SPEED    = 0.35  # m/s: 최고 선속도 (기존 0.20에서 상향)
 MIN_SPEED        = 0.07  # m/s: 최소 선속도 (완전 정지 방지)
 SLOW_START_DIST  = 250   # mm: 이 전방거리부터 감속 시작 (기존 400에서 단축)
-STOP_FWD_RANGE   = 125   # mm: 최소속도 구역 전방 깊이
-STOP_HORIZ_RANGE = 110   # mm: 최소속도 구역 수평 폭
+STOP_FWD_RANGE   = 125   # mm: v=0 구역 전방 깊이
+STOP_HORIZ_RANGE = 110   # mm: v=0 구역 수평 폭
+STOP_BACKUP_TIME = 0.3   # sec: 위험구역 진입 시 후진 시간 (약 15mm)
 W_GAIN           = 1.2
 MAX_W            = 1.5
 W_SMOOTH         = 0.6   # w 저역통과 필터 (0=이전값 유지, 1=필터 없음)
@@ -108,10 +109,11 @@ ANGLE_STEP       = 5
 SEND_INTERVAL    = 0.1
 # ─────────────────────────────────────────────────────────────────────────────
 
-arduino_heading_deg = 0.0
-stuck_count         = 0
-prev_w              = 0.0
-avoidance_w_sign    = 0.0   # 회피 방향 고착값 (0=미결정, 1=왼쪽, -1=오른쪽)
+arduino_heading_deg  = 0.0
+stuck_count          = 0
+prev_w               = 0.0
+avoidance_w_sign     = 0.0
+stop_zone_entry_time = None   # 위험구역 최초 진입 시각 (후진 타이머용)
 
 
 def normalize_angle(angle):
@@ -754,7 +756,7 @@ def find_vw_command(scan_points, heading_deg):
 
     # ── 선속도 계산 ──────────────────────────────────────────────────────────
     if stop_points:
-        v = MIN_SPEED  # 정지 구역 내 장애물 → 최솟값 유지 (완전 정지 금지)
+        v = 0.0   # 위험구역 내 장애물 → v=0 제자리 회전 (충돌 방지)
     elif n_fwd_ref >= SLOW_START_DIST:
         v = FORWARD_SPEED
     else:
@@ -811,7 +813,7 @@ def find_vw_command(scan_points, heading_deg):
 
 
 def main():
-    global arduino_heading_deg, stuck_count, prev_w, avoidance_w_sign
+    global arduino_heading_deg, stuck_count, prev_w, avoidance_w_sign, stop_zone_entry_time
 
     print("=== RPLIDAR 장애물 회피 v5 ===")
     print(f"  라이다 포트    : {LIDAR_PORT}")
@@ -867,8 +869,9 @@ def main():
                         print(f"  [막힘감지] {stuck_count}/{STUCK_TRIGGER_COUNT}회")
                         if stuck_count >= STUCK_TRIGGER_COUNT:
                             execute_escape_rotation(arduino, lidar, all_scan_points)
-                            stuck_count      = 0
-                            avoidance_w_sign = 0.0
+                            stuck_count          = 0
+                            avoidance_w_sign     = 0.0
+                            stop_zone_entry_time = None
                             last_cmd_str = ""
                             last_send    = time.time()
                             scan_points  = []
@@ -892,7 +895,25 @@ def main():
                     # ── ③ 정상 v/w 명령 ────────────────────────────────────
                     v, w = find_vw_command(front_points, arduino_heading_deg)
 
-                    # w 저역통과 필터: 급격한 방향 전환 완화
+                    # 위험구역(stop zone) 진입 시: 후진 → 제자리 회전 시퀀스
+                    # v == 0.0 and w != 0.0 → find_vw_command가 stop_points 감지
+                    in_stop_zone = (v == 0.0 and abs(w) > 0.01)
+                    if in_stop_zone:
+                        if stop_zone_entry_time is None:
+                            stop_zone_entry_time = now
+                            print("  [위험구역] 진입 → 후진 시작")
+
+                        elapsed = now - stop_zone_entry_time
+                        if elapsed < STOP_BACKUP_TIME:
+                            # ① 후진 단계
+                            v = -MIN_SPEED
+                            w = 0.0
+                            print(f"  [후진중] {elapsed:.1f}/{STOP_BACKUP_TIME}s")
+                        # else: ② 제자리 회전 (v=0, w는 find_vw_command 값 그대로)
+                    else:
+                        stop_zone_entry_time = None   # 위험구역 벗어남 → 타이머 리셋
+
+                    # w 저역통과 필터
                     w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
                     prev_w = w
 
