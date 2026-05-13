@@ -622,46 +622,38 @@ def find_vw_command(scan_points, heading_deg):
                 print(f"  [DirSwitch] Blocked({committed_width:.0f}mm) → {'Left' if avoidance_w_sign>0 else 'Right'}")
 
 # [4] 측면 안전 검사 (회전 시 옆구리 충돌 방지 클램프)
-    def side_horiz_blocked(is_left):            # 특정 방향(좌/우)의 측면에 장애물이 바짝 붙어있는지 확인하는 내부 함수입니다.
-        angles = (range(-ANGLE_STEP, -(SIDE_CHECK_ANGLE+ANGLE_STEP), -ANGLE_STEP) # 검사할 경우 왼쪽은 -5~-60도
-                  if is_left else
-                  range(ANGLE_STEP, SIDE_CHECK_ANGLE+ANGLE_STEP, ANGLE_STEP))     # 오른쪽은 +5~+60도 영역을 지정합니다.
-        for a in angles:
-            d = scan_dict.get(a, 0)
-            if d <= 0: continue
-            if d * abs(math.sin(math.radians(a))) < SIDE_ROTATE_SAFE: # 장애물의 측면 수직 거리가 안전 거리(150mm)보다 짧으면
-                return True                     # 막혔음(True)을 반환합니다.
-        return False                            # 다행히 측면이 뚫려있으면 False 반환
+    # 1. 메인 두뇌의 P-제어 회전력 계산 (기존과 동일)
+    w_main_mag = max(min(W_GAIN * horiz_error / threshold, MAX_W), W_MIN_DANGER)
+    w_main = avoidance_w_sign * w_main_mag
 
-    # [4] 측면 안전 검사 (회전 시 옆구리 충돌 방지 클램프)
-    left_close  = side_horiz_blocked(is_left=True)  # (또는 함수 분리 시 scan_dict 추가)
-    right_close = side_horiz_blocked(is_left=False) 
+    # 2. 양쪽 측면 벽에서 로봇을 밀어내는 척력(Repulsive Force) 계산
+    w_repulsive = 0.0
+    REPULSIVE_GAIN = 1.5 # 벽이 밀어내는 힘의 세기 (튜닝 가능)
     
-    if avoidance_w_sign > 0 and left_close and not right_close: 
-        # 왼쪽으로 돌려는데 옆구리가 긁힐 위기일 때 -> 무작정 오른쪽으로 틀지 말고, 오른쪽이 통과 가능한지 확인!
-        if right_width_mm >= MIN_VIABLE_WIDTH_MM:
-            print("  [SideBlock] Left → Force Right") 
-            avoidance_w_sign = -1.0                 
-        else:
-            print(f"  [SideBlock] Left close, but Right is BLOCKED({right_width_mm:.0f}mm). Keep Left.")
-            # 오른쪽은 아예 막혀서 갈 수 없으므로, 경고를 무시하고 원래 뚫린 왼쪽으로 밀고 나갑니다.
+    # 전방 180도 데이터(front_points)를 돌면서 로봇 옆구리에 닿을락 말락 한 장애물을 찾습니다.
+    for angle_norm, dist in front_points:
+        horiz, fwd = decompose(angle_norm, dist)
+        
+        # 로봇 앞부분(0~300mm)에 있으면서, 좌우 안전 반경(150mm) 안으로 들어온 위협만 필터링
+        if 0 < fwd < 300 and horiz < SIDE_ROTATE_SAFE:
+            # 벽이 로봇에 바짝 붙을수록(horiz가 작을수록) 밀어내는 힘(force)은 최대 1.0까지 커짐
+            force = (SIDE_ROTATE_SAFE - horiz) / SIDE_ROTATE_SAFE 
+            
+            if angle_norm > 0: 
+                # 장애물이 우측(+)에 있으면 로봇을 좌회전(+) 시키도록 척력 더하기
+                w_repulsive += force * REPULSIVE_GAIN
+            else:
+                # 장애물이 좌측(-)에 있으면 로봇을 우회전(-) 시키도록 척력 빼기
+                w_repulsive -= force * REPULSIVE_GAIN
 
-    elif avoidance_w_sign < 0 and right_close and not left_close: 
-        # 오른쪽으로 돌려는데 우측이 긁힐 위기일 때 -> 왼쪽이 통과 가능한지 확인!
-        if left_width_mm >= MIN_VIABLE_WIDTH_MM:
-            print("  [SideBlock] Right → Force Left")
-            avoidance_w_sign = 1.0                  
-        else:
-            print(f"  [SideBlock] Right close, but Left is BLOCKED({left_width_mm:.0f}mm). Keep Right.")
+    # 3. 최종 각속도 = 메인 회피 의지 + 벽이 밀어내는 본능
+    w_final = w_main + w_repulsive
 
-    # [5] P 제어를 통한 최종 각속도 크기(w_mag) 계산
-    # 침범 오차(horiz_error)가 한계치(threshold) 대비 얼마나 큰지에 비례(W_GAIN)하여 회전 세기를 정합니다. 값이 MAX_W를 넘지 못하게 자릅니다.
-    w_mag = max(min(W_GAIN * horiz_error / threshold, MAX_W), W_MIN_DANGER) # 오차가 작더라도 위험 상황에선 최소 W_MIN_DANGER(0.5) 속도로는 확실하게 돌아주도록 보장(max)합니다.
-    w     = avoidance_w_sign * w_mag            # 확정된 부호(방향)에 계산된 세기를 곱해 최종 w 명령값을 산출합니다.
+    # 4. 물리적 모터 한계치 클램핑
+    w = max(min(w_final, MAX_W), -MAX_W)
 
-    print(f"  [Cmd] v:{v:.2f}  w:{w:.2f}  (HorizErr:{horiz_error:.0f}mm)") # 산출된 v, w 값을 터미널에 출력합니다.
-    return v, w                                 # 메인 루프에서 사용할 수 있도록 v와 w를 반환합니다.
-
+    print(f"  [Cmd] v:{v:.2f}  w:{w:.2f} (w_main:{w_main:.2f}, w_repul:{w_repulsive:.2f})") 
+    return v, w
 
 def main():
     global arduino_heading_deg, stuck_count, prev_w, avoidance_w_sign, stop_zone_entry_time, no_danger_count # 메인 상태 변수들을 전역으로 선언합니다.
