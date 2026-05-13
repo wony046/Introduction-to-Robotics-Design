@@ -886,35 +886,6 @@ def main():
                 now = time.time()
                 if now - last_send >= SEND_INTERVAL:
 
-                   """ # ── ① 막힘 감지 → 탈출 (전진 가능 방향까지 동적 회전) ────
-                    if is_path_blocked(front_points):
-                        stuck_count += 1
-                        print(f"  [막힘감지] {stuck_count}/{STUCK_TRIGGER_COUNT}회")
-                        if stuck_count >= STUCK_TRIGGER_COUNT:
-                            execute_escape_rotation(arduino, lidar, all_scan_points)
-                            stuck_count          = 0
-                            avoidance_w_sign     = 0.0
-                            stop_zone_entry_time = None
-                            last_cmd_str = ""
-                            last_send    = time.time()
-                            scan_points  = []
-                            continue
-                    else:
-                        if stuck_count > 0:
-                            print(f"  [막힘해제] 카운터 리셋 ({stuck_count}회)")
-                        stuck_count = 0
-
-                    # ── ② 반대방향 감지 → 제자리 회전으로 헤딩 복귀 ──────────
-                    if abs(arduino_heading_deg) > MISSION_HEADING_LIMIT:
-                        execute_direction_correction(
-                            arduino, lidar, all_scan_points
-                        )
-                        avoidance_w_sign = 0.0
-                        last_cmd_str = ""
-                        last_send    = time.time()
-                        scan_points  = []
-                        continue"""
-
                     # ── ③ 정상 v/w 명령 ────────────────────────────────────
                     v, w = find_vw_command(front_points, arduino_heading_deg)
 
