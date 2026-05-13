@@ -110,7 +110,8 @@ SEND_INTERVAL    = 0.1
 
 arduino_heading_deg = 0.0
 stuck_count         = 0
-prev_w              = 0.0   # w 저역통과 필터용 이전값
+prev_w              = 0.0
+avoidance_w_sign    = 0.0   # 회피 방향 고착값 (0=미결정, 1=왼쪽, -1=오른쪽)
 
 
 def normalize_angle(angle):
@@ -709,23 +710,14 @@ def find_vw_command(scan_points, heading_deg):
     """
     정면 스캔 + 헤딩 → (v m/s, w rad/s) 반환
 
-    [기준 장애물 분리]
-      v 기준: 정면 45° 이내(fwd >= horiz) 장애물의 최소 n_fwd
-              → 옆 벽(n_fwd ≈ 0)이 v를 0으로 만드는 것을 방지
-      w 기준: n_horiz가 가장 작은 장애물 (로봇 경로에 가장 걸리는 것)
-              → 가장 위험한 방향으로 회전
-
-    [선속도 — 전방거리 연속 감속]
-      n_fwd >= SLOW_START_DIST(400mm) → v = FORWARD_SPEED
-      n_fwd <= STOP_DIST(120mm)       → v = 0 (회전만)
-      그 사이                          → 선형 감소
-
-    [각속도 — 수평오차 P제어]
-      horiz_error = threshold - n_horiz
-      horiz_error > 0 인 동안: w = sign × W_GAIN × horiz_error / threshold
-      horiz_error ≤ 0           : w = 0 (수평 여유 확보, 직진)
+    [방향 고착 Sticky Direction — oscillation 방지]
+      장애물 없음 → avoidance_w_sign 리셋, 직진
+      방향 미결정 → 점수제로 결정 후 고착
+      방향 결정됨 → 현재 방향 유지
+        단, 현재 방향이 MIN_VIABLE_CLEAR 미만이면 전환 허용
     """
-    threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN   # 120mm
+    global avoidance_w_sign
+    threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN
 
     # 위험 포인트 수집
     danger_points = []
@@ -737,6 +729,7 @@ def find_vw_command(scan_points, heading_deg):
             danger_points.append((angle_norm, dist, horiz, fwd))
 
     if not danger_points:
+        avoidance_w_sign = 0.0   # 장애물 없음 → 방향 리셋
         return FORWARD_SPEED, 0.0
 
     # ── v 기준: 정면 직사각형(STOP_FWD × STOP_HORIZ) 안의 장애물 ──────────────
@@ -790,10 +783,26 @@ def find_vw_command(scan_points, heading_deg):
 
         print(f"  [여유공간] 왼쪽:{left_clear}°  오른쪽:{right_clear}°  헤딩:{heading_deg:.1f}°")
 
-        w_sign = select_direction(left_clear, right_clear, heading_deg)
+        if avoidance_w_sign == 0.0:
+            # 방향 미결정 → 점수제로 새로 결정 후 고착
+            avoidance_w_sign = select_direction(left_clear, right_clear, heading_deg)
+            print(f"  [방향결정] {'왼쪽' if avoidance_w_sign>0 else '오른쪽'} 고착")
+        else:
+            # 방향 결정됨 → 현재 방향이 위험해질 때만 전환
+            committed_clear = left_clear if avoidance_w_sign > 0 else right_clear
+            if committed_clear < MIN_VIABLE_CLEAR:
+                old = avoidance_w_sign
+                avoidance_w_sign = select_direction(left_clear, right_clear, heading_deg)
+                if avoidance_w_sign != old:
+                    print(f"  [방향전환] 현재 방향 막힘({committed_clear}°) → "
+                          f"{'왼쪽' if avoidance_w_sign>0 else '오른쪽'}")
+            # else: 현재 방향 유지 → oscillation 방지
+
+        w_sign = avoidance_w_sign
         w      = w_sign * min(W_GAIN * horiz_error / threshold, MAX_W)
     else:
-        w = 0.0   # 수평거리 충분 → 직진
+        avoidance_w_sign = 0.0   # 수평 여유 확보 → 방향 리셋
+        w = 0.0
 
     print(f"  [속도명령] v:{v:.2f}m/s  w:{w:.2f}rad/s  "
           f"(전방:{n_fwd_ref:.0f}mm  수평오차:{horiz_error:.0f}mm)")
@@ -802,7 +811,7 @@ def find_vw_command(scan_points, heading_deg):
 
 
 def main():
-    global arduino_heading_deg, stuck_count, prev_w
+    global arduino_heading_deg, stuck_count, prev_w, avoidance_w_sign
 
     print("=== RPLIDAR 장애물 회피 v5 ===")
     print(f"  라이다 포트    : {LIDAR_PORT}")
@@ -858,7 +867,8 @@ def main():
                         print(f"  [막힘감지] {stuck_count}/{STUCK_TRIGGER_COUNT}회")
                         if stuck_count >= STUCK_TRIGGER_COUNT:
                             execute_escape_rotation(arduino, lidar, all_scan_points)
-                            stuck_count  = 0
+                            stuck_count      = 0
+                            avoidance_w_sign = 0.0
                             last_cmd_str = ""
                             last_send    = time.time()
                             scan_points  = []
@@ -873,6 +883,7 @@ def main():
                         execute_direction_correction(
                             arduino, lidar, all_scan_points
                         )
+                        avoidance_w_sign = 0.0
                         last_cmd_str = ""
                         last_send    = time.time()
                         scan_points  = []
