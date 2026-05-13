@@ -29,14 +29,14 @@ FORWARD_RANGE    = 800   # mm: 위험구역 전방 깊이
 FORWARD_SPEED    = 0.35  # m/s: 최고 선속도
 MIN_SPEED        = 0.07  # m/s: 최소 선속도
 SLOW_START_DIST  = 250   # mm: 이 전방거리부터 감속 시작
-STOP_FWD_RANGE   = 125   # mm: v=0 구역 전방 깊이
+STOP_FWD_RANGE   = 130   # mm: v=0 구역 전방 깊이
 STOP_HORIZ_RANGE = 110   # mm: v=0 구역 수평 폭
 W_GAIN           = 1.2
 MAX_W            = 1.5
 W_MIN_DANGER     = 0.5   # rad/s: 위험구역 최소 회전
 W_SMOOTH         = 0.6
-SIDE_ROTATE_SAFE = 150   # mm: 측면 장애물 수평거리 임계값
-SIDE_CHECK_ANGLE = 60    # deg: 측면 확인 각도 범위
+SIDE_ROTATE_SAFE = 130   # mm: 측면 장애물 수평거리 임계값
+SIDE_CHECK_ANGLE = 90    # deg: 측면 확인 각도 범위
 
 # ── 헤딩 방향 점수제 ──────────────────────────────────────────────────────────
 HEADING_WEIGHT   = 1.0   # 헤딩 1° = 여유공간 1.0° 가중치
