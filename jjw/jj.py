@@ -70,7 +70,8 @@ STOP_BACKUP_TIME = 0.3   # sec: 위험구역 진입 시 후진 시간 (약 15mm)
 W_GAIN           = 1.2
 MAX_W            = 1.5
 W_SMOOTH         = 0.6
-SIDE_ROTATE_SAFE = 200   # mm: 이 거리 이내 측면 장애물 있으면 해당 방향 회전 금지
+SIDE_ROTATE_SAFE = 150   # mm: 측면 장애물 수평거리가 이 미만이면 해당 방향 회전 금지
+                          #     ROBOT_HALF_WIDTH(110mm) + 여유(40mm)
 SIDE_CHECK_ANGLE = 60    # deg: 측면 확인 각도 범위 (±60°)
 
 # ── 헤딩 방향 점수제 ──────────────────────────────────────────────────────────
@@ -798,25 +799,32 @@ def find_vw_command(scan_points, heading_deg):
                     print(f"  [방향전환] 현재 방향 막힘({committed_clear}°) → "
                           f"{'왼쪽' if avoidance_w_sign>0 else '오른쪽'}")
 
-        # ── 측면 근접 장애물 최종 안전 검사 ─────────────────────────────────
-        # left_clear/right_clear는 ref_dist 기준이라 바로 옆 장애물을 못 잡음
-        # → SIDE_ROTATE_SAFE 이내 측면 장애물 있으면 강제 전환
-        left_close = any(
-            0 < scan_dict.get(a, DETECTION_RANGE + 1) < SIDE_ROTATE_SAFE
-            for a in range(-ANGLE_STEP,
-                           -(SIDE_CHECK_ANGLE + ANGLE_STEP), -ANGLE_STEP)
-        )
-        right_close = any(
-            0 < scan_dict.get(a, DETECTION_RANGE + 1) < SIDE_ROTATE_SAFE
-            for a in range(ANGLE_STEP,
-                           SIDE_CHECK_ANGLE + ANGLE_STEP, ANGLE_STEP)
-        )
+        # ── 측면 근접 장애물 최종 안전 검사 (수평거리 기준) ─────────────────
+        # 직선거리가 아닌 수평거리로 판단:
+        #   horiz = dist × |sin(angle)|
+        #   → 정면 가까운 장애물이 측면으로 오인되는 현상 방지
+        #   → SIDE_ROTATE_SAFE = ROBOT_HALF_WIDTH + 여유 = 110 + 40 = 150mm
+        def side_horiz_blocked(is_left):
+            angles = (range(-ANGLE_STEP, -(SIDE_CHECK_ANGLE + ANGLE_STEP), -ANGLE_STEP)
+                      if is_left else
+                      range(ANGLE_STEP, SIDE_CHECK_ANGLE + ANGLE_STEP, ANGLE_STEP))
+            for a in angles:
+                d = scan_dict.get(a, 0)
+                if d <= 0:
+                    continue
+                horiz = d * abs(math.sin(math.radians(a)))
+                if horiz < SIDE_ROTATE_SAFE:
+                    return True
+            return False
+
+        left_close  = side_horiz_blocked(is_left=True)
+        right_close = side_horiz_blocked(is_left=False)
 
         if avoidance_w_sign > 0 and left_close and not right_close:
-            print(f"  [측면차단] 왼쪽 {SIDE_ROTATE_SAFE}mm 이내 장애물 → 오른쪽 강제")
+            print(f"  [측면차단] 왼쪽 수평 {SIDE_ROTATE_SAFE}mm 이내 → 오른쪽 강제")
             avoidance_w_sign = -1.0
         elif avoidance_w_sign < 0 and right_close and not left_close:
-            print(f"  [측면차단] 오른쪽 {SIDE_ROTATE_SAFE}mm 이내 장애물 → 왼쪽 강제")
+            print(f"  [측면차단] 오른쪽 수평 {SIDE_ROTATE_SAFE}mm 이내 → 왼쪽 강제")
             avoidance_w_sign = 1.0
         elif left_close and right_close:
             print(f"  [측면차단] 양쪽 근접 → 방향 유지 (탈출 알고리즘 대기)")
