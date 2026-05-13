@@ -641,15 +641,26 @@ def find_vw_command(scan_points, heading_deg):
                 return True                     # 막혔음(True)을 반환합니다.
         return False                            # 다행히 측면이 뚫려있으면 False 반환
 
-    left_close  = side_horiz_blocked(is_left=True)  # 돌기 전에 왼쪽 측면이 막혔는지 검사합니다.
-    right_close = side_horiz_blocked(is_left=False) # 돌기 전에 오른쪽 측면이 막혔는지 검사합니다.
+    # [4] 측면 안전 검사 (회전 시 옆구리 충돌 방지 클램프)
+    left_close  = side_horiz_blocked(is_left=True)  # (또는 함수 분리 시 scan_dict 추가)
+    right_close = side_horiz_blocked(is_left=False) 
     
-    if avoidance_w_sign > 0 and left_close and not right_close: # 왼쪽으로 돌려는데 왼쪽 측면에 뭐가 바짝 붙어있고 오른쪽은 비었다면
-        print("  [SideBlock] Left → Force Right") 
-        avoidance_w_sign = -1.0                 # 돌다가 긁히지 않도록 강제로 오른쪽(-1.0) 회전으로 부호를 뒤집습니다.
-    elif avoidance_w_sign < 0 and right_close and not left_close: # 오른쪽으로 돌려는데 우측이 막히고 좌측이 비었다면
-        print("  [SideBlock] Right → Force Left")
-        avoidance_w_sign = 1.0                  # 좌회전으로 강제 전환합니다.
+    if avoidance_w_sign > 0 and left_close and not right_close: 
+        # 왼쪽으로 돌려는데 옆구리가 긁힐 위기일 때 -> 무작정 오른쪽으로 틀지 말고, 오른쪽이 통과 가능한지 확인!
+        if right_width_mm >= MIN_VIABLE_WIDTH_MM:
+            print("  [SideBlock] Left → Force Right") 
+            avoidance_w_sign = -1.0                 
+        else:
+            print(f"  [SideBlock] Left close, but Right is BLOCKED({right_width_mm:.0f}mm). Keep Left.")
+            # 오른쪽은 아예 막혀서 갈 수 없으므로, 경고를 무시하고 원래 뚫린 왼쪽으로 밀고 나갑니다.
+
+    elif avoidance_w_sign < 0 and right_close and not left_close: 
+        # 오른쪽으로 돌려는데 우측이 긁힐 위기일 때 -> 왼쪽이 통과 가능한지 확인!
+        if left_width_mm >= MIN_VIABLE_WIDTH_MM:
+            print("  [SideBlock] Right → Force Left")
+            avoidance_w_sign = 1.0                  
+        else:
+            print(f"  [SideBlock] Right close, but Left is BLOCKED({left_width_mm:.0f}mm). Keep Right.")
 
     # [5] P 제어를 통한 최종 각속도 크기(w_mag) 계산
     # 침범 오차(horiz_error)가 한계치(threshold) 대비 얼마나 큰지에 비례(W_GAIN)하여 회전 세기를 정합니다. 값이 MAX_W를 넘지 못하게 자릅니다.
