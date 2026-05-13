@@ -580,22 +580,14 @@ def find_vw_command(scan_points, heading_deg):
             scan_dict[bucket] = dist
 
     # [3] 방향(부호) 결정
-    # 1. 로봇 정면(0도)에서부터 좌/우 바깥쪽으로 시야를 넓혀가며 '연속된' 빈 공간만 누적합니다.
-    left_angle_clear = 0
-    # 왼쪽: -5도부터 -90도까지 (안에서 밖으로 탐색)
-    for a in range(-ANGLE_STEP, -(SCAN_HALF_ANGLE + 1), -ANGLE_STEP): 
-        if scan_dict.get(a, 0) >= ref_dist:  # ★ 수정: 데이터가 없으면 0(막힘)으로 간주
+    # 1. 먼저 좌우에 연속으로 뚫려있는 '각도'를 누적합니다.
+    left_angle_clear = right_angle_clear = 0 
+    for a in range(-SCAN_HALF_ANGLE, 0, ANGLE_STEP): 
+        if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
             left_angle_clear += ANGLE_STEP 
-        else:
-            break # ★ 수정: 장애물을 만나면 그 너머의 각도는 무시하고 즉시 누적 중단
-
-    right_angle_clear = 0
-    # 오른쪽: +5도부터 +90도까지 (안에서 밖으로 탐색)
     for a in range(ANGLE_STEP, SCAN_HALF_ANGLE + 1, ANGLE_STEP): 
-        if scan_dict.get(a, 0) >= ref_dist:  # ★ 수정: 데이터가 없으면 0(막힘)으로 간주
-            right_angle_clear += ANGLE_STEP 
-        else:
-            break # ★ 수정: 장애물을 만나면 즉시 중단
+        if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
+            right_angle_clear += ANGLE_STEP
 
     # 2. 제2코사인법칙을 이용해 각도와 거리(ref_dist)를 실제 뚫린 물리적 폭(mm)으로 변환하는 내부 함수
     def calc_width_mm(angle_deg, dist):
