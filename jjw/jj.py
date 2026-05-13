@@ -406,56 +406,106 @@ def check_rotation_blocked(w_sign, scan_points):
 
 def execute_escape_rotation(arduino, lidar, all_scan_points):
     """
-    막힘 탈출: 전진 가능 방향이 나올 때까지 동적으로 회전
+    막힘 탈출: 동적 후진 + 전진 가능 방향까지 회전
 
-    고정 각도 없이, 매 스캔마다 is_path_blocked() 확인
-    → False(통과 가능)가 되는 순간 회전 중단
+    [초기 방향 결정 — 3단계 우선순위]
+      1차: 헤딩 반대 방향 (헤딩>0 → 오른쪽, 헤딩<0 → 왼쪽)
+      2차: 1차 막힘 → 후진하면서 그 방향이 열릴 때까지 대기
+      3차: 최대 후진 후에도 안 열리면 반대 방향 → 그것도 막히면 스캔 기반
+
+    [후진 방식]
+      고정 시간이 아닌 동적 후진:
+      회전 방향에 장애물 없어질 때까지 계속 후진
+      (최대 BACKUP_MAX_TIME 초 제한)
     """
     global arduino_heading_deg, stuck_count, prev_w
 
     print("\n" + "="*52)
-    print("[ESCAPE] 전진 불가 → 전진 가능 방향까지 회전")
+    heading_deg    = arduino_heading_deg
+    BACKUP_MAX_TIME = 3.0    # sec: 최대 후진 시간
+    HEADING_HINT_MIN = 5.0   # deg: 헤딩 힌트 사용 최소 기준
+    print(f"[ESCAPE] 전진 불가  헤딩:{heading_deg:.1f}°")
 
-    # 초기 방향 결정
-    init_target = find_escape_angle(all_scan_points)
-    w_sign      = -1.0 if init_target >= 0 else 1.0
+    # ── 초기 방향 결정 ────────────────────────────────────────────────────────
+    if abs(heading_deg) >= HEADING_HINT_MIN:
+        w_sign  = -1.0 if heading_deg > 0 else 1.0    # 헤딩 반대 방향
+        hint    = "헤딩 반대"
+    else:
+        t       = find_escape_angle(all_scan_points)
+        w_sign  = -1.0 if t >= 0 else 1.0
+        hint    = "스캔 기반(헤딩≈0°)"
+
+    print(f"  [{hint}] 목표 방향: {'오른쪽' if w_sign<0 else '왼쪽'}")
+
+    # ── 동적 후진: 회전 방향이 열릴 때까지 ───────────────────────────────────
+    def backup_until_clear(target_sign):
+        """
+        target_sign 방향이 열릴 때까지 후진
+        Returns: True(열림) / False(최대 시간 초과)
+        """
+        t_start = time.time()
+        while time.time() - t_start < BACKUP_MAX_TIME:
+            arduino.write(f"{-BACKUP_SPEED:.2f} 0.00\n".encode())
+            scan_buf = collect_scan_during_rotation(arduino, lidar, duration=0.1)
+            if scan_buf and not check_rotation_blocked(target_sign, scan_buf):
+                arduino.write(b"0.00 0.00\n")
+                time.sleep(0.05)
+                return True
+        arduino.write(b"0.00 0.00\n")
+        return False
+
     if check_rotation_blocked(w_sign, all_scan_points):
-        w_sign = -w_sign
-    print(f"  초기 방향: {'왼쪽' if w_sign>0 else '오른쪽'}")
+        dir_str = "오른쪽" if w_sign < 0 else "왼쪽"
+        print(f"  [{dir_str}] 막힘 → 열릴 때까지 후진 중...")
+        cleared = backup_until_clear(w_sign)
 
-    # 후진
-    print(f"  [후진] {BACKUP_SPEED}m/s × {BACKUP_DURATION}초")
-    t_backup = time.time()
-    while time.time() - t_backup < BACKUP_DURATION:
-        arduino.write(f"{-BACKUP_SPEED:.2f} 0.00\n".encode())
+        if not cleared:
+            # 반대 방향 시도
+            w_sign  = -w_sign
+            dir_str = "오른쪽" if w_sign < 0 else "왼쪽"
+            print(f"  최대 후진 후에도 막힘 → [{dir_str}] 시도")
+
+            if check_rotation_blocked(w_sign, all_scan_points):
+                print(f"  [{dir_str}]도 막힘 → 후진 시도")
+                cleared = backup_until_clear(w_sign)
+                if not cleared:
+                    # 스캔 기반으로 최종 결정
+                    t      = find_escape_angle(all_scan_points)
+                    w_sign = -1.0 if t >= 0 else 1.0
+                    print(f"  스캔 기반(3차)으로 결정")
+    else:
+        # 처음부터 열려있어도 최소 후진은 실행 (회전 공간 확보)
+        print(f"  방향 열림 → 최소 후진 ({BACKUP_DURATION}초)")
+        t_backup = time.time()
+        while time.time() - t_backup < BACKUP_DURATION:
+            arduino.write(f"{-BACKUP_SPEED:.2f} 0.00\n".encode())
+            time.sleep(0.05)
+        arduino.write(b"0.00 0.00\n")
         time.sleep(0.05)
-    arduino.write(b"0.00 0.00\n")
-    time.sleep(0.1)
 
-    # ESC
+    print(f"  최종 방향: {'왼쪽' if w_sign>0 else '오른쪽'}")
+
+    # ── ESC 전송 ─────────────────────────────────────────────────────────────
     arduino.write(b"ESC\n")
     time.sleep(0.15)
 
-    # 전진 가능 방향 나올 때까지 회전
-    MAX_ROT = 350   # deg: 최대 탐색 각도
+    # ── 전진 가능 방향 나올 때까지 회전 ─────────────────────────────────────
+    MAX_ROT = 350
     t_start = time.time()
 
     while time.time() - t_start < ESCAPE_TIMEOUT:
         scan_buf  = collect_scan_during_rotation(arduino, lidar, duration=0.12)
         front_pts = [(a, d) for a, d in scan_buf if is_in_front(a) and d > 0]
 
-        # ① 전진 가능 확인
         if front_pts and not is_path_blocked(front_pts):
             print(f"  [탈출완료] 전진 가능 발견 "
                   f"(회전량:{abs(arduino_heading_deg):.1f}°)")
             break
 
-        # ② 최대 탐색 각도 초과
         if abs(arduino_heading_deg) > MAX_ROT:
             print("  [탈출] 350° 탐색 후 경로 없음 → 종료")
             break
 
-        # ③ 회전 방향 장애물 → 방향 전환
         if scan_buf and check_rotation_blocked(w_sign, scan_buf):
             alt = -w_sign
             if not check_rotation_blocked(alt, scan_buf):
