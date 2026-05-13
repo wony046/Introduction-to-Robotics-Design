@@ -116,7 +116,7 @@ def read_arduino(arduino):
             # 버퍼에서 한 줄(엔터 기준)을 읽어오고, utf-8로 디코딩한 뒤 양옆 공백과 줄바꿈을 제거합니다.
             line = arduino.readline().decode('utf-8', errors='ignore').strip()
             if line.startswith('H:'):     # 읽어온 문자열이 'H:'로 시작한다면 헤딩 데이터로 간주합니다.
-                arduino_heading_deg = -float(line[2:])  # 'H:' 좌측 틀어짐 (+) 우측으로 틀어짐 (-) 뒷부분의 문자열을 실수(float)로 변환하여 헤딩 각도를 업데이트합니다.
+                arduino_heading_deg = float(line[2:])  # 'H:' 좌측 틀어짐 (+) 우측으로 틀어짐 (-) 뒷부분의 문자열을 실수(float)로 변환하여 헤딩 각도를 업데이트합니다.
             elif line:                    # 'H:'로 시작하지 않지만 빈 문자열이 아니면 기타 메시지로 취급합니다.
                 msg = line                # 기타 메시지를 변수에 저장합니다 (디버깅 등에 활용 가능).
         except Exception:                 # 통신 노이즈 등으로 디코딩 에러가 발생하면 무시하고 넘어갑니다.
