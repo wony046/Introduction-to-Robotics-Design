@@ -886,7 +886,7 @@ def main():
                 now = time.time()
                 if now - last_send >= SEND_INTERVAL:
 
-                    # ── ① 막힘 감지 → 탈출 (전진 가능 방향까지 동적 회전) ────
+                   """ # ── ① 막힘 감지 → 탈출 (전진 가능 방향까지 동적 회전) ────
                     if is_path_blocked(front_points):
                         stuck_count += 1
                         print(f"  [막힘감지] {stuck_count}/{STUCK_TRIGGER_COUNT}회")
@@ -913,7 +913,7 @@ def main():
                         last_cmd_str = ""
                         last_send    = time.time()
                         scan_points  = []
-                        continue
+                        continue"""
 
                     # ── ③ 정상 v/w 명령 ────────────────────────────────────
                     v, w = find_vw_command(front_points, arduino_heading_deg)
