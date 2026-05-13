@@ -685,21 +685,21 @@ def find_vw_command(scan_points, heading_deg):
     if stop_points:
         print(f"  [StopZone] Active - Evaluating best clearance")
     
-    print(f"  [Clearance] L:{left_clear}°  R:{right_clear}°  Heading:{heading_deg:.1f}°")
+    #print(f"  [Clearance] L:{left_clear}°  R:{right_clear}°  Heading:{heading_deg:.1f}°")
 
     if avoidance_w_sign == 0.0: 
         # 이전에 피하던 방향이 없었다면 (새로운 회피 시작)
-        avoidance_w_sign = select_direction(left_clear, right_clear, heading_deg) 
+        avoidance_w_sign = select_direction(left_clear_width, right_clear_width, heading_deg) 
         print(f"  [DirDecide] Locked to {'Left' if avoidance_w_sign>0 else 'Right'}")
     else: 
         # 이미 피하고 있던 중이라면 (방향 관성 존재)
-        committed_clear = left_clear if avoidance_w_sign > 0 else right_clear 
+        committed_clear = left_clear_width if avoidance_w_sign > 0 else right_clear_width 
         
         # 내가 피하려고 돌고 있는 쪽의 공간이 너무 비좁아졌다면(25도 미만) 방향 전환을 고려합니다.
         # (정지 상태이더라도 공간이 충분하다면 기존 방향으로 계속 안전하게 제자리 회전하며 빠져나갑니다)
         if committed_clear < MIN_VIABLE_CLEAR: 
             old = avoidance_w_sign 
-            avoidance_w_sign = select_direction(left_clear, right_clear, heading_deg) 
+            avoidance_w_sign = select_direction(left_clear_width, right_clear_width, heading_deg) 
             if avoidance_w_sign != old: 
                 print(f"  [DirSwitch] Blocked({committed_clear}°) → {'Left' if avoidance_w_sign>0 else 'Right'}")
 
