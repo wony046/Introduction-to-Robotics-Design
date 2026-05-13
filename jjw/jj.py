@@ -70,7 +70,7 @@ STOP_BACKUP_TIME = 0.3   # sec: 위험구역 진입 시 후진 시간 (약 15mm)
 W_GAIN           = 1.2
 MAX_W            = 1.5
 W_SMOOTH         = 0.6
-SIDE_ROTATE_SAFE = 125   # mm: 측면 장애물 수평거리가 이 미만이면 해당 방향 회전 금지
+SIDE_ROTATE_SAFE = 150   # mm: 측면 장애물 수평거리가 이 미만이면 해당 방향 회전 금지
                           #     ROBOT_HALF_WIDTH(110mm) + 여유(40mm)
 SIDE_CHECK_ANGLE = 60    # deg: 측면 확인 각도 범위 (±60°)
 
@@ -115,7 +115,8 @@ arduino_heading_deg  = 0.0
 stuck_count          = 0
 prev_w               = 0.0
 avoidance_w_sign     = 0.0
-stop_zone_entry_time = None   # 위험구역 최초 진입 시각 (후진 타이머용)
+no_danger_count      = 0     # 연속 장애물 없음 횟수 (avoidance_w_sign 리셋 hysteresis)
+stop_zone_entry_time = None
 
 
 def normalize_angle(angle):
@@ -720,7 +721,7 @@ def find_vw_command(scan_points, heading_deg):
       방향 결정됨 → 현재 방향 유지
         단, 현재 방향이 MIN_VIABLE_CLEAR 미만이면 전환 허용
     """
-    global avoidance_w_sign
+    global avoidance_w_sign, no_danger_count
     threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN
 
     # 위험 포인트 수집
@@ -732,9 +733,15 @@ def find_vw_command(scan_points, heading_deg):
         if fwd > 0 and fwd <= FORWARD_RANGE and horiz < threshold:
             danger_points.append((angle_norm, dist, horiz, fwd))
 
+    NO_DANGER_RESET = 3   # N회 연속 장애물 없을 때만 방향 리셋
+
     if not danger_points:
-        avoidance_w_sign = 0.0   # 장애물 없음 → 방향 리셋
+        no_danger_count += 1
+        if no_danger_count >= NO_DANGER_RESET:
+            avoidance_w_sign = 0.0   # 진짜로 장애물 없어짐 → 방향 리셋
         return FORWARD_SPEED, 0.0
+    else:
+        no_danger_count = 0
 
     # ── v 기준: 정면 직사각형(STOP_FWD × STOP_HORIZ) 안의 장애물 ──────────────
     # 구 긴급구역 범위 재활용 → 옆 벽은 제외하고 진짜 정면 장애물만 판별
@@ -842,7 +849,7 @@ def find_vw_command(scan_points, heading_deg):
 
 
 def main():
-    global arduino_heading_deg, stuck_count, prev_w, avoidance_w_sign, stop_zone_entry_time
+    global arduino_heading_deg, stuck_count, prev_w, avoidance_w_sign, stop_zone_entry_time, no_danger_count
 
     print("=== RPLIDAR 장애물 회피 v5 ===")
     print(f"  라이다 포트    : {LIDAR_PORT}")
@@ -924,23 +931,12 @@ def main():
                     # ── ③ 정상 v/w 명령 ────────────────────────────────────
                     v, w = find_vw_command(front_points, arduino_heading_deg)
 
-                    # 위험구역(stop zone) 진입 시: 후진 → 제자리 회전 시퀀스
-                    # v == 0.0 and w != 0.0 → find_vw_command가 stop_points 감지
+                    # 위험구역(stop zone) → v=0 제자리 회전
+                    # 후진 제거: 45° 측면 장애물에 후진은 효과 없고
+                    #            후진 중 danger_points 소멸로 avoidance_w_sign 리셋 야기
                     in_stop_zone = (v == 0.0 and abs(w) > 0.01)
-                    if in_stop_zone:
-                        if stop_zone_entry_time is None:
-                            stop_zone_entry_time = now
-                            print("  [위험구역] 진입 → 후진 시작")
-
-                        elapsed = now - stop_zone_entry_time
-                        if elapsed < STOP_BACKUP_TIME:
-                            # ① 후진 단계
-                            v = -MIN_SPEED
-                            w = 0.0
-                            print(f"  [후진중] {elapsed:.1f}/{STOP_BACKUP_TIME}s")
-                        # else: ② 제자리 회전 (v=0, w는 find_vw_command 값 그대로)
-                    else:
-                        stop_zone_entry_time = None   # 위험구역 벗어남 → 타이머 리셋
+                    if not in_stop_zone:
+                        stop_zone_entry_time = None
 
                     # w 저역통과 필터
                     w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
