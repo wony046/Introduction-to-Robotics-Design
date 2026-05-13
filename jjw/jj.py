@@ -1,6 +1,6 @@
 """
 장지원 자작 알고리즘
-RPLIDAR C1 장애물 회피 및 탈출 알고리즘 (v7)
+RPLIDAR C1 장애물 회피 및 탈출 알고리즘 (v5)
 통신: 라이다 /dev/ttyUSB0 (UART) ↔ 아두이노 /dev/ttyS0 (UART)
 """
 
@@ -642,13 +642,13 @@ def find_vw_command(scan_points, heading_deg):
     # [3] 방향(부호) 결정
     # 직진 속도(v)가 0이든 아니든, 항상 좌우 빈 공간을 먼저 계산하여 똑똑하게 방향을 정합니다.
     # (기존의 무조건 반대로 도망가는 'Direct decide' 로직을 삭제하여 좁은 길에서의 핑퐁 고착을 원천 차단합니다)
-    left_clear = right_clear = 0 
-    for a in range(-SCAN_HALF_ANGLE, 0, ANGLE_STEP): # 스캔의 왼쪽 절반(음수 각도)
-        if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
-            left_clear += ANGLE_STEP 
-    for a in range(ANGLE_STEP, SCAN_HALF_ANGLE + 1, ANGLE_STEP): # 오른쪽 절반(양수 각도)
-        if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
-            right_clear += ANGLE_STEP 
+    #left_clear = right_clear = 0 
+    #for a in range(-SCAN_HALF_ANGLE, 0, ANGLE_STEP): # 스캔의 왼쪽 절반(음수 각도)
+    #    if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
+    #        left_clear += ANGLE_STEP 
+    #for a in range(ANGLE_STEP, SCAN_HALF_ANGLE + 1, ANGLE_STEP): # 오른쪽 절반(양수 각도)
+    #    if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
+    #        right_clear += ANGLE_STEP 
 # (기존 코드)
     # left_clear = right_clear = 0 
     # for a in range(-SCAN_HALF_ANGLE, 0, ANGLE_STEP): ...
