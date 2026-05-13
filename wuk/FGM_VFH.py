@@ -4,7 +4,6 @@ RPLIDAR C1 장애물 회피 및 탈출 알고리즘 (v5)
 통신: 라이다 /dev/ttyUSB0 (UART) ↔ 아두이노 /dev/ttyS0 (UART)
 """
 
-import sys
 import serial  # 시리얼 통신(UART)을 사용하기 위한 라이브러리를 불러옵니다.
 import time    # 딜레이(sleep) 및 현재 시간(타임스탬프) 측정을 위한 라이브러리를 불러옵니다.
 import math    # 삼각함수(sin, cos), 제곱근(sqrt) 등 수학적 계산을 위한 라이브러리를 불러옵니다.
@@ -181,7 +180,7 @@ def is_path_blocked(front_scan_points):
                     min_gap = ROBOT_HALF_WIDTH * 2 + safety # 로봇의 전체 폭(반폭*2)에 동적으로 계산된 안전 여유폭을 더해 통과 필요 최소 너비를 구합니다.
                     
                     # 디버깅을 위해 열린 구간의 각도, 거리, 계산된 너비, 통과 가능 여부를 터미널에 출력합니다.
-                    print(f"  [열린구간] {l_angle}°~{r_angle-ANGLE_STEP}°  d_L={l_dist:.0f} d_R={r_dist:.0f} 너비={w:.0f}mm 기준={min_gap:.0f}mm " + ("✓통과가능" if w >= min_gap else "✗협소"))
+                    print(f"  [OpenGap] {l_angle}°~{r_angle-ANGLE_STEP}°  d_L={l_dist:.0f} d_R={r_dist:.0f} width={w:.0f}mm min={min_gap:.0f}mm " + ("✓Passable" if w >= min_gap else "✗Narrow"))
                     if w >= min_gap:            # 계산된 실제 너비가 로봇이 통과하기 위한 최소 필요 너비보다 넓다면
                         return False            # 막히지 않았음(통과 가능)을 의미하는 False를 반환하고 함수를 종료합니다.
 
@@ -199,7 +198,7 @@ def is_path_blocked(front_scan_points):
             safety  = STUCK_MAX_SAFETY * min(d_ref / STUCK_CLEAR_DIST, 1.0) # 동적 안전 여유폭 산정
             min_gap = ROBOT_HALF_WIDTH * 2 + safety # 최소 통과 필요 너비 산정
             # 마지막 구간의 결과 출력
-            print(f"  [열린구간끝] {l_angle}°~{SCAN_HALF_ANGLE}°  d_L={l_dist:.0f} 너비≈{w:.0f}mm 기준={min_gap:.0f}mm " + ("✓통과가능" if w >= min_gap else "✗협소"))
+            print(f"  [OpenGapEnd] {l_angle}°~{SCAN_HALF_ANGLE}°  d_L={l_dist:.0f} width≈{w:.0f}mm min={min_gap:.0f}mm " + ("✓Passable" if w >= min_gap else "✗Narrow"))
             if w >= min_gap:                    # 마지막 구간의 너비가 충분히 넓다면
                 return False                    # 막히지 않았음을 반환합니다.
 
@@ -244,7 +243,7 @@ def find_escape_angle(all_scan_points):
             best_start = start                  # 가장 긴 구간의 시작 인덱스도 갱신합니다.
 
     if best_len == 0:                           # 360도를 다 뒤졌는데 500mm 이상 뚫린 곳이 단 한 군데도 없다면
-        print("  [탈출] 열린 공간 없음 → 90° 회전") # 터미널에 메시지를 남기고
+        print("  [Escape] No open space → Rotate 90°") # 터미널에 메시지를 남기고
         return 90.0                             # 임의로 우측 90도로 제자리 회전하도록 지시합니다 (궁여지책).
 
     # 가장 넓게 열린 섹터를 찾았다면, 그 섹터의 한가운데 인덱스를 계산합니다.
@@ -252,11 +251,11 @@ def find_escape_angle(all_scan_points):
     target_angle = all_angles[center_idx]       # 한가운데 인덱스에 해당하는 실제 물리적 각도(도)를 구하여 목표 각도로 설정합니다.
 
     # 탈출 방향 결정 결과를 터미널에 출력합니다 (총 몇 도짜리 너비이고, 중심은 몇 도인지).
-    print(f"  [탈출방향] 최대 열린 섹터 {best_len * ANGLE_STEP}°  → 목표각도 {target_angle}°")
+    print(f"  [EscapeDir] Max open sector {best_len * ANGLE_STEP}°  → Target angle {target_angle}°")
 
     # 하지만 찾은 최적 각도가 로봇이 한 번에 회전하도록 허용된 최대 각도(MAX_ESCAPE_ANGLE, 120도)를 넘어선다면
     if abs(target_angle) > MAX_ESCAPE_ANGLE:
-        print(f"  [탈출방향 제한] {target_angle}° > {MAX_ESCAPE_ANGLE}° → ±{MAX_ESCAPE_ANGLE}° 이내 최적 방향 탐색")
+        print(f"  [EscapeDir Limit] {target_angle}° > {MAX_ESCAPE_ANGLE}° → Search optimal dir within ±{MAX_ESCAPE_ANGLE}°")
 
         # 각도를 -120도 ~ +120도 사이로만 제한하여 다시 리스트를 만듭니다.
         limited_angles = [a for a in all_angles if abs(a) <= MAX_ESCAPE_ANGLE]
@@ -279,10 +278,10 @@ def find_escape_angle(all_scan_points):
         if best_l_len > 0:                      # 제한된 범위 내에서도 열린 구간을 찾았다면
             c_idx        = (best_l_start + best_l_len // 2) % len(limited_angles) # 그 구간의 중앙 인덱스를 구하고
             target_angle = limited_angles[c_idx] # 최종 목표 각도로 덮어씁니다.
-            print(f"  [탈출방향 제한] 범위 내 최적: {target_angle}°")
+            print(f"  [EscapeDir Limit] Optimal in range: {target_angle}°")
         else:                                   # 제한된 범위 내(-120~120도)는 죄다 막혀있고, 120도 넘어가는 후방쪽만 뚫려 있는 최악의 경우라면
             target_angle = MAX_ESCAPE_ANGLE * (1 if target_angle > 0 else -1) # 부호만 유지한 채 최대 한계치(±120도)로 강제 클램프 시킵니다.
-            print(f"  [탈출방향 제한] 열린 공간 없음 → {target_angle}° 클램프")
+            print(f"  [EscapeDir Limit] No open space → Clamped to {target_angle}°")
 
     return float(target_angle)                  # 최종적으로 계산된 로봇 중심 기준 상대적인 탈출 목표 각도를 반환합니다.
 
@@ -337,18 +336,18 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
     heading_deg    = arduino_heading_deg        # 현재 헤딩(궤도 이탈 각도)을 지역 변수에 백업해둡니다.
     BACKUP_MAX_TIME = 3.0                       # 최대 허용 후진 시간을 3초로 넉넉하게 설정합니다.
     HEADING_HINT_MIN = 5.0                      # 헤딩이 5도 이상 틀어져 있다면, 헤딩 각도를 탈출 방향 결정의 '힌트'로 사용하기 위한 최소 기준입니다.
-    print(f"[ESCAPE] 전진 불가  헤딩:{heading_deg:.1f}°") # 현재 전진 불가를 선언하고 헤딩 값을 터미널에 알립니다.
+    print(f"[ESCAPE] Cannot move forward  Heading:{heading_deg:.1f}°") # 현재 전진 불가를 선언하고 헤딩 값을 터미널에 알립니다.
 
     # [Step 1] 어느 방향으로 회전해 탈출할지 초기 방향을 결정합니다.
     if abs(heading_deg) >= HEADING_HINT_MIN:    # 로봇이 목표 궤도(0도)에서 5도 이상 틀어진 상태로 막혔다면
         w_sign  = -1.0 if heading_deg > 0 else 1.0  # 틀어진 반대 방향(헤딩을 줄이는 쪽)으로 도는 것을 최우선 탈출 방향으로 삼습니다.
-        hint    = "헤딩 반대"                   # 터미널 출력을 위한 힌트 문구를 설정합니다.
+        hint    = "Opposite Heading"            # 터미널 출력을 위한 힌트 문구를 설정합니다.
     else:                                       # 헤딩이 거의 0도(정면으로 가다 꽉 막힌 상태)라면
         t       = find_escape_angle(all_scan_points) # 앞서 정의한 함수를 통해 360도 스캔에서 가장 넓은 쪽 각도를 계산해옵니다.
         w_sign  = -1.0 if t >= 0 else 1.0       # 가장 넓은 각도가 우측(+)이면 우회전(-1), 좌측(-)이면 좌회전(+1) 부호를 결정합니다. (각도계의 방향에 따름)
-        hint    = "스캔 기반(헤딩≈0°)"          # 힌트 문구를 설정합니다.
+        hint    = "Scan Based(Heading≈0°)"      # 힌트 문구를 설정합니다.
 
-    print(f"  [{hint}] 목표 방향: {'오른쪽' if w_sign<0 else '왼쪽'}") # 결정된 1차 목표 회전 방향을 출력합니다.
+    print(f"  [{hint}] Target Dir: {'Right' if w_sign<0 else 'Left'}") # 결정된 1차 목표 회전 방향을 출력합니다.
 
     # [Step 2] 회전 시 부딪히지 않도록, 측면에 여유 공간이 생길 때까지 뒤로 물러나는 동적 후진 함수를 내부에 정의합니다.
     def backup_until_clear(target_sign):
@@ -366,24 +365,24 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
 
     # 방금 결정한 1차 목표 방향(w_sign) 쪽 측면에 회전 시 부딪힐만한 장애물이 있는지 즉시 확인합니다.
     if check_rotation_blocked(w_sign, all_scan_points): 
-        dir_str = "오른쪽" if w_sign < 0 else "왼쪽" 
-        print(f"  [{dir_str}] 막힘 → 열릴 때까지 후진 중...") # 막혀있음을 알리고 후진을 시작합니다.
+        dir_str = "Right" if w_sign < 0 else "Left" 
+        print(f"  [{dir_str}] Blocked → Backing up until clear...") # 막혀있음을 알리고 후진을 시작합니다.
         cleared = backup_until_clear(w_sign)    # 위에서 정의한 동적 후진 함수를 실행하여 공간이 확보되었는지(cleared) 받습니다.
 
         if not cleared:                         # 뒤로 최대한 빼봤는데도 여전히 회전하려는 쪽 측면에 장애물이 걸린다면
             w_sign  = -w_sign                   # 안 되겠다 싶어 반대 방향으로 회전 목표를 180도 바꿉니다.
-            dir_str = "오른쪽" if w_sign < 0 else "왼쪽"
-            print(f"  최대 후진 후에도 막힘 → [{dir_str}] 시도") # 방향을 틀었다고 출력합니다.
+            dir_str = "Right" if w_sign < 0 else "Left"
+            print(f"  Still blocked after max backup → Try [{dir_str}]") # 방향을 틀었다고 출력합니다.
 
             if check_rotation_blocked(w_sign, all_scan_points): # 바꾼 반대 방향조차도 측면에 장애물이 걸려있다면 (양옆이 다 좁은 골목)
-                print(f"  [{dir_str}]도 막힘 → 후진 시도")
+                print(f"  [{dir_str}] also blocked → Try backing up")
                 cleared = backup_until_clear(w_sign) # 바꾼 방향 기준으로도 다시 뒤로 빼면서 공간 확보를 시도해봅니다.
                 if not cleared:                 # 이마저도 실패했다면 (완전히 좁고 긴 터널에 끼인 상태)
                     t      = find_escape_angle(all_scan_points) # 가장 확실하게 넓게 뚫린 곳을 찾기 위해 다시 전체 스캔 분석 함수를 호출합니다.
                     w_sign = -1.0 if t >= 0 else 1.0 # 분석 결과를 토대로 최종 3차 목표 방향을 강제합니다.
-                    print(f"  스캔 기반(3차)으로 결정") 
+                    print(f"  Decided based on scan (3rd attempt)") 
     else:                                       # 1차 목표 방향 측면에 아무 장애물이 없이 처음부터 여유가 있었다면
-        print(f"  방향 열림 → 최소 후진 ({BACKUP_DURATION}초)") # 그래도 제자리 회전 시의 축 틀어짐을 대비해 아주 살짝만 뒤로 물러납니다.
+        print(f"  Direction open → Min backup ({BACKUP_DURATION}s)") # 그래도 제자리 회전 시의 축 틀어짐을 대비해 아주 살짝만 뒤로 물러납니다.
         t_backup = time.time()                  # 타이머 시작
         while time.time() - t_backup < BACKUP_DURATION: # 기본 세팅된 짧은 시간(0.6초) 동안만 루프를 돕니다.
             arduino.write(f"{-BACKUP_SPEED:.2f} 0.00\n".encode()) # 짧게 후진 명령
@@ -391,7 +390,7 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
         arduino.write(b"0.00 0.00\n")           # 정지
         time.sleep(0.05)                        # 정지 대기
 
-    print(f"  최종 방향: {'왼쪽' if w_sign>0 else '오른쪽'}") # 우여곡절 끝에 확정된 최종 탈출 회전 방향을 출력합니다.
+    print(f"  Final Dir: {'Left' if w_sign>0 else 'Right'}") # 우여곡절 끝에 확정된 최종 탈출 회전 방향을 출력합니다.
 
     # [Step 3] 아두이노에 제어권 리셋 신호를 보냅니다.
     arduino.write(b"ESC\n")                     # 'ESC' 문자열을 보내면 아두이노 내부의 헤딩 누적값이나 오차를 리셋하여 깔끔하게 회전을 시작하도록 합니다.
@@ -409,18 +408,18 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
         # 방금 추려낸 정면 데이터를 is_path_blocked 함수에 넣어, 로봇이 빠져나갈 만큼 너비가 충분한지(False) 확인합니다.
         if front_pts and not is_path_blocked(front_pts): 
             # 정면에 충분한 공간이 발견되었다면, 목표 방향을 제대로 찾은 것입니다.
-            print(f"  [탈출완료] 전진 가능 발견 (회전량:{abs(arduino_heading_deg):.1f}°)") 
+            print(f"  [Escape Done] Forward path found (Rotated:{abs(arduino_heading_deg):.1f}°)") 
             break                               # 탈출 회전 루프를 즉시 깨고 빠져나옵니다.
 
         if abs(arduino_heading_deg) > MAX_ROT:  # 회전을 계속 하다가 아두이노가 측정한 누적 회전 각도가 한계치(350도)를 넘었다면
-            print("  [탈출] 350° 탐색 후 경로 없음 → 종료") # 빙글빙글 한 바퀴 다 돌았는데도 나갈 구멍이 없다는 뜻이므로 포기하고 중단합니다.
+            print("  [Escape] No path after 350° search → Exit") # 빙글빙글 한 바퀴 다 돌았는데도 나갈 구멍이 없다는 뜻이므로 포기하고 중단합니다.
             break
 
         # 돌고 있는 와중에 새로운 장애물이 나타나서 회전하는 측면이 차단(blocked)될 위기라면
         if scan_buf and check_rotation_blocked(w_sign, scan_buf):
             alt = -w_sign                       # 돌고 있던 방향의 반대 방향으로 임시 전환을 고려해봅니다.
             if not check_rotation_blocked(alt, scan_buf): # 반대 방향은 측면이 비어있다면
-                print(f"  [탈출] 장애물 → {'왼쪽' if alt>0 else '오른쪽'} 전환") 
+                print(f"  [Escape] Obstacle → Switch to {'Left' if alt>0 else 'Right'}") 
                 w_sign = alt                    # 회전 방향을 반대로 역전시킵니다.
             else:                               # 반대 방향도 막혀있다면 (돌지도 못하게 꽉 낀 상황)
                 arduino.write(b"0.00 0.00\n")   # 모터를 완전히 세웁니다.
@@ -431,7 +430,7 @@ def execute_escape_rotation(arduino, lidar, all_scan_points):
         arduino.write(f"0.00 {w_sign * ESCAPE_W:.2f}\n".encode())
 
     else:                                       # 15초(ESCAPE_TIMEOUT)가 다 지날 때까지 루프가 break로 끝나지 않았다면 타임아웃입니다.
-        print("  [탈출] 타임아웃")
+        print("  [Escape] Timeout")
 
     arduino.write(b"0.00 0.00\n")               # 탈출 과정이 끝났으므로 모터를 안전하게 정지시킵니다.
     time.sleep(0.3)                             # 관성으로 도는 것을 잡기 위해 0.3초간 정지 상태를 유지합니다.
@@ -446,7 +445,7 @@ def execute_direction_correction(arduino, lidar, all_scan_points):
 
     heading_deg = arduino_heading_deg           # 현재 틀어진 헤딩 각도를 저장합니다.
     print("\n" + "="*52)
-    print(f"[방향보정] 헤딩:{heading_deg:.1f}° → ±{MISSION_HEADING_LIMIT}° 이내로 복귀") # 보정을 시작함을 알립니다.
+    print(f"[Correction] Heading:{heading_deg:.1f}° → Return within ±{MISSION_HEADING_LIMIT}°") # 보정을 시작함을 알립니다.
 
     w_sign = -1.0 if heading_deg > 0 else 1.0   # 헤딩이 양수(오른쪽 틀어짐)면 좌회전(-1.0), 음수면 우회전(1.0)으로 원래 방향으로 가는 최단 거리 회전 부호를 정합니다.
 
@@ -454,11 +453,11 @@ def execute_direction_correction(arduino, lidar, all_scan_points):
     if check_rotation_blocked(w_sign, all_scan_points): 
         w_sign = -w_sign                        # 장애물이 걸린다면 반대쪽으로 크게 돌아서 복귀하려고 부호를 바꿉니다.
         if check_rotation_blocked(w_sign, all_scan_points): # 반대쪽으로 도는 것도 측면에 걸린다면
-            print("  양쪽 막힘 → 방향보정 불가, 정상 회피로 복귀") # 지금 제자리 회전할 여유가 없으므로 보정을 포기하고 함수를 빠져나갑니다.
+            print("  Both sides blocked → Cannot correct direction, return to normal avoidance") # 지금 제자리 회전할 여유가 없으므로 보정을 포기하고 함수를 빠져나갑니다.
             print("="*52 + "\n")
             return
 
-    print(f"  회전 방향: {'왼쪽' if w_sign>0 else '오른쪽'}") # 돌기로 결정된 방향을 출력합니다.
+    print(f"  Rot Dir: {'Left' if w_sign>0 else 'Right'}") # 돌기로 결정된 방향을 출력합니다.
 
     t_start = time.time()                       # 타임아웃 방지용 타이머를 시작합니다.
     while time.time() - t_start < ESCAPE_TIMEOUT: # 타임아웃(15초) 내에서 루프를 돕니다.
@@ -466,14 +465,14 @@ def execute_direction_correction(arduino, lidar, all_scan_points):
 
         # 돌다가 아두이노에서 보낸 현재 헤딩 각도의 절댓값이 허용 한계(MISSION_HEADING_LIMIT, 90도) 안으로 들어왔다면
         if abs(arduino_heading_deg) <= MISSION_HEADING_LIMIT: 
-            print(f"  [방향보정 완료] 헤딩:{arduino_heading_deg:.1f}°") # 성공을 알리고
+            print(f"  [Correction Done] Heading:{arduino_heading_deg:.1f}°") # 성공을 알리고
             break                               # 루프를 즉시 종료합니다.
 
         # 돌고 있는데 장애물이 다가와서 측면이 막힐 위기에 처했다면
         if scan_buf and check_rotation_blocked(w_sign, scan_buf):
             alt = -w_sign                       # 반대 방향 전환을 고려해보고
             if not check_rotation_blocked(alt, scan_buf): # 비어있으면
-                print(f"  [방향보정] 장애물 → {'왼쪽' if alt>0 else '오른쪽'} 전환")
+                print(f"  [Correction] Obstacle → Switch to {'Left' if alt>0 else 'Right'}")
                 w_sign = alt                    # 반대로 회전 방향을 틉니다.
             else:                               # 양쪽 다 막히게 되면
                 arduino.write(b"0.00 0.00\n")   # 일단 서서
@@ -484,7 +483,7 @@ def execute_direction_correction(arduino, lidar, all_scan_points):
         arduino.write(f"0.00 {w_sign * RECOVERY_W:.2f}\n".encode())
 
     else:                                       # 15초 넘게 90도 안으로 못 들어왔으면 타임아웃 출력
-        print("  [방향보정] 타임아웃")
+        print("  [Correction] Timeout")
 
     arduino.write(b"0.00 0.00\n")               # 보정이 끝났으니 정지 명령
     time.sleep(0.3)                             # 정지 대기
@@ -521,20 +520,20 @@ def get_heading_recovery_cmd(heading_deg, front_scan_points):
             for a in range(-ANGLE_STEP, -SCAN_HALF_ANGLE - ANGLE_STEP, -ANGLE_STEP)
         )
 
-    corr_dir = "오른쪽" if natural_sign < 0 else "왼쪽" # 방향 문자열 매핑
+    corr_dir = "Right" if natural_sign < 0 else "Left" # 방향 문자열 매핑
 
     if frontal_open and not correction_blocked: # 정면도 넓고 꺾으려는 쪽도 넓으면
-        print(f"  [헤딩복귀-A] 직진+보정회전({corr_dir})  v={FORWARD_SPEED:.2f} w={natural_sign*RECOVERY_W:.2f}")
+        print(f"  [HeadingRec-A] Fwd+CorrectRot({corr_dir})  v={FORWARD_SPEED:.2f} w={natural_sign*RECOVERY_W:.2f}")
         return FORWARD_SPEED, natural_sign * RECOVERY_W # 최고 속도로 직진하면서 보정용 각속도를 섞어 부드럽게 복귀 궤적을 만듭니다.
     elif frontal_open and correction_blocked:   # 정면은 뚫렸는데 꺾으려는 쪽에 장애물이 있으면
-        print(f"  [헤딩복귀] 직진만 (보정방향 {corr_dir} 막힘)")
+        print(f"  [HeadingRec] Fwd only (Correct dir {corr_dir} blocked)")
         return FORWARD_SPEED, 0.0               # 일단 회전하지 않고 직진만 하여 장애물을 피합니다.
     elif not frontal_open and not correction_blocked: # 정면은 막혔는데 옆구리는 뚫려있다면
-        print(f"  [헤딩복귀] 제자리 보정회전({corr_dir})  w={natural_sign*RECOVERY_W:.2f}")
+        print(f"  [HeadingRec] In-place CorrectRot({corr_dir})  w={natural_sign*RECOVERY_W:.2f}")
         return 0.0, natural_sign * RECOVERY_W   # 직진을 멈추고(v=0) 그 자리에서 보정 방향으로 제자리 회전합니다.
     else:                                       # 정면도 막히고 꺾으려는 쪽도 막혔다면
-        alt_dir = "왼쪽" if natural_sign < 0 else "오른쪽" 
-        print(f"  [헤딩복귀] 양쪽 막힘 → 우회({alt_dir}) 회전")
+        alt_dir = "Left" if natural_sign < 0 else "Right" 
+        print(f"  [HeadingRec] Both blocked → Detour({alt_dir}) rot")
         return 0.0, -natural_sign * RECOVERY_W  # 일단 부딪히지 않기 위해 보정을 포기하고 반대 방향으로 제자리 우회 회전을 합니다.
 
 
@@ -548,13 +547,13 @@ def select_direction(left_clear, right_clear, heading_deg):
 
     # 갇힘 방지 특수 케이스 처리: 한쪽이 너무 좁으면 헤딩 점수가 어떻든 무조건 넓은 쪽으로 피하게 강제합니다.
     if left_ok and not right_ok:                # 왼쪽은 괜찮은데 오른쪽은 너무 좁다면
-        print(f"  [방향] 오른쪽 막힘({right_clear}°) → 왼쪽 강제")
+        print(f"  [Dir] Right blocked({right_clear}°) → Force Left")
         return 1.0                              # 무조건 왼쪽(1.0)으로 회전하도록 결정합니다.
     if right_ok and not left_ok:                # 오른쪽은 괜찮은데 왼쪽이 너무 좁다면
-        print(f"  [방향] 왼쪽 막힘({left_clear}°) → 오른쪽 강제")
+        print(f"  [Dir] Left blocked({left_clear}°) → Force Right")
         return -1.0                             # 무조건 오른쪽(-1.0)으로 회전하도록 결정합니다.
     if not left_ok and not right_ok:            # 양쪽 다 25도 미만으로 좁다면 (아주 좁은 골목)
-        print(f"  [방향] 양쪽 협소 → {'왼쪽' if left_clear >= right_clear else '오른쪽'} 선택")
+        print(f"  [Dir] Both narrow → Select {'Left' if left_clear >= right_clear else 'Right'}")
         return 1.0 if left_clear >= right_clear else -1.0 # 어쩔 수 없이 1도라도 더 넓은 쪽을 울며 겨자먹기로 선택합니다.
 
     # 양쪽 다 통과할 만큼 충분히 넓다면, 공간의 여유도와 원래 궤도로 가려는 관성(헤딩)을 합산하여 점수를 매깁니다.
@@ -566,7 +565,7 @@ def select_direction(left_clear, right_clear, heading_deg):
     bonus_side = "R" if heading_deg > 0 else "L" # 보너스 점수가 어느 쪽에 들어갔는지 표시하기 위한 문자열
     bonus_val  = abs(heading_deg) * HEADING_WEIGHT # 실제 부여된 보너스 점수값
     # 계산된 좌/우 총점과 계산 내역을 출력합니다.
-    print(f"  [방향점수] L={left_score:.0f}  R={right_score:.0f}  (여유 L={left_clear}° R={right_clear}°  헤딩보너스 {bonus_side}+{bonus_val:.0f})")
+    print(f"  [DirScore] L={left_score:.0f}  R={right_score:.0f}  (Clear L={left_clear}° R={right_clear}°  HeadingBonus {bonus_side}+{bonus_val:.0f})")
 
     # 왼쪽 총점이 크거나 같으면 왼쪽(+1.0), 오른쪽이 더 크면 오른쪽(-1.0)을 최종 회피 방향으로 반환합니다.
     return 1.0 if left_score >= right_score else -1.0
@@ -609,7 +608,7 @@ def find_vw_command(scan_points, heading_deg):
     horiz_ref = min(danger_points, key=lambda p: p[2])
     nearest_angle, ref_dist, n_horiz, _ = horiz_ref # 핵심 기준점의 각도, 대각선 거리, 수평 거리 변수를 뽑아냅니다.
 
-    print(f"  [기준] 전방:{n_fwd_ref:.0f}mm  정지:{len(stop_points)}개  각도:{nearest_angle:.1f}°  수평:{n_horiz:.0f}mm")
+    print(f"  [Ref] Fwd:{n_fwd_ref:.0f}mm  Stop:{len(stop_points)}pts  Angle:{nearest_angle:.1f}°  Horiz:{n_horiz:.0f}mm")
 
     if stop_points:                             # 만약 초근접 구역(stop_points)에 장애물이 하나라도 들어왔다면
         v = 0.0                                 # 충돌 직전이므로 로봇의 직진 속도(v)를 즉시 0으로 만듭니다 (멈춤).
@@ -639,7 +638,7 @@ def find_vw_command(scan_points, heading_deg):
     if stop_points:                             # 충돌 직전(정지 상태)이라면 복잡한 빈 공간 계산보다 직관적인 생존이 우선입니다.
         stop_angle = min(stop_points, key=lambda p: p[2])[0] # 가장 가까운 초근접 장애물의 각도를 확인합니다.
         avoidance_w_sign = 1.0 if stop_angle >= 0 else -1.0  # 장애물이 내 오른쪽(양수 각도)에 있으면 왼쪽(+1)으로, 왼쪽에 있으면 오른쪽(-1)으로 꺾도록 즉각 부호를 결정합니다.
-        print(f"  [정지구역] 각도:{stop_angle:.1f}° → {'왼쪽' if avoidance_w_sign>0 else '오른쪽'} 직접 결정")
+        print(f"  [StopZone] Angle:{stop_angle:.1f}° → Direct decide {'Left' if avoidance_w_sign>0 else 'Right'}")
     else:                                       # 감속 구간이거나 여유가 있는 상태라면
         left_clear = right_clear = 0            # 왼쪽과 오른쪽의 빈 공간 각도를 누적할 변수를 초기화합니다.
         for a in range(-SCAN_HALF_ANGLE, 0, ANGLE_STEP): # 스캔의 왼쪽 절반(음수 각도)을 뒤집어 봅니다.
@@ -649,18 +648,18 @@ def find_vw_command(scan_points, heading_deg):
             if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
                 right_clear += ANGLE_STEP       # 오른쪽 빈 공간 각도를 누적합니다.
 
-        print(f"  [여유] 왼:{left_clear}°  오:{right_clear}°  헤딩:{heading_deg:.1f}°")
+        print(f"  [Clearance] L:{left_clear}°  R:{right_clear}°  Heading:{heading_deg:.1f}°")
 
         if avoidance_w_sign == 0.0:             # 이전에 피하던 방향이 없었다면 (새로운 장애물 출현 시)
             avoidance_w_sign = select_direction(left_clear, right_clear, heading_deg) # 공간 점수를 매겨 어느 쪽으로 피할지 최초로 결정합니다.
-            print(f"  [방향결정] {'왼쪽' if avoidance_w_sign>0 else '오른쪽'} 고착")
+            print(f"  [DirDecide] Locked to {'Left' if avoidance_w_sign>0 else 'Right'}")
         else:                                   # 이미 어느 쪽으로 피하고 있던 중이라면 (방향 관성 존재)
             committed_clear = left_clear if avoidance_w_sign > 0 else right_clear # 내가 지금 피하고 있는 방향의 현재 남은 빈 공간 각도를 확인합니다.
             if committed_clear < MIN_VIABLE_CLEAR: # 피하고 있던 쪽으로 계속 가려니 그쪽 공간이 너무 비좁아졌다면(25도 미만)
                 old = avoidance_w_sign          # 기존 방향을 백업하고
                 avoidance_w_sign = select_direction(left_clear, right_clear, heading_deg) # 다시 전체 좌우 공간 점수를 매겨 새 방향을 찾습니다.
                 if avoidance_w_sign != old:     # 점수 계산 결과 방향이 뒤집어졌다면
-                    print(f"  [방향전환] 막힘({committed_clear}°) → {'왼쪽' if avoidance_w_sign>0 else '오른쪽'}") # 방향이 전환되었음을 알립니다.
+                    print(f"  [DirSwitch] Blocked({committed_clear}°) → {'Left' if avoidance_w_sign>0 else 'Right'}") # 방향이 전환되었음을 알립니다.
 
     # [4] 측면 안전 검사 (회전 시 옆구리 충돌 방지 클램프)
     def side_horiz_blocked(is_left):            # 특정 방향(좌/우)의 측면에 장애물이 바짝 붙어있는지 확인하는 내부 함수입니다.
@@ -678,10 +677,10 @@ def find_vw_command(scan_points, heading_deg):
     right_close = side_horiz_blocked(is_left=False) # 돌기 전에 오른쪽 측면이 막혔는지 검사합니다.
     
     if avoidance_w_sign > 0 and left_close and not right_close: # 왼쪽으로 돌려는데 왼쪽 측면에 뭐가 바짝 붙어있고 오른쪽은 비었다면
-        print("  [측면차단] 왼쪽 → 오른쪽 강제") 
+        print("  [SideBlock] Left → Force Right") 
         avoidance_w_sign = -1.0                 # 돌다가 긁히지 않도록 강제로 오른쪽(-1.0) 회전으로 부호를 뒤집습니다.
     elif avoidance_w_sign < 0 and right_close and not left_close: # 오른쪽으로 돌려는데 우측이 막히고 좌측이 비었다면
-        print("  [측면차단] 오른쪽 → 왼쪽 강제")
+        print("  [SideBlock] Right → Force Left")
         avoidance_w_sign = 1.0                  # 좌회전으로 강제 전환합니다.
 
     # [5] P 제어를 통한 최종 각속도 크기(w_mag) 계산
@@ -689,7 +688,7 @@ def find_vw_command(scan_points, heading_deg):
     w_mag = max(min(W_GAIN * horiz_error / threshold, MAX_W), W_MIN_DANGER) # 오차가 작더라도 위험 상황에선 최소 W_MIN_DANGER(0.5) 속도로는 확실하게 돌아주도록 보장(max)합니다.
     w     = avoidance_w_sign * w_mag            # 확정된 부호(방향)에 계산된 세기를 곱해 최종 w 명령값을 산출합니다.
 
-    print(f"  [명령] v:{v:.2f}  w:{w:.2f}  (수평오차:{horiz_error:.0f}mm)") # 산출된 v, w 값을 터미널에 출력합니다.
+    print(f"  [Cmd] v:{v:.2f}  w:{w:.2f}  (HorizErr:{horiz_error:.0f}mm)") # 산출된 v, w 값을 터미널에 출력합니다.
     return v, w                                 # 메인 루프에서 사용할 수 있도록 v와 w를 반환합니다.
 
 
@@ -697,16 +696,16 @@ def main():
     global arduino_heading_deg, stuck_count, prev_w, avoidance_w_sign, stop_zone_entry_time, no_danger_count # 메인 상태 변수들을 전역으로 선언합니다.
 
     # 콘솔에 초기 설정값 안내 문구를 길게 출력하여 세팅이 잘 되었는지 확인시켜줍니다.
-    print("=== RPLIDAR 장애물 회피 v5 ===")
-    print(f"  라이다 포트    : {LIDAR_PORT}")
-    print(f"  아두이노 포트  : {ARDUINO_PORT}")
-    print(f"  라이다 보정    : +{LIDAR_OFFSET}mm")
-    print(f"  위험구역       : 전방 {FORWARD_RANGE}mm × 수평 {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm")
-    print(f"  속도           : 최고 {FORWARD_SPEED}m/s  최저 {MIN_SPEED}m/s (완전정지 없음)")
-    print(f"  선속도 감속    : {SLOW_START_DIST}mm부터 감속 → {STOP_FWD_RANGE}×{STOP_HORIZ_RANGE}mm 구역에서 최저속")
-    print(f"  각속도 방식    : 수평오차 P제어 (horiz < {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm 동안 유지)")
-    print(f"  막힘감지       : 전방 통과불가 즉시 탈출 회전")
-    print(f"  탈출 각속도    : {ESCAPE_W} rad/s (최적 방향)")
+    print("=== RPLIDAR Obstacle Avoidance v5 ===")
+    print(f"  LIDAR_PORT    : {LIDAR_PORT}")
+    print(f"  ARDUINO_PORT  : {ARDUINO_PORT}")
+    print(f"  LIDAR_OFFSET  : +{LIDAR_OFFSET}mm")
+    print(f"  Danger Zone   : Fwd {FORWARD_RANGE}mm × Horiz {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm")
+    print(f"  Speed         : Max {FORWARD_SPEED}m/s  Min {MIN_SPEED}m/s (No full stop)")
+    print(f"  Lin Decel     : Decel from {SLOW_START_DIST}mm → Min speed in {STOP_FWD_RANGE}×{STOP_HORIZ_RANGE}mm zone")
+    print(f"  Ang Control   : Horiz Err P-Control (Maintain while horiz < {ROBOT_HALF_WIDTH+SAFETY_MARGIN}mm)")
+    print(f"  Block Detect  : Immed. escape rotation if fwd blocked")
+    print(f"  Escape AngVel : {ESCAPE_W} rad/s (Optimal dir)")
     print("=" * 50)
 
     # 라이다와 아두이노 장치를 지정한 포트와 보드레이트(속도)로 엽니다. Timeout 1초를 설정하여 무한 대기를 막습니다.
@@ -717,7 +716,7 @@ def main():
     lidar.write(bytes([0xA5, 0x40]))            # 라이다에게 모터 회전을 명령하는 바이너리 코드를 보냅니다.
     time.sleep(1)                               # 모터가 최고 속도로 돌 때까지 1초 기다립니다.
     lidar.write(bytes([0xA5, 0x20]))            # 라이다에게 레이저 스캔을 시작하고 데이터를 보내라고 명령합니다.
-    print("스캔 시작...")
+    print("Starting scan...")
     lidar.read(7)                               # 라이다가 스캔 시작 직후 보내는 7바이트짜리 응답 헤더 패킷을 읽어서 버퍼를 비웁니다.
 
     scan_points  = []                           # 한 바퀴(360도) 치의 라이다 점들을 모아둘 빈 리스트를 준비합니다.
@@ -749,7 +748,7 @@ def main():
                     # ── ① 막힘 감지 → 탈출 시퀀스 ────
                     if is_path_blocked(front_points): # 추출해 둔 정면 180도 데이터를 넘겨 빠져나갈 폭이 있는지 확인합니다.
                         stuck_count += 1        # 막혔다는 판정이 나오면 누적 카운터를 1 올립니다.
-                        print(f"  [막힘감지] {stuck_count}/{STUCK_TRIGGER_COUNT}회")
+                        print(f"  [BlockDetect] {stuck_count}/{STUCK_TRIGGER_COUNT} times")
                         if stuck_count >= STUCK_TRIGGER_COUNT: # 3번(0.3초) 연속으로 '진짜 갇혔다'고 판정이 내려지면
                             execute_escape_rotation(arduino, lidar, all_scan_points) # 동적 후진 및 제자리 탈출 회전 함수를 실행시킵니다.
                             
@@ -763,7 +762,7 @@ def main():
                             continue            # 이번 제어 주기를 건너뛰고 다음 데이터를 새롭게 받으러 루프 처음으로 갑니다.
                     else:                       # 통과할 폭이 충분하다고 판정되었는데
                         if stuck_count > 0:     # 기존에 누적된 막힘 카운터가 남아있다면
-                            print(f"  [막힘해제] 카운터 리셋 ({stuck_count}회)")
+                            print(f"  [BlockCleared] Counter reset ({stuck_count} times)")
                         stuck_count = 0         # 막힘 판정이 취소된 것이므로 카운터를 0으로 깎아냅니다.
 
                     # ── ② 궤도 이탈 방지 (방향 보정) ──────────
@@ -789,11 +788,11 @@ def main():
                     w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
                     prev_w = w                  # 다음 루프 필터링을 위해 현재 적용된 w 값을 저장합니다.
 
-                    cmd = f"{v:.2f} {w:.2f}\n"  # 아두이노가 해석할 수 있도록 "v값 w값(엔터)" 형식의 텍스트 프로토콜로 문자열을 조립합니다.
+                    cmd = f"{v:.2f} {w:.2f}\n"  # 아두이노가 해석할 수 있도록 "v값 w값(엔터)" 형식의 텍스트 프로토콜로 문자열 조립합니다.
                     arduino.write(cmd.encode()) # 조립된 텍스트를 바이트 배열로 인코딩하여 아두이노 시리얼 포트로 전송합니다.
 
                     if cmd != last_cmd_str:     # 만약 직전(0.1초 전)에 보낸 명령과 소수점 둘째 자리까지의 값이 완전히 똑같지 않다면
-                        print(f"[전송] v={v:.2f}  w={w:.2f}  헤딩={arduino_heading_deg:.1f}°") # 갱신된 명령값과 로봇의 헤딩 상태를 터미널에 모니터링용으로 출력합니다.
+                        print(f"[Send] v={v:.2f}  w={w:.2f}  Heading={arduino_heading_deg:.1f}°") # 갱신된 명령값과 로봇의 헤딩 상태를 터미널에 모니터링용으로 출력합니다.
                         last_cmd_str = cmd      # 중복 출력을 막기 위해 이번에 보낸 문자열을 백업해둡니다.
 
                     last_send = now             # 명령 송신 타이머를 현재 시간으로 갱신하여 다음 0.1초를 기다리게 합니다.
@@ -805,16 +804,15 @@ def main():
                                 distance + LIDAR_OFFSET if distance > 0 else 0))
 
     except KeyboardInterrupt:                   # 터미널에서 사용자가 Ctrl+C를 눌러 강제 종료를 요청했다면
-        print("\n종료 중...")                   # 안전 종료 시퀀스로 넘어갑니다.
+        print("\nShutting down...")             # 안전 종료 시퀀스로 넘어갑니다.
     finally:                                    # 프로그램이 에러가 나서 튕기거나 정상 종료될 때 반드시 실행되는 마무리 블록입니다.
         lidar.write(bytes([0xA5, 0x25]))        # 라이다 모터에 회전 중지 바이너리 명령을 보내서 센서를 끕니다.
         time.sleep(0.1)                         # 명령이 먹힐 때까지 잠시 대기
         lidar.close()                           # 점유하고 있던 라이다 시리얼 통신 포트를 해제합니다.
         arduino.write(b"0.00 0.00\n")           # 로봇이 미쳐 날뛰지 않도록 모터에 v=0, w=0 정지 명령을 막타로 보냅니다.
         arduino.close()                         # 점유하고 있던 아두이노 시리얼 통신 포트도 해제합니다.
-        print("종료 완료.")                     # 완전히 프로그램이 내려갔음을 알립니다.
+        print("Shutdown complete.")             # 완전히 프로그램이 내려갔음을 알립니다.
 
 
-if __name__ == "__main__": 
-    sys.stdout.reconfigure(encoding='utf-8')    # 이 파이썬 파일이 모듈로 불려온 게 아니라 직접 실행(python main.py)되었을 때만
+if __name__ == "__main__":                      # 이 파이썬 파일이 모듈로 불려온 게 아니라 직접 실행(python main.py)되었을 때만
     main()                                      # 위에 짠 메인 루프 함수를 호출하여 프로그램을 시작하도록 하는 안전장치입니다.
