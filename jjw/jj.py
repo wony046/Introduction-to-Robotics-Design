@@ -69,6 +69,7 @@ STOP_HORIZ_RANGE = 110   # mm: v=0 구역 수평 폭
 STOP_BACKUP_TIME = 0.3   # sec: 위험구역 진입 시 후진 시간 (약 15mm)
 W_GAIN           = 1.2
 MAX_W            = 1.5
+W_MIN_DANGER     = 0.5   # rad/s: 위험구역 최소 회전 (horiz_error 작아도 충분히 회전)
 W_SMOOTH         = 0.6
 SIDE_ROTATE_SAFE = 150   # mm: 측면 장애물 수평거리가 이 미만이면 해당 방향 회전 금지
                           #     ROBOT_HALF_WIDTH(110mm) + 여유(40mm)
@@ -715,11 +716,9 @@ def find_vw_command(scan_points, heading_deg):
     """
     정면 스캔 + 헤딩 → (v m/s, w rad/s) 반환
 
-    [방향 고착 Sticky Direction — oscillation 방지]
-      장애물 없음 → avoidance_w_sign 리셋, 직진
-      방향 미결정 → 점수제로 결정 후 고착
-      방향 결정됨 → 현재 방향 유지
-        단, 현재 방향이 MIN_VIABLE_CLEAR 미만이면 전환 허용
+    [Stop zone] 장애물 각도로 방향 직접 결정 (hysteresis 무시, 충돌 후 오판 방지)
+    [Danger zone] 여유공간 점수제 + avoidance_w_sign hysteresis
+    [공통] 측면 안전 검사(수평거리) + W_MIN_DANGER 최소 회전 보장
     """
     global avoidance_w_sign, no_danger_count
     threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN
@@ -733,57 +732,58 @@ def find_vw_command(scan_points, heading_deg):
         if fwd > 0 and fwd <= FORWARD_RANGE and horiz < threshold:
             danger_points.append((angle_norm, dist, horiz, fwd))
 
-    NO_DANGER_RESET = 3   # N회 연속 장애물 없을 때만 방향 리셋
-
+    NO_DANGER_RESET = 3
     if not danger_points:
         no_danger_count += 1
         if no_danger_count >= NO_DANGER_RESET:
-            avoidance_w_sign = 0.0   # 진짜로 장애물 없어짐 → 방향 리셋
+            avoidance_w_sign = 0.0
         return FORWARD_SPEED, 0.0
-    else:
-        no_danger_count = 0
+    no_danger_count = 0
 
-    # ── v 기준: 정면 직사각형(STOP_FWD × STOP_HORIZ) 안의 장애물 ──────────────
-    # 구 긴급구역 범위 재활용 → 옆 벽은 제외하고 진짜 정면 장애물만 판별
-    stop_points = [
-        p for p in danger_points
-        if p[3] <= STOP_FWD_RANGE and p[2] <= STOP_HORIZ_RANGE
-    ]
-    # 감속 기준: 전체 danger_points 중 정면 방향(fwd >= horiz) 최소 n_fwd
-    frontal = [p for p in danger_points if p[3] >= p[2]]
-    if frontal:
-        n_fwd_ref = min(p[3] for p in frontal)
-    else:
-        n_fwd_ref = SLOW_START_DIST + 1   # 정면 장애물 없음 → 전속
-
-    # ── w 기준: n_horiz 최소 장애물 (경로에 가장 걸리는 것) ──────────────────
+    # 기준값 계산
+    stop_points = [p for p in danger_points
+                   if p[3] <= STOP_FWD_RANGE and p[2] <= STOP_HORIZ_RANGE]
+    frontal   = [p for p in danger_points if p[3] >= p[2]]
+    n_fwd_ref = min((p[3] for p in frontal), default=SLOW_START_DIST + 1)
     horiz_ref = min(danger_points, key=lambda p: p[2])
     nearest_angle, ref_dist, n_horiz, _ = horiz_ref
 
-    print(f"  [v기준] 전방:{n_fwd_ref:.0f}mm  정지구역내:{len(stop_points)}개  "
-          f"[w기준] 각도:{nearest_angle:.1f}°  수평:{n_horiz:.0f}mm")
+    print(f"  [기준] 전방:{n_fwd_ref:.0f}mm  정지:{len(stop_points)}개  "
+          f"각도:{nearest_angle:.1f}°  수평:{n_horiz:.0f}mm")
 
-    # ── 선속도 계산 ──────────────────────────────────────────────────────────
+    # 선속도
     if stop_points:
-        v = 0.0   # 위험구역 내 장애물 → v=0 제자리 회전 (충돌 방지)
+        v = 0.0
     elif n_fwd_ref >= SLOW_START_DIST:
         v = FORWARD_SPEED
     else:
         ratio = (n_fwd_ref - STOP_FWD_RANGE) / (SLOW_START_DIST - STOP_FWD_RANGE)
         v = max(FORWARD_SPEED * ratio, MIN_SPEED)
 
-    # ── 각속도 계산 (수평오차 P제어) ─────────────────────────────────────────
     horiz_error = threshold - n_horiz
-    if horiz_error > 0:
-        # 좌우 여유공간
-        scan_dict = {}
-        for angle_norm, dist in scan_points:
-            if dist <= 0:
-                continue
-            bucket = round(angle_norm / ANGLE_STEP) * ANGLE_STEP
-            if bucket not in scan_dict or dist < scan_dict[bucket]:
-                scan_dict[bucket] = dist
+    if horiz_error <= 0:
+        avoidance_w_sign = 0.0
+        return v, 0.0
 
+    # scan_dict 공통 계산
+    scan_dict = {}
+    for angle_norm, dist in scan_points:
+        if dist <= 0:
+            continue
+        bucket = round(angle_norm / ANGLE_STEP) * ANGLE_STEP
+        if bucket not in scan_dict or dist < scan_dict[bucket]:
+            scan_dict[bucket] = dist
+
+    # 방향 결정
+    if stop_points:
+        # Stop zone: 장애물 각도로 직접 결정 (충돌 후 오판 방지)
+        # 양수각(오른쪽 장애물) → 왼쪽(+1), 음수각(왼쪽 장애물) → 오른쪽(-1)
+        stop_angle = min(stop_points, key=lambda p: p[2])[0]
+        avoidance_w_sign = 1.0 if stop_angle >= 0 else -1.0
+        print(f"  [정지구역] 각도:{stop_angle:.1f}° → "
+              f"{'왼쪽' if avoidance_w_sign>0 else '오른쪽'} 직접 결정")
+    else:
+        # Danger zone: 여유공간 점수제 + hysteresis
         left_clear = right_clear = 0
         for a in range(-SCAN_HALF_ANGLE, 0, ANGLE_STEP):
             if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
@@ -792,7 +792,7 @@ def find_vw_command(scan_points, heading_deg):
             if scan_dict.get(a, DETECTION_RANGE + 1) >= ref_dist:
                 right_clear += ANGLE_STEP
 
-        print(f"  [여유공간] 왼쪽:{left_clear}°  오른쪽:{right_clear}°  헤딩:{heading_deg:.1f}°")
+        print(f"  [여유] 왼:{left_clear}°  오:{right_clear}°  헤딩:{heading_deg:.1f}°")
 
         if avoidance_w_sign == 0.0:
             avoidance_w_sign = select_direction(left_clear, right_clear, heading_deg)
@@ -803,48 +803,35 @@ def find_vw_command(scan_points, heading_deg):
                 old = avoidance_w_sign
                 avoidance_w_sign = select_direction(left_clear, right_clear, heading_deg)
                 if avoidance_w_sign != old:
-                    print(f"  [방향전환] 현재 방향 막힘({committed_clear}°) → "
+                    print(f"  [방향전환] 막힘({committed_clear}°) → "
                           f"{'왼쪽' if avoidance_w_sign>0 else '오른쪽'}")
 
-        # ── 측면 근접 장애물 최종 안전 검사 (수평거리 기준) ─────────────────
-        # 직선거리가 아닌 수평거리로 판단:
-        #   horiz = dist × |sin(angle)|
-        #   → 정면 가까운 장애물이 측면으로 오인되는 현상 방지
-        #   → SIDE_ROTATE_SAFE = ROBOT_HALF_WIDTH + 여유 = 110 + 40 = 150mm
-        def side_horiz_blocked(is_left):
-            angles = (range(-ANGLE_STEP, -(SIDE_CHECK_ANGLE + ANGLE_STEP), -ANGLE_STEP)
-                      if is_left else
-                      range(ANGLE_STEP, SIDE_CHECK_ANGLE + ANGLE_STEP, ANGLE_STEP))
-            for a in angles:
-                d = scan_dict.get(a, 0)
-                if d <= 0:
-                    continue
-                horiz = d * abs(math.sin(math.radians(a)))
-                if horiz < SIDE_ROTATE_SAFE:
-                    return True
-            return False
+    # 측면 안전 검사 (수평거리 기준)
+    def side_horiz_blocked(is_left):
+        angles = (range(-ANGLE_STEP, -(SIDE_CHECK_ANGLE+ANGLE_STEP), -ANGLE_STEP)
+                  if is_left else
+                  range(ANGLE_STEP, SIDE_CHECK_ANGLE+ANGLE_STEP, ANGLE_STEP))
+        for a in angles:
+            d = scan_dict.get(a, 0)
+            if d <= 0: continue
+            if d * abs(math.sin(math.radians(a))) < SIDE_ROTATE_SAFE:
+                return True
+        return False
 
-        left_close  = side_horiz_blocked(is_left=True)
-        right_close = side_horiz_blocked(is_left=False)
+    left_close  = side_horiz_blocked(is_left=True)
+    right_close = side_horiz_blocked(is_left=False)
+    if avoidance_w_sign > 0 and left_close and not right_close:
+        print("  [측면차단] 왼쪽 → 오른쪽 강제")
+        avoidance_w_sign = -1.0
+    elif avoidance_w_sign < 0 and right_close and not left_close:
+        print("  [측면차단] 오른쪽 → 왼쪽 강제")
+        avoidance_w_sign = 1.0
 
-        if avoidance_w_sign > 0 and left_close and not right_close:
-            print(f"  [측면차단] 왼쪽 수평 {SIDE_ROTATE_SAFE}mm 이내 → 오른쪽 강제")
-            avoidance_w_sign = -1.0
-        elif avoidance_w_sign < 0 and right_close and not left_close:
-            print(f"  [측면차단] 오른쪽 수평 {SIDE_ROTATE_SAFE}mm 이내 → 왼쪽 강제")
-            avoidance_w_sign = 1.0
-        elif left_close and right_close:
-            print(f"  [측면차단] 양쪽 근접 → 방향 유지 (탈출 알고리즘 대기)")
+    # 각속도: W_MIN_DANGER로 최소 회전 보장
+    w_mag = max(min(W_GAIN * horiz_error / threshold, MAX_W), W_MIN_DANGER)
+    w     = avoidance_w_sign * w_mag
 
-        w_sign = avoidance_w_sign
-        w      = w_sign * min(W_GAIN * horiz_error / threshold, MAX_W)
-    else:
-        avoidance_w_sign = 0.0   # 수평 여유 확보 → 방향 리셋
-        w = 0.0
-
-    print(f"  [속도명령] v:{v:.2f}m/s  w:{w:.2f}rad/s  "
-          f"(전방:{n_fwd_ref:.0f}mm  수평오차:{horiz_error:.0f}mm)")
-
+    print(f"  [명령] v:{v:.2f}  w:{w:.2f}  (수평오차:{horiz_error:.0f}mm)")
     return v, w
 
 
