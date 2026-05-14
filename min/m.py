@@ -1,254 +1,425 @@
 """
-lidar_drive_v3.py — 원본 코드 + 3가지 안정성 개선
-
-추가된 기능:
-  1. 라이다 노이즈 필터링 — bin당 최소 N개 점 누적되어야 신뢰
-  2. 시간 평활화 — 최근 3 스캔의 best_angle 평균 사용 (떨림 제거)
-  3. 비상 정지 타임아웃 — 2초 이상 갇히면 회피 방향 강제 반전
+dwa_drive.py (DWA + 맵 메모리 + RANSAC 벽 추종 + 틈새 인식 통합판)
+===================================================================
+[기능 요약]
+1. Map Memory: 이동량을 계산해 사각지대 장애물을 기억
+2. Inflation: 장애물 근접 시 안전거리 확보 (페널티)
+3. Gap Detection: 장애물 사이의 뚫린 공간 탐색
+4. RANSAC Wall-Follow: 노이즈를 무시하고 뚜렷한 선(벽)을 찾아 평행 주행
 """
 
 import serial
 import time
 import math
 from collections import deque
+import numpy as np
+from sklearn import linear_model
 
-# ==========================================
-# 1. 통신 포트 설정
-# ==========================================
-ARDUINO_PORT = '/dev/ttyS0'
-LIDAR_PORT   = '/dev/ttyUSB0'
-
+# ============================================================
+# 1. 통신 포트
+# ============================================================
+LIDAR_PORT   = "/dev/ttyUSB0"
+ARDUINO_PORT = "/dev/ttyAMA3"
 arduino   = serial.Serial(ARDUINO_PORT, 115200, timeout=0.1)
 lidar_ser = serial.Serial(LIDAR_PORT,  460800, timeout=1)
 
-# ==========================================
-# 2. 자율 주행 파라미터
-# ==========================================
-SAFE_DISTANCE    = 600
-MAX_SPEED        = 250
-AVOID_SPEED      = 120
-ESCAPE_SPEED     = 90
-STEER_GAIN       = 1.5
-ROBOT_HALF_WIDTH = 115
+# ============================================================
+# 2. 로봇 기구 / 센서 사양
+# ============================================================
+LIDAR_TO_EDGE    = 110    # mm 
+ROBOT_HALF_WIDTH = 110    # mm 
+COLLISION_MARGIN = 40     # mm (안전성 강화를 위해 40mm로 상향)
+COLLISION_RADIUS = ROBOT_HALF_WIDTH + COLLISION_MARGIN  # 150mm
 
-# ★ 신규 안정성 파라미터
-MIN_POINTS_PER_BIN   = 2     # bin 신뢰성 — 점이 이 미만이면 무시 (노이즈 필터)
-MIN_POINTS_EMERGENCY = 2     # 비상 정지 트리거 — 단일 튀는 점으로는 안 멈춤
-SMOOTHING_WINDOW     = 3     # 최근 N개 best_angle 평균 (조향 떨림 억제)
-EMERGENCY_TIMEOUT    = 2.0   # 초 — 이 시간 이상 비상 모드면 회피 방향 반전
+# ============================================================
+# 3. DWA & 자율주행 파라미터
+# ============================================================
+V_MAX        = 25.0       # cm/s
+V_REVERSE    = -4.8       # cm/s
+V_SAMPLES    = 7
+W_MAX_DPS    = 90.0       # deg/s
+W_SAMPLES    = 15
+DT_PREDICT   = 0.6
+DT_STEP      = 0.1
 
-# ==========================================
-# 3. 전역 상태 변수
-# ==========================================
-last_avoid_dir       = 0
-recent_angles        = deque(maxlen=SMOOTHING_WINDOW)
-emergency_start_time = None  # 비상 모드 진입 시각 (None = 비상 아님)
+EMERGENCY_DIST   = 120    # mm
+SAFE_DIST        = 250    # mm
+EVAL_FORWARD     = 350    # mm
 
+# DWA 가중치
+WG_HEADING   = 1.5       # 목표 방향(Gap) 정렬 가중치
+WG_CLEARANCE = 2.0       # 충돌 회피
+WG_VELOCITY  = 1.0       # 속도 유지
+WG_BIAS      = 1.2       # 회피 부호 유지
+WG_INFLATION = 1.8       # 장애물 근접 회피 (팽창 페널티)
 
-# ==========================================
-# 4. 헬퍼: k-번째 최솟값 (노이즈 필터링 핵심)
-# ==========================================
-def kth_smallest(values, k, default=9999):
-    """
-    리스트에서 k번째로 작은 값을 반환.
-    - 점이 k개 미만이면 default(=무한대 취급) 반환 → 노이즈 자동 제거
-    - 단일 튀는 점은 1번째이지만 2번째 점이 없으면 default → 무시됨
-    - 진짜 장애물은 보통 점이 여러 개 잡히므로 2번째 점도 가까움 → 검출됨
-    """
-    if len(values) < k:
-        return default
-    return sorted(values)[k - 1]
+# ============================================================
+# 4. 고급 주행 (Inflation / Gap / RANSAC) 파라미터
+# ============================================================
+INFLATION_RADIUS = 300   # mm (이 거리 이내는 inflation 페널티)
+GAP_MIN_WIDTH    = 300   # mm (최소 통과 가능 틈새 폭)
 
+WALL_TARGET_DIST = 200   # mm (벽과의 목표 거리)
+WALL_GAIN        = 0.08  # 벽 오차 → 조향 보정 게인
+RANSAC_MAX_TRIALS = 15   # RANSAC 연산량 제한 (지연 방지용)
 
-# ==========================================
-# 5. 핵심 회피 알고리즘
-# ==========================================
-def calculate_steering(scan_data):
-    global last_avoid_dir, emergency_start_time
+# ============================================================
+# 5. 상태 머신 및 메모리 파라미터
+# ============================================================
+STUCK_WINDOW     = 25
+STUCK_THRESHOLD  = 18
+REVERSE_DURATION = 1.5
 
-    # bin별 거리 리스트 (단일 최솟값 → 다중 점 누적으로 변경)
-    bin_dists = {angle: [] for angle in range(-90, 91, 10)}
+SIGN_UPDATE_W_MIN   = 20.0
+SIGN_UPDATE_CONFIRM = 2     
 
-    # 영역별 측정값 리스트
-    front_emergency_dists = []
-    front_clear_xs        = []
-    left_wall_ys          = []
-    right_wall_ys         = []
+MEMORY_DURATION    = 1.5    # s
+MEMORY_DEDUP_DIST  = 40     # mm
+MEMORY_X_MIN       = -200   # mm
+MEMORY_X_MAX       = EVAL_FORWARD + 200
+MEMORY_Y_MAX       = ROBOT_HALF_WIDTH * 5
 
-    for angle, distance in scan_data:
-        if angle > 180:
-            angle -= 360
-        if not (-90 <= angle <= 90 and distance > 0):
-            continue
+# 전역 상태 변수
+last_avoid_sign   = 0
+mode_history      = deque(maxlen=STUCK_WINDOW)
+reverse_until     = 0.0
+post_reverse_sign = 0
+_sign_buf         = deque(maxlen=SIGN_UPDATE_CONFIRM)
 
-        bin_angle = round(angle / 10) * 10
-        if bin_angle in bin_dists:
-            bin_dists[bin_angle].append(distance)
+memory_obstacles = []    
+last_cmd_v       = 0.0   
+last_cmd_w       = 0.0   
+last_scan_time   = None  
 
-        x_pos = distance * math.cos(math.radians(angle))
-        y_pos = distance * math.sin(math.radians(angle))
+# ============================================================
+# 6. LiDAR & 맵 메모리 유틸
+# ============================================================
+def scan_to_obstacles(scan_data):
+    bin_pts = {}
+    for raw_angle, distance in scan_data:
+        if distance <= 0: continue
+        angle = raw_angle if raw_angle <= 180 else raw_angle - 360
+        rad = math.radians(angle)
+        x = distance * math.cos(rad)
+        y = distance * math.sin(rad)
+        if -50 < x <= EVAL_FORWARD and abs(y) <= ROBOT_HALF_WIDTH * 4:
+            ba = round(angle / 10) * 10
+            bin_pts.setdefault(ba, []).append((x, y, distance))
+    obstacles = []
+    for pts in bin_pts.values():
+        if len(pts) >= 2:
+            pts.sort(key=lambda p: p[2])
+            obstacles.append(pts[0])
+    return obstacles
 
-        if -20 <= angle <= 20:
-            front_emergency_dists.append(distance)
+def front_emergency_dist(scan_data):
+    pts = [d for a, d in scan_data if d > 0 and (a <= 15 or a >= 345)]
+    pts.sort()
+    return pts[1] if len(pts) >= 2 else 9999
 
-        if x_pos > 50 and abs(y_pos) <= ROBOT_HALF_WIDTH:
-            front_clear_xs.append(x_pos)
+def rear_emergency_dist(scan_data):
+    pts = [d for a, d in scan_data if d > 0 and 165 <= a <= 195]
+    pts.sort()
+    return pts[1] if len(pts) >= 2 else 9999
 
-        if -100 < x_pos < 400:
-            if angle >= 30:
-                left_wall_ys.append(y_pos)
-            elif angle <= -30:
-                right_wall_ys.append(abs(y_pos))
+def transform_memory(dt):
+    global memory_obstacles
+    if dt <= 0 or not memory_obstacles: return
+    v_mm  = last_cmd_v * 10.0
+    w_rad = math.radians(last_cmd_w)
+    dtheta = w_rad * dt
 
-    # ★ [개선 1] 노이즈 필터링 — k-번째 최솟값 적용
-    bins = {a: kth_smallest(bin_dists[a], MIN_POINTS_PER_BIN) for a in bin_dists}
-    front_emergency_dist = kth_smallest(front_emergency_dists, MIN_POINTS_EMERGENCY)
-    front_clear_x        = kth_smallest(front_clear_xs,        MIN_POINTS_PER_BIN)
-    left_wall_min        = kth_smallest(left_wall_ys,          MIN_POINTS_PER_BIN)
-    right_wall_min       = kth_smallest(right_wall_ys,         MIN_POINTS_PER_BIN)
-
-    # ========================================================
-    # [1] 비상 회피 모드 + 타임아웃
-    # ========================================================
-    if front_emergency_dist < 200:
-        now = time.time()
-
-        # ★ [개선 3] 비상 진입 시점 기록 (최초 1회만)
-        if emergency_start_time is None:
-            emergency_start_time = now
-            recent_angles.clear()   # 평활화 버퍼도 초기화
-
-        # ★ 타임아웃: 너무 오래 못 빠져나오면 회피 방향 반전
-        elif now - emergency_start_time > EMERGENCY_TIMEOUT:
-            if last_avoid_dir != 0:
-                last_avoid_dir = -last_avoid_dir
-            emergency_start_time = now  # 타이머 재시작
-            print(f"[WARN] 비상 타임아웃 — 회피 방향 반전 ({last_avoid_dir})")
-
-        if last_avoid_dir == -1:
-            emergency_steer = 75
-        elif last_avoid_dir == 1:
-            emergency_steer = -75
-        else:
-            if left_wall_min > right_wall_min:
-                emergency_steer = 75
-                last_avoid_dir = -1
-            else:
-                emergency_steer = -75
-                last_avoid_dir = 1
-
-        return 0, emergency_steer
-
-    # 비상 모드 종료 시 타이머 리셋
-    emergency_start_time = None
-
-    # ========================================================
-    # [2] 스코어링 모드
-    # ========================================================
-    best_angle = 0
-    best_score = -99999
-
-    for angle in range(-90, 91, 10):
-        dist = bins[angle]
-        dist_score     = min(dist, 400) * 1.0
-        center_penalty = abs(angle) * 3.5
-
-        hysteresis_bonus = 0
-        if front_clear_x > 300:
-            if last_avoid_dir == 1 and angle > 10:
-                hysteresis_bonus = 150
-            elif last_avoid_dir == -1 and angle < -10:
-                hysteresis_bonus = 150
-
-        wall_repulsion_bonus = 0
-        if right_wall_min < 200 and left_wall_min > right_wall_min + 40:
-            if angle > 10: wall_repulsion_bonus = 150
-        elif left_wall_min < 200 and right_wall_min > left_wall_min + 40:
-            if angle < -10: wall_repulsion_bonus = 150
-
-        score = dist_score - center_penalty + hysteresis_bonus + wall_repulsion_bonus
-        if score > best_score:
-            best_score = score
-            best_angle = angle
-
-    # ★ [개선 2] 시간 평활화 — 최근 N개 평균 사용
-    recent_angles.append(best_angle)
-    smoothed_angle = sum(recent_angles) / len(recent_angles)
-
-    # 상태 업데이트 (평활화된 각도 기준)
-    if smoothed_angle < -15:
-        last_avoid_dir = 1
-    elif smoothed_angle > 15:
-        last_avoid_dir = -1
+    if abs(w_rad) < 1e-6:
+        dx, dy = v_mm * dt, 0.0
     else:
-        last_avoid_dir = 0
+        R = v_mm / w_rad
+        dx = R * math.sin(dtheta)
+        dy = R * (1.0 - math.cos(dtheta))
 
-    steer_pwm = int(smoothed_angle * STEER_GAIN)
+    c, s = math.cos(dtheta), math.sin(dtheta)
+    new_mem = []
+    for ox, oy, _od, ts in memory_obstacles:
+        tx, ty = ox - dx, oy - dy
+        nx, ny = c * tx + s * ty, -s * tx + c * ty
+        new_mem.append((nx, ny, math.hypot(nx, ny), ts))
+    memory_obstacles = new_mem
 
-    # ========================================================
-    # [3] 속도 결정 (평활화된 각도 기준)
-    # ========================================================
-    if front_clear_x <= 400:
-        current_speed = ESCAPE_SPEED
-    elif abs(smoothed_angle) <= 15 and front_clear_x > SAFE_DISTANCE:
-        current_speed = MAX_SPEED
+def update_memory(current_obstacles, now):
+    global memory_obstacles
+    for ox, oy, od in current_obstacles:
+        memory_obstacles.append((ox, oy, od, now))
+    
+    memory_obstacles.sort(key=lambda o: -o[3])
+    deduped = []
+    for obs in memory_obstacles:
+        if not any(math.hypot(obs[0]-k[0], obs[1]-k[1]) < MEMORY_DEDUP_DIST for k in deduped):
+            deduped.append(obs)
+            
+    memory_obstacles = [o for o in deduped if (now - o[3] <= MEMORY_DURATION 
+                        and MEMORY_X_MIN <= o[0] <= MEMORY_X_MAX 
+                        and abs(o[1]) <= MEMORY_Y_MAX)]
+
+def memory_for_dwa():
+    return [(o[0], o[1], o[2]) for o in memory_obstacles]
+
+# ============================================================
+# 7. 공간 분석 (Gap & RANSAC)
+# ============================================================
+def find_best_gap(obstacles):
+    if not obstacles: return 0.0
+    polar_obs = sorted([(math.degrees(math.atan2(oy, ox)), od) for ox, oy, od in obstacles])
+    
+    max_gap_width, best_gap_angle = 0, 0.0
+    for i in range(len(polar_obs) - 1):
+        a1, d1 = polar_obs[i]
+        a2, d2 = polar_obs[i+1]
+        gap_dist = math.sqrt(d1**2 + d2**2 - 2*d1*d2*math.cos(math.radians(a2-a1)))
+        
+        if gap_dist > GAP_MIN_WIDTH and gap_dist > max_gap_width:
+            max_gap_width = gap_dist
+            best_gap_angle = (a1 + a2) / 2.0
+            
+    return best_gap_angle if max_gap_width > 0 else 0.0
+
+def extract_line_ransac(points):
+    if len(points) < 10: return None, None
+    X = np.array([p[0] for p in points]).reshape(-1, 1)
+    y = np.array([p[1] for p in points])
+
+    ransac = linear_model.RANSACRegressor(
+        min_samples=max(3, int(len(points)*0.2)),
+        residual_threshold=30.0, 
+        max_trials=RANSAC_MAX_TRIALS # 연산 속도 보호
+    )
+    try:
+        ransac.fit(X, y)
+        return ransac.estimator_.coef_[0], ransac.estimator_.intercept_
+    except ValueError:
+        return None, None
+
+def get_wall_correction(obstacles):
+    left_pts, right_pts = [], []
+    for ox, oy, _ in obstacles:
+        if 0 < ox < 600:
+            if 50 < oy < 600: left_pts.append((ox, oy))
+            elif -600 < oy < -50: right_pts.append((ox, oy))
+
+    correction_w = 0.0
+    slope, intercept = extract_line_ransac(left_pts)
+    is_left = True
+    
+    if slope is None:
+        slope, intercept = extract_line_ransac(right_pts)
+        is_left = False
+
+    if slope is not None:
+        dist_to_wall = abs(intercept) / math.sqrt(slope**2 + 1)
+        wall_angle = math.degrees(math.atan(slope))
+        dist_err = dist_to_wall - WALL_TARGET_DIST
+
+        if is_left: correction_w = (dist_err * WALL_GAIN) + (wall_angle * 0.6)
+        else:       correction_w = -(dist_err * WALL_GAIN) + (wall_angle * 0.6)
+
+    return max(min(correction_w, 20.0), -20.0)
+
+# ============================================================
+# 8. 궤적 예측 및 평가
+# ============================================================
+def predict_trajectory(v_cms, w_dps):
+    pts = []
+    v_mm, w_rad = v_cms * 10.0, math.radians(w_dps)
+    t = DT_STEP
+    if abs(w_rad) < 1e-6:
+        while t <= DT_PREDICT + 1e-9:
+            pts.append((v_mm * t, 0.0))
+            t += DT_STEP
     else:
-        current_speed = AVOID_SPEED
+        R = v_mm / w_rad
+        while t <= DT_PREDICT + 1e-9:
+            th = w_rad * t
+            pts.append((R * math.sin(th), R * (1.0 - math.cos(th))))
+            t += DT_STEP
+    return pts
 
-    return current_speed, steer_pwm
+def evaluate(v, w, obstacles, bias_sign, target_gap_angle):
+    traj = predict_trajectory(v, w)
+    min_dist_to_obs = 9999.0
+    inflation_penalty = 0.0
+    
+    for (px, py) in traj:
+        for (ox, oy, _) in obstacles:
+            d = math.hypot(px - ox, py - oy)
+            if d < COLLISION_RADIUS:
+                return None 
+            
+            if d < INFLATION_RADIUS:
+                inf_val = (INFLATION_RADIUS - d) / (INFLATION_RADIUS - COLLISION_RADIUS)
+                inflation_penalty = max(inflation_penalty, inf_val)
+                
+            if d < min_dist_to_obs:
+                min_dist_to_obs = d
 
+    # ==========================================================
+    # ★ [버그 수정됨] 제자리 회전(v=0) 시 각도 계산 오류 방지
+    # ==========================================================
+    last_x, last_y = traj[-1]
+    
+    if abs(last_x) < 1e-3 and abs(last_y) < 1e-3:
+        # v=0 이라서 (0,0)에 머무는 경우: 로봇이 회전한 각도를 그대로 사용
+        traj_angle = w * DT_PREDICT
+    else:
+        # 이동하는 경우: 도착한 위치의 기하학적 각도를 사용
+        traj_angle = math.degrees(math.atan2(last_y, last_x))
+    # ==========================================================
 
-# ==========================================
-# 6. 메인 루프
-# ==========================================
+    angle_diff = abs(traj_angle - target_gap_angle)
+    if angle_diff > 180.0:
+        angle_diff = 360.0 - angle_diff
+    heading_score = 1.0 - (min(angle_diff, 90.0) / 90.0)
+
+    clearance_score = min(min_dist_to_obs, EVAL_FORWARD) / EVAL_FORWARD
+    velocity_score  = v / V_MAX
+    inflation_score = 1.0 - inflation_penalty
+    bias = (abs(w) / W_MAX_DPS) if (bias_sign != 0 and w * bias_sign > 0) else 0.0
+
+    return (WG_HEADING   * heading_score +
+            WG_CLEARANCE * clearance_score +
+            WG_VELOCITY  * velocity_score +
+            WG_BIAS      * bias +
+            WG_INFLATION * inflation_score)
+
+def try_update_sign(best_w):
+    global last_avoid_sign, _sign_buf
+    if abs(best_w) < SIGN_UPDATE_W_MIN:
+        _sign_buf.clear()
+        return
+    candidate = 1 if best_w > 0 else -1
+    _sign_buf.append(candidate)
+    if len(_sign_buf) == SIGN_UPDATE_CONFIRM and all(s == candidate for s in _sign_buf):
+        last_avoid_sign = candidate
+
+# ============================================================
+# 9. 의사 결정
+# ============================================================
+def decide(scan_data, obstacles):
+    global reverse_until, post_reverse_sign, mode_history
+    now = time.time()
+
+    if front_emergency_dist(scan_data) < EMERGENCY_DIST:
+        return 0.0, 0.0, 'EMERGENCY'
+    if now < reverse_until:
+        if rear_emergency_dist(scan_data) < EMERGENCY_DIST:
+            reverse_until = 0.0
+            return 0.0, 0.0, 'EMERGENCY'
+        return V_REVERSE, 0.0, 'REVERSE'
+
+    if mode_history.count('AVOID') >= STUCK_THRESHOLD:
+        reverse_until     = now + REVERSE_DURATION
+        post_reverse_sign = -last_avoid_sign if last_avoid_sign != 0 else 1
+        mode_history.clear()
+        _sign_buf.clear()
+        return V_REVERSE, 0.0, 'REVERSE'
+
+    # 공간 분석 정보
+    target_gap = find_best_gap(obstacles)
+    wall_corr  = get_wall_correction(obstacles)
+
+    best_v, best_w, best_score = 0.0, 0.0, -1e9
+    bias_sign = post_reverse_sign if post_reverse_sign != 0 else -last_avoid_sign
+    w_step = (2.0 * W_MAX_DPS) / (W_SAMPLES - 1)
+    
+    for i in range(V_SAMPLES):
+        v = V_MAX * i / (V_SAMPLES - 1)
+        if 0 < v < 2.0: continue # 미세 전진 방지
+        
+        for j in range(W_SAMPLES):
+            w_sample = -W_MAX_DPS + j * w_step
+            # 물리적 조향 한계 초과 방지(Clamp)
+            w = max(-W_MAX_DPS, min(W_MAX_DPS, w_sample + (wall_corr * (v / V_MAX))))
+            
+            s = evaluate(v, w, obstacles, bias_sign, target_gap)
+            if s is not None and s > best_score:
+                best_score, best_v, best_w = s, v, w
+
+    if best_score < -1e8:
+        return 0.0, float(bias_sign or 1) * 60.0, 'SPIN'
+
+    nearest = min((o[2] for o in obstacles), default=9999)
+    mode = 'MAX' if nearest > SAFE_DIST and abs(best_w) < 15.0 else 'AVOID'
+
+    if mode == 'AVOID':
+        try_update_sign(best_w)
+        if post_reverse_sign != 0 and abs(best_w) > SIGN_UPDATE_W_MIN:
+            post_reverse_sign = 0
+
+    mode_history.append(mode)
+    return best_v, best_w, mode
+
+# ============================================================
+# 10. 메인 루프
+# ============================================================
 def main():
-    print("[INFO] 라이다 초기화 중...")
+    global last_cmd_v, last_cmd_w, last_scan_time
+    print("[INFO] LiDAR 초기화 중...")
     lidar_ser.write(bytes([0xA5, 0x40]))
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20]))
     time.sleep(0.5)
-    print("[INFO] 자율 주행 시작! (정지: Ctrl+C)")
-    print(f"[INFO] 노이즈 필터링: bin당 최소 {MIN_POINTS_PER_BIN}점, 비상 {MIN_POINTS_EMERGENCY}점")
-    print(f"[INFO] 평활화: 최근 {SMOOTHING_WINDOW}회 평균")
-    print(f"[INFO] 비상 타임아웃: {EMERGENCY_TIMEOUT}s")
+    print("[INFO] 주행 시작 (정지: Ctrl+C)")
 
     scan_data = []
+    last_log_time = time.time()
 
     try:
         while True:
-            data = lidar_ser.read(5)
-            if len(data) != 5:
-                continue
+            raw = lidar_ser.read(5)
+            if len(raw) != 5: continue
 
-            s_flag     = data[0] & 0x01
-            s_inv_flag = (data[0] & 0x02) >> 1
-            if s_inv_flag != (1 - s_flag):
-                continue
-            if (data[1] & 0x01) != 1:
-                continue
+            s_flag     = raw[0] & 0x01
+            s_inv_flag = (raw[0] & 0x02) >> 1
+            if s_inv_flag != (1 - s_flag) or (raw[1] & 0x01) != 1: continue
 
-            angle_q6    = ((data[1] >> 1) | (data[2] << 7))
-            angle       = angle_q6 / 64.0
-            distance_q2 = (data[3] | (data[4] << 8))
-            distance    = distance_q2 / 4.0
+            angle    = ((raw[1] >> 1) | (raw[2] << 7)) / 64.0
+            distance = (raw[3] | (raw[4] << 8)) / 4.0
 
             if s_flag == 1:
                 if len(scan_data) > 50:
-                    speed, steer = calculate_steering(scan_data)
-                    command = f"{speed},{steer}\n"
-                    arduino.write(command.encode('utf-8'))
+                    now = time.time()
+                    if last_scan_time is not None:
+                        transform_memory(now - last_scan_time)
+                    last_scan_time = now
+
+                    current_obs = scan_to_obstacles(scan_data)
+                    update_memory(current_obs, now)
+                    merged_obs = memory_for_dwa()
+
+                    v, w, mode = decide(scan_data, merged_obs)
+
+                    try:
+                        arduino.write(f"{v:.1f},{w:.1f}\n".encode('utf-8'))
+                    except Exception as e:
+                        print(f"[WARN] Arduino 통신 오류: {e}")
+
+                    last_cmd_v, last_cmd_w = v, w
+
+                    if now - last_log_time > 1.0:
+                        last_log_time = now
+                        fed = front_emergency_dist(scan_data)
+                        print(f"[{mode:9s}] v={v:+6.1f} w={w:+6.1f} | mem={len(merged_obs):2d} front={fed:5.0f}mm")
                 scan_data = []
 
             if distance > 0:
                 scan_data.append((angle, distance))
 
     except KeyboardInterrupt:
-        print("\n[INFO] 정지 명령 수신. 모터를 끕니다.")
-        arduino.write("0,0\n".encode('utf-8'))
-        lidar_ser.write(bytes([0xA5, 0x25]))
+        print("\n[INFO] 정지 명령 수신.")
+        try: arduino.write("STOP\n".encode('utf-8'))
+        except: pass
+        try: lidar_ser.write(bytes([0xA5, 0x25]))
+        except: pass
+        time.sleep(0.1)
         arduino.close()
         lidar_ser.close()
-
 
 if __name__ == '__main__':
     main()
