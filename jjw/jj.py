@@ -239,7 +239,7 @@ def find_vw_command(scan_points, heading_deg):
     no_danger_count = 0
 
     # ── 2. 선속도 결정 ────────────────────────────────────────────────────────
-    stop_points = [p for p in danger_points if p[3] <= STOP_FWD_RANGE]
+    stop_points = [p for p in danger_points if p[3] <= STOP_FWD_RANGE and p[2] < ROBOT_HALF_WIDTH + SAFETY_MARGIN]
     frontal     = [p for p in danger_points if p[3] >= p[2]]
     n_fwd_ref   = min((p[3] for p in frontal), default=SLOW_START_DIST + 1)
     horiz_ref   = min(danger_points, key=lambda p: p[2])
