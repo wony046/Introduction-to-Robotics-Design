@@ -121,7 +121,7 @@ def run_dwa(scan_points, curr_heading, current_v, current_w):
             
             # ★ 버그 수정: 현재 각도에 예측 회전량을 '더해야' 미래 각도가 됨
             pred_turn = math.degrees(w * 1.0)
-            fut_heading = normalize_angle(curr_heading + pred_turn) 
+            fut_heading = normalize_angle(curr_heading - pred_turn) 
             
             # 0도(정면)에 가까울수록 높은 점수
             score_heading = max(0.0, 1.0 - (abs(fut_heading) / 180.0))
