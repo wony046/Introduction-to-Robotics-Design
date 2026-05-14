@@ -3,7 +3,7 @@ import time
 import math
 
 # ==========================================
-# 1. 자율 주행 상수 설정 (쉽게 변경 가능)
+# 1. 자율 주행 상수 설정 
 # ==========================================
 # [속도 설정 (내부 연산용 0~250 스케일)]
 SPEED_MAX = 250        # 전속력 모드
@@ -33,48 +33,35 @@ arduino = serial.Serial(ARDUINO_PORT, 115200, timeout=0.1)
 lidar_ser = serial.Serial(LIDAR_PORT, 460800, timeout=1)
 
 last_chosen_angle = 0
-is_currently_escaping = False  # ESC 모드 상태 추적
 
 # ==========================================
-# 3. 데이터 변환기 (Python -> Arduino v5)
+# 3. 아두이노 절대 통제 전송 함수
 # ==========================================
-def send_to_arduino(speed, steer, trigger_esc):
-    global is_currently_escaping
+def send_to_arduino(speed, steer):
+    # 1. 아두이노 헤딩 가드 무력화 (항상 0도로 초기화시킴)
+    # 이 한 줄 덕분에 아두이노는 파이썬의 회전 명령을 절대 거부하지 못합니다.
+    arduino.write("R\n".encode('utf-8'))
     
-    # 1. ESC 모드 진입 감지 및 명령 전송
-    if trigger_esc and not is_currently_escaping:
-        arduino.write("ESC\n".encode('utf-8'))
-        print("[System] 탈출 모드(ESC) 발동! 헤딩가드 해제")
-        time.sleep(0.05) # 아두이노 처리 시간 대기
-        is_currently_escaping = True
-    elif not trigger_esc and is_currently_escaping:
-        is_currently_escaping = False # 안전 구역으로 나오면 상태 초기화
-
-    # 2. 스케일 변환 (내부 수치 -> 물리 단위 m/s, rad/s)
-    # 속도(v): 250일 때 약 0.35 m/s 로 매핑
-    v_mps = (speed / 250.0) * 0.35 
+    # 2. 스케일 변환 (내부 수치 0~250 -> 아두이노 물리 단위 m/s, rad/s)
+    v_mps = (speed / 250.0) * 0.35   # 최고 속도 약 0.35 m/s
+    w_radps = (steer / 100.0) * 1.5  # 최고 각속도 약 1.5 rad/s
     
-    # 각속도(w): steer(조향값)를 rad/s로 변환. (양수=좌회전, 음수=우회전)
-    # steer 100일 때 약 1.5 rad/s 로 매핑
-    w_radps = (steer / 100.0) * 1.5 
-    
-    # 3. 아두이노 v5 포맷 전송 ("v w\n")
+    # 3. 아두이노 포맷 전송 ("v w\n")
     command = f"{v_mps:.3f} {w_radps:.3f}\n"
     arduino.write(command.encode('utf-8'))
     
-    # 아두이노가 보내는 "H:XX.X\n" 버퍼 비우기 (메모리 오버플로우 방지)
+    # 시리얼 버퍼에 쌓이는 아두이노 응답 메시지 비우기 (지연 방지)
     while arduino.in_waiting > 0:
         arduino.readline()
 
 # ==========================================
-# 4. 핵심 회피 알고리즘
+# 4. 순수 핵심 회피 알고리즘 (두뇌)
 # ==========================================
 def calculate_steering(scan_data):
     global last_chosen_angle
     
     bins = {angle: 9999 for angle in range(-135, 136, 5)}
     closest_obj_dist = 9999
-    trigger_esc = False  # 아두이노 ESC 발동 플래그
     
     for angle, distance in scan_data:
         if angle > 180: angle -= 360
@@ -85,7 +72,7 @@ def calculate_steering(scan_data):
             if distance < closest_obj_dist:
                 closest_obj_dist = distance
 
-    # [단계 1] 틈새(Gap) 리스트 추출
+    # [단계 1] 틈새(Gap) 탐색
     gaps = []
     angles = sorted(bins.keys())
     for i in range(1, len(angles)):
@@ -129,19 +116,17 @@ def calculate_steering(scan_data):
             min_score = score
             best_angle = angle
 
-    # [단계 3] 위기 탈출 및 속도 제어
-    # 길이 완전히 막힘 -> 후진 턴 발동 및 ESC 트리거
+    # [단계 3] 주행 판단
+    # 모든 길이 막힘 -> 후진
     if min_score > 4000: 
-        trigger_esc = True
-        return SPEED_REVERSE, (80 if last_chosen_angle < 0 else -80), trigger_esc
+        return SPEED_REVERSE, (80 if last_chosen_angle < 0 else -80)
     
-    # 초근접 위험 -> 제자리 회전(피벗) 턴 발동 및 ESC 트리거
+    # 초근접 위험 -> 제자리 팽이 회전
     if closest_obj_dist <= 180:
-        trigger_esc = True
         steer_val = 90 if best_angle > 0 else -90
-        return ESCAPE_SPEED, steer_val, trigger_esc
+        return ESCAPE_SPEED, steer_val
 
-    # 일반 주행 모드
+    # 일반 주행 속도 제어
     if closest_obj_dist < DANGER_RADIUS + ROBOT_SIDE: 
         speed = SPEED_SAFETY
     elif closest_obj_dist < SAFE_RADIUS: 
@@ -152,17 +137,18 @@ def calculate_steering(scan_data):
     last_chosen_angle = best_angle
     steer = int(best_angle * 1.5) 
     
-    return speed, steer, trigger_esc
+    return speed, steer
 
 # ==========================================
 # 5. 메인 루프
 # ==========================================
 def main():
-    print("[INFO] 라이다 초기화 및 아두이노 동기화 중...")
+    print("[INFO] 라이다 초기화 중...")
     lidar_ser.write(bytes([0xA5, 0x40])) 
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
+    print("[INFO] 순수 라즈베리파이 완전 통제 모드 시작!")
 
     scan_data = []
 
@@ -181,10 +167,10 @@ def main():
 
             if s_flag == 1:
                 if len(scan_data) > 30: 
-                    # speed, steer, esc 발동 여부 3가지를 리턴받음
-                    speed, steer, trigger_esc = calculate_steering(scan_data)
-                    # 아두이노 v5 포맷에 맞춰 변환 후 전송
-                    send_to_arduino(speed, steer, trigger_esc)
+                    # 순수 알고리즘으로 속도, 조향값만 산출
+                    speed, steer = calculate_steering(scan_data)
+                    # 아두이노를 무력화시키며 명령 전송
+                    send_to_arduino(speed, steer)
                 scan_data = []
 
             if distance > 0:
