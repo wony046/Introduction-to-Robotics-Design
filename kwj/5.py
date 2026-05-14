@@ -31,12 +31,13 @@ lidar_ser = serial.Serial(LIDAR_PORT, 460800, timeout=1)
 
 last_chosen_angle = 0
 last_steer_pwm = 0
+last_ideal_angle = 0  # ★ 추가: 목표 각도의 관성을 위한 변수
 
 # ==========================================
 # 2. 핵심 회피 알고리즘 (두뇌)
 # ==========================================
 def calculate_steering(scan_data):
-    global last_chosen_angle, last_steer_pwm
+    global last_chosen_angle, last_steer_pwm, last_ideal_angle
     
     bins = {angle: 9999 for angle in range(-135, 136, 5)}
     closest_obj_dist = 9999
@@ -60,16 +61,15 @@ def calculate_steering(scan_data):
             x = distance * math.cos(rad)
             y = distance * math.sin(rad)
             
-            # 전방 궤적 (내 차폭 안의 장애물)
             if x > 0 and abs(y) <= ROBOT_SIDE:
                 if x < front_clear_dist:
                     front_clear_dist = x
                     
-            # 측면 벽 (전방 40cm, 후방 10cm 이내의 양옆 장애물)
+            # ★ 처방 1: 측면 시야를 90도 -> 130도로 대폭 확대 (뒤통수까지 감시)
             if -100 < x < 400:
-                if 10 <= angle <= 90:     
+                if 10 <= angle <= 130:     
                     if y < left_wall_min: left_wall_min = y
-                elif -90 <= angle <= -10: 
+                elif -130 <= angle <= -10: 
                     if abs(y) < right_wall_min: right_wall_min = abs(y)
 
     # [2] 틈새(Gap) 파악
@@ -80,28 +80,27 @@ def calculate_steering(scan_data):
             target = angles[i] if bins[angles[i]] > bins[angles[i-1]] else angles[i-1]
             gaps.append(target)
 
-    # 거시적 좌우 볼륨
     left_vol = sum(min(bins[a], 1000) for a in range(10, 91, 5) if a in bins)
     right_vol = sum(min(bins[a], 1000) for a in range(-90, 0, 5) if a in bins)
 
     # ========================================================
-    # [3] 방향 결정 (Steering): 가상 중심선 이동 로직 적용!
+    # [3] 방향 결정 (가상 중심선 필터링)
     # ========================================================
+    target_ideal_angle = 0
+    WALL_SAFE_DIST = 220 
     
-    # ★ 핵심: 양쪽 벽과의 거리를 계산해 '가장 이상적인 목표 각도'를 먼저 구합니다.
-    ideal_angle = 0
-    WALL_SAFE_DIST = 220 # 125(차폭) + 95(여유공간)
-    
-    # 우측 벽이 위험거리 내에 있으면 좌회전(양수) 방향으로 가상 중심을 이동!
+    # 벽이 가까우면 밀어내는 힘 계산
     if right_wall_min < WALL_SAFE_DIST:
-        ideal_angle += (WALL_SAFE_DIST - right_wall_min) * 0.8  
-        
-    # 좌측 벽이 위험거리 내에 있으면 우회전(음수) 방향으로 가상 중심을 이동!
+        target_ideal_angle += (WALL_SAFE_DIST - right_wall_min) * 0.7  
     if left_wall_min < WALL_SAFE_DIST:
-        ideal_angle -= (WALL_SAFE_DIST - left_wall_min) * 0.8   
+        target_ideal_angle -= (WALL_SAFE_DIST - left_wall_min) * 0.7   
         
-    # 가상 중심이 너무 꺾이지 않도록 ±75도로 제한
-    ideal_angle = max(-75, min(75, ideal_angle))
+    target_ideal_angle = max(-60, min(60, target_ideal_angle))
+    
+    # ★ 처방 2: 생각의 관성(Low-Pass Filter). 타겟 각도가 미친 듯이 널뛰는 것을 방지
+    # 끈적하게 각도를 유지해서 코너 진입 시 와리가리 원천 차단
+    ideal_angle = (0.3 * target_ideal_angle) + (0.7 * last_ideal_angle)
+    last_ideal_angle = ideal_angle
 
     best_angle = 0
     min_score = float('inf')
@@ -110,36 +109,34 @@ def calculate_steering(scan_data):
         dist = bins[angle]
         raw_dist = min(dist, 1000)
         
-        # 1. 기본 거리 점수 (가까울수록 폭발적인 점수 1000)
+        # 1. 기본 거리 점수
         score = 1000 - raw_dist
             
-        # 2. ★ 새로운 본능: 0도가 아니라, '이상적인 각도(ideal_angle)'를 벗어날수록 페널티!
-        # 이제 로봇은 0도(직진)를 고집하지 않고 이상적인 회전각을 편안하게 따릅니다.
+        # 2. 직진 본능 (0도가 아니라 끈적한 ideal_angle을 따라감)
         score += abs(angle - ideal_angle) * 3.0
         
-        # 3. 틈새(Gap) 보너스 (-)
+        # 3. 틈새(Gap) 보너스
         for gap_angle in gaps:
             if abs(angle - gap_angle) <= 10:
                 score -= 400 
                 
-        # 4. 거시적 방향 보너스 (-)
+        # 4. 거시적 방향 보너스
         if left_vol > right_vol + 1500 and angle > 0: score -= 150
         elif right_vol > left_vol + 1500 and angle < 0: score -= 150
             
-        # 5. 절대 충돌 방지(히트박스) (+)
+        # 5. 절대 충돌 방지(히트박스)
         rad = math.radians(angle)
         x = raw_dist * math.cos(rad)
         y = raw_dist * math.sin(rad)
         if (abs(y) < ROBOT_SIDE + 20) and (x < ROBOT_FRONT + 30):
             score += 5000 
 
-        # 최저 점수 갱신
         if score < min_score:
             min_score = score
             best_angle = angle
 
     # ========================================================
-    # [4] 속도 결정 (Speed): 거리로만 쿨하게 결정
+    # [4] 속도 결정
     # ========================================================
     if min_score >= 8000:
         speed = SPEED_REVERSE
@@ -176,7 +173,7 @@ def main():
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
-    print("[INFO] 가상 중심선 이동(P-Control) 탑재! 부드러운 자율주행 시작!")
+    print("[INFO] 뒤통수 시야 확보 & 생각의 관성 장착! 주행 시작!")
 
     scan_data = []
 
