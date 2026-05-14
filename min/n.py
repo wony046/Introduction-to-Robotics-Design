@@ -1,391 +1,433 @@
 """
-장애물 회피 DWA - Pro Version (동적 윈도우, 복도 중앙화, 교차 회피, 방향 가중치)
+DWA Pro v2 - 진동 방지 / 13cm 안전거리 / 강제 탈출
+─────────────────────────────────────────────────────────────
+요구사항 반영:
+1) 좌우 진동 억제 → 이전 명령과의 연속성 페널티 + 작은 w 데드존
+2) 13cm까지는 멈추지 않음 → SAFETY_DIST_MM = 130
+3) 멈추면 어떻게든 탈출 → 다단계 RECOVERY (후진 → 회전 → 재시도)
+4) 작은 맵 가정 → 라이다 노이즈 필터를 130mm 미만이 아니라 80mm 미만으로
 """
 
-import serial
 import time
 import math
+import serial
 
-# ── 1. 설정 ───────────────────────────────────────────────────────────────────
-LIDAR_PORT       = "/dev/ttyUSB0"
-ARDUINO_PORT     = "/dev/ttyAMA3"
-BAUDRATE_LIDAR   = 460800
-BAUDRATE_ARDUINO = 115200
+# ── 1. 하드웨어 포트 (본인 환경에 맞게 수정) ─────────────────────────────────
+LIDAR_PORT   = '/dev/ttyUSB0'
+ARDUINO_PORT = '/dev/ttyACM0'
+BAUDRATE     = 115200
 
-# 로봇 하드웨어 (mm)
-ROBOT_FRONT  = 110
-ROBOT_BACK   = 150
-ROBOT_HALF_W = 110
-MARGIN       = 50  # 좁은 곳을 위해 약간 타이트하게
+# ── 2. 안전 파라미터 (사용자 요구사항) ──────────────────────────────────────
+SAFETY_DIST_MM         = 130.0   # 13cm: 이 안쪽으로 들어오면 비상
+ROBOT_RADIUS_MM        = 130.0   # DWA 충돌 판정 임계점 = 안전거리와 동일
+EMERGENCY_THRESHOLD_MM = 130.0   # 비상 전환 임계점
+RECOVERY_CLEAR_MM      = 220.0   # 22cm 이상 확보되면 RECOVERY 종료
+LIDAR_NOISE_MM         = 80.0    # 8cm 미만은 노이즈로 간주 (스캐너 자체 허위값)
 
-# [우선순위 3] Dynamic Window 물리적 한계치 설정
-MAX_V   = 0.22      # 최대 선속도 (m/s)
-MAX_W   = 1.5       # 최대 각속도 (rad/s)
-MAX_A_V = 0.6       # 최대 선가속도 (m/s^2)
-MAX_A_W = 4.0       # 최대 각가속도 (rad/s^2)
+# ── 3. DWA 파라미터 ─────────────────────────────────────────────────────────
+MAX_V         = 0.45
+MAX_V_NARROW  = 0.20    # 좁은 곳에서는 천천히
+MAX_W         = 1.50
+DT            = 0.10
+PREDICT_TIME  = 1.00
+SEND_INTERVAL = 0.10
 
-# DWA 가중치 (고급화)
-W_HEADING   = 1.0
-W_CLEARANCE = 2.5   # 기본 가중치 (방향에 따라 유동적으로 변함)
-W_VELOCITY  = 0.7
-W_CENTERING = 1.2   # [우선순위 4] 복도 중앙 유지 가중치 추가
+# DWA 점수 가중치 (진동 방지의 핵심)
+W_HEADING     = 0.8
+W_CLEARANCE   = 2.5     # 장애물 회피 최우선
+W_VELOCITY    = 1.0
+W_SMOOTHNESS  = 3.5     # 이전 명령과의 차이 페널티 (이게 진동을 막음)
 
-# 진동 방지
-W_SMOOTH_ALPHA = 0.5
-DEAD_BAND_W    = 0.15
-BIAS_BONUS     = 0.8
+W_DEADZONE = 0.10       # 절댓값 이하의 w는 0으로 (떨림 방지)
 
-# 비상 안전
-EMERGENCY_FRONT_MM = 280
-EMERGENCY_SIDE_MM  = 110
-FRONT_ANGLE_RANGE  = 50
+# ── 4. RECOVERY 파라미터 ────────────────────────────────────────────────────
+REC_BACK_DUR    = 0.8   # 후진 단계
+REC_TURN_DUR    = 1.4   # 회전 단계
+REC_SPIN_DUR    = 0.8   # 제자리 회전 단계
+REC_CYCLE       = REC_BACK_DUR + REC_TURN_DUR + REC_SPIN_DUR  # 한 사이클 = 3.0초
+REC_MAX_ATTEMPT = 5     # 시도 횟수 (방향 번갈아가며)
 
-# 시뮬레이션
-PREDICT_T = 1.2
-SIM_STEP  = 0.08
+# ── 5. 통신 워치독 ──────────────────────────────────────────────────────────
+KEEPALIVE_INTERVAL = 0.30   # 아두이노 CMD_TIMEOUT(0.5s)보다 짧게
 
-# ── 2. FSM ────────────────────────────────────────────────────────────────────
+
+# ════════════════════════════════════════════════════════════════════════════
+# 상태 및 글로벌 변수
+# ════════════════════════════════════════════════════════════════════════════
 class RobotState:
-    DRIVE     = 1
-    RECOVERY  = 2
-    EMERGENCY = 3
+    DRIVE    = 1
+    RECOVERY = 2
 
-current_state       = RobotState.DRIVE
-stuck_timer         = 0.0
-emergency_timer     = 0.0
-arduino_heading_deg = 0.0
+current_state          = RobotState.DRIVE
+arduino_heading_deg    = 0.0
 
-last_v_command = 0.0
-last_w_command = 0.0
-last_w_sign    = 0
-recovery_count = 0  # [우선순위 2] Alternating Turn 카운터
+# 진동 방지를 위한 이전 명령 기억
+prev_v_cmd = 0.0
+prev_w_cmd = 0.0
 
-# ── 3. 유틸리티 및 센서 함수 ────────────────────────────────────────────────
-def normalize_angle(angle):
-    while angle >  180: angle -= 360
-    while angle < -180: angle += 360
+# RECOVERY 상태 변수
+rec_start_time    = 0.0
+rec_attempt       = 0
+rec_initial_sign  = 1     # 처음 회전 방향 (좌/우 거리로 결정)
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 유틸리티
+# ════════════════════════════════════════════════════════════════════════════
+def normalize_angle_deg(angle):
+    while angle > 180:   angle -= 360
+    while angle <= -180: angle += 360
     return angle
 
-def parse_packet(data):
-    if len(data) != 5: return None
-    s_flag     = data[0] & 0x01
-    s_inv_flag = (data[0] & 0x02) >> 1
-    if s_inv_flag != (1 - s_flag): return None
-    if (data[1] & 0x01) != 1: return None
-    angle_q6    = (data[1] >> 1) | (data[2] << 7)
-    angle       = angle_q6 / 64.0
-    distance_q2 = data[3] | (data[4] << 8)
-    distance    = distance_q2 / 4.0
-    return angle, distance, s_flag
+def normalize_angle_rad(angle):
+    return math.atan2(math.sin(angle), math.cos(angle))
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 라이다 통신
+# ════════════════════════════════════════════════════════════════════════════
+def parse_packet(raw):
+    if len(raw) < 5: return None
+    s_flag      = raw[0] & 0x01
+    angle_q6    = (raw[2] << 7) | (raw[1] >> 1)
+    angle_deg   = angle_q6 / 64.0
+    distance_q2 = (raw[4] << 8) | raw[3]
+    distance_mm = distance_q2 / 4.0
+    return angle_deg, distance_mm, s_flag
 
 def find_lidar_sync(lidar):
-    print("[라이다] 동기화...", flush=True)
-    timeout_start = time.time()
-    while time.time() - timeout_start < 3.0:
+    print("라이다 동기화 중...", flush=True)
+    deadline = time.time() + 3.0
+    while time.time() < deadline:
         b = lidar.read(1)
-        if len(b) == 0: continue
-        s_flag = b[0] & 0x01
-        s_inv  = (b[0] & 0x02) >> 1
-        if s_inv == (1 - s_flag):
-            b2 = lidar.read(1)
-            if len(b2) == 0: continue
-            if (b2[0] & 0x01) == 1:
-                b3 = lidar.read(3)
-                if len(b3) == 3:
-                    print("[라이다] OK", flush=True)
-                    return True
+        if b == b'\xaa' and lidar.read(1) == b'\x55':
+            return True
     return False
 
+
+# ════════════════════════════════════════════════════════════════════════════
+# 아두이노 통신 (헤딩 수신)
+# ════════════════════════════════════════════════════════════════════════════
 def read_arduino(arduino):
     global arduino_heading_deg
-    try:
-        while arduino.in_waiting > 0:
+    if arduino.in_waiting > 0:
+        try:
             line = arduino.readline().decode('utf-8', errors='ignore').strip()
-            if line.startswith('H:'):
-                try: arduino_heading_deg = float(line[2:])
-                except: pass
-    except: pass
+            if line.startswith("H:"):
+                arduino_heading_deg = float(line.split(":")[1])
+        except Exception:
+            pass
 
-def lidar_to_robot(angle_deg, distance):
-    rad = math.radians(angle_deg)
-    px = distance * math.cos(rad)
-    py = -distance * math.sin(rad)
-    return px, py
 
+# ════════════════════════════════════════════════════════════════════════════
+# 라이다 스캔 분석
+# ════════════════════════════════════════════════════════════════════════════
 def analyze_proximity(scan_points):
-    front_min, left_min, right_min = 99999, 99999, 99999
-    front_ang = 0
-    for ang, dist in scan_points:
-        if dist <= 150 or dist > 2000: continue
-        a = normalize_angle(ang)
-        if abs(a) <= FRONT_ANGLE_RANGE:
-            if dist < front_min: front_min, front_ang = dist, a
-        elif -90 <= a < -FRONT_ANGLE_RANGE:
-            if dist < left_min: left_min = dist
-        elif FRONT_ANGLE_RANGE < a <= 90:
-            if dist < right_min: right_min = dist
-    return {'front': front_min, 'left': left_min, 'right': right_min, 'front_ang': front_ang}
-
-def emergency_check(prox):
-    if prox['front'] < EMERGENCY_FRONT_MM:
-        if prox['left'] > prox['right']: return -0.10, +MAX_W, f"F={prox['front']:.0f}→L"
-        else: return -0.10, -MAX_W, f"F={prox['front']:.0f}→R"
-    if prox['left'] < EMERGENCY_SIDE_MM: return 0.08, -MAX_W * 0.8, f"L={prox['left']:.0f}→R회전"
-    if prox['right'] < EMERGENCY_SIDE_MM: return 0.08, +MAX_W * 0.8, f"R={prox['right']:.0f}→L회전"
-    return None, None, None
-
-# ── 4. DWA 핵심 알고리즘 ────────────────────────────────────────────────────
-
-# [우선순위 3] Dynamic Window 생성 함수
-def generate_dynamic_window(curr_v, curr_w, dt=0.1):
-    # 가속도 한계 내에서만 도달 가능한 속도 계산
-    v_min = max(0.0, curr_v - MAX_A_V * dt)
-    v_max = min(MAX_V, curr_v + MAX_A_V * dt)
-    w_min = max(-MAX_W, curr_w - MAX_A_W * dt)
-    w_max = min(MAX_W, curr_w + MAX_A_W * dt)
-
-    v_cands = [v_min, v_min + (v_max-v_min)*0.4, v_min + (v_max-v_min)*0.7, v_max] if v_max > v_min else [0.0]
-    w_step = (w_max - w_min) / 6.0 if w_max > w_min else 0.0
-    w_cands = [w_min + w_step * i for i in range(7)] if w_step > 0 else [0.0]
-    return v_cands, w_cands
+    """방향별 최소 거리 (mm). 0도가 정면, +가 좌, -가 우."""
+    p = {'front': 99999, 'front_left': 99999, 'front_right': 99999,
+         'left':  99999, 'right':       99999}
+    for a, d in scan_points:
+        na = normalize_angle_deg(a)
+        if -25 <= na <= 25:
+            p['front'] = min(p['front'], d)
+        if  10 <= na <= 70:
+            p['front_left'] = min(p['front_left'], d)
+        if -70 <= na <= -10:
+            p['front_right'] = min(p['front_right'], d)
+        if  70 <  na <= 130:
+            p['left'] = min(p['left'], d)
+        if -130 <= na < -70:
+            p['right'] = min(p['right'], d)
+    return p
 
 
-def check_collision_and_clearance(v_m_s, w_rad_s, local_pts, predict_t=PREDICT_T, step=SIM_STEP):
-    v_mm_s = v_m_s * 1000.0
-    if not local_pts: return 1000.0, 1000.0, 1000.0, False
+# ════════════════════════════════════════════════════════════════════════════
+# DWA 핵심: 충돌 판정 + 점수 평가
+# ════════════════════════════════════════════════════════════════════════════
+def calculate_clearance(v, w, scan_points):
+    """예측 궤적이 장애물 ROBOT_RADIUS_MM 안에 들어가면 -1 반환."""
+    min_dist = float('inf')
+    x = y = theta = 0.0
+    steps = int(PREDICT_TIME / DT)
 
-    rx, ry, theta = 0.0, 0.0, 0.0
-    min_clear_sq = 1e12
-    min_left_sq  = 1e12  # [우선순위 4] 좌측 여유 공간
-    min_right_sq = 1e12  # [우선순위 4] 우측 여유 공간
-    is_front_obs = False # [우선순위 5] 정면 장애물 플래그
+    # 정지 궤적은 현재 가장 가까운 장애물 거리만 평가
+    if abs(v) < 1e-3 and abs(w) < 1e-3:
+        nearest = min((d for _, d in scan_points), default=99999)
+        return nearest if nearest >= ROBOT_RADIUS_MM else -1.0
 
-    front_M = ROBOT_FRONT  + MARGIN
-    back_M  = ROBOT_BACK   + MARGIN
-    side_M  = ROBOT_HALF_W + MARGIN
-
-    n_steps = max(1, int(predict_t / step))
-    for _ in range(n_steps):
-        rx += v_mm_s * math.cos(theta) * step
-        ry += v_mm_s * math.sin(theta) * step
-        theta += w_rad_s * step
-        cos_t, sin_t = math.cos(theta), math.sin(theta)
-
-        for px, py in local_pts:
-            dx, dy = px - rx, py - ry
-            lx =  cos_t * dx + sin_t * dy
-            ly = -sin_t * dx + cos_t * dy
-
-            if -back_M <= lx <= front_M and -side_M <= ly <= side_M:
-                return -1.0, 0.0, 0.0, False
-
-            dist_sq = lx*lx + ly*ly
-            if dist_sq < min_clear_sq:
-                min_clear_sq = dist_sq
-                # [우선순위 5] 가장 가까운 장애물이 로봇 정면(±25도 이내)에 있는지 판별
-                angle_to_obs = math.degrees(math.atan2(ly, lx))
-                is_front_obs = (abs(angle_to_obs) < 25.0 and lx > 0)
-
-            # [우선순위 4] 좌/우측 분리 저장
-            if ly > 0 and dist_sq < min_left_sq: min_left_sq = dist_sq
-            elif ly < 0 and dist_sq < min_right_sq: min_right_sq = dist_sq
-
-    return math.sqrt(min_clear_sq), math.sqrt(min_left_sq), math.sqrt(min_right_sq), is_front_obs
+    for _ in range(steps):
+        x     += v * math.cos(theta) * DT * 1000.0   # m → mm
+        y     += v * math.sin(theta) * DT * 1000.0
+        theta += w * DT
+        for a_deg, d in scan_points:
+            ar = math.radians(a_deg)
+            ox = d * math.cos(ar)
+            oy = d * math.sin(ar)
+            dist = math.hypot(ox - x, oy - y)
+            if dist < ROBOT_RADIUS_MM:
+                return -1.0   # 충돌
+            if dist < min_dist:
+                min_dist = dist
+    return min_dist
 
 
-def run_dwa(scan_points, curr_heading_deg, curr_v, curr_w):
-    global last_w_sign, last_w_command
+def run_dwa(scan_points, prev_v, prev_w, narrow_mode):
+    """다음 (v, w) 결정. narrow_mode=True면 속도 후보를 줄임."""
+    v_max = MAX_V_NARROW if narrow_mode else MAX_V
 
-    local_pts = [(px, py) for px, py in [lidar_to_robot(a, d) for a, d in scan_points if 0 < d <= 1500]]
-    if len(local_pts) < 5: return 0.0, 0.0, 0
+    # 후보 (속도는 양수만 — 후진은 RECOVERY 전용)
+    v_candidates = [0.0, v_max * 0.33, v_max * 0.66, v_max]
+    w_candidates = [-1.2, -0.8, -0.5, -0.25, -0.1, 0.0, 0.1, 0.25, 0.5, 0.8, 1.2]
 
-    v_cands, w_cands = generate_dynamic_window(curr_v, curr_w, dt=0.1)
     best_v, best_w = 0.0, 0.0
-    max_score = -1e9
-    num_safe = 0
+    best_score = -float('inf')
+    safe_count = 0
 
-    for v in v_cands:
-        for w in w_cands:
-            clearance, left_c, right_c, is_front_obs = check_collision_and_clearance(v, w, local_pts)
-            if clearance < 0: continue
-            num_safe += 1
+    for v in v_candidates:
+        for w in w_candidates:
+            if abs(w) > MAX_W: continue
 
-            pred_turn_deg = math.degrees(w * PREDICT_T)
-            fut_heading = normalize_angle(curr_heading_deg + pred_turn_deg)
-            score_heading = max(0.0, 1.0 - abs(fut_heading) / 180.0)
+            clearance = calculate_clearance(v, w, scan_points)
+            if clearance < 0: continue       # 충돌 → 폐기
 
-            # [우선순위 5] 정면 막힘시 회피(Clearance)에 초집중, 측면은 덜 민감하게 (틈새 주파)
-            dyn_weight_c = W_CLEARANCE * (1.5 if is_front_obs else 0.8)
-            score_clearance = min(1.0, clearance / 1000.0)
+            safe_count += 1
 
-            # [우선순위 4] Corridor Centering 점수: 좌우 여유 공간 밸런스 맞추기
-            if left_c < 1000 and right_c < 1000:
-                diff = abs(left_c - right_c)
-                score_centering = max(0.0, 1.0 - diff / (left_c + right_c))
-            else:
-                score_centering = 1.0 # 주변이 탁 트였으면 중앙 유지 불필요
+            # ── 점수 계산 ────────────────────────────────────────────────
+            # 1) 헤딩: 정면을 향해 직진하는 궤적을 선호 (예측 헤딩이 0에 가까울수록 좋음)
+            heading_score = (math.pi - abs(normalize_angle_rad(w * PREDICT_TIME))) / math.pi
 
-            score_velocity = v / MAX_V if v > 0 else 0.0
-            bias = BIAS_BONUS if (w != 0 and last_w_sign != 0 and w * last_w_sign > 0) else 0.0
-            stop_pen = -0.8 if v < 0.01 else 0.0
+            # 2) 여유공간: 정규화 (1m 이상이면 만점)
+            clearance_score = min(clearance / 1000.0, 1.0)
 
-            total = (W_HEADING * score_heading +
-                     dyn_weight_c * score_clearance +
-                     W_CENTERING * score_centering +
-                     W_VELOCITY * score_velocity +
-                     bias + stop_pen)
+            # 3) 속도: 빠를수록 좋음
+            velocity_score = v / max(v_max, 1e-3)
 
-            if total > max_score:
-                max_score = total
+            # 4) 부드러움(진동 방지): 이전 w와의 차이 페널티
+            smoothness_score = -abs(w - prev_w) / (2.0 * MAX_W)
+
+            score = (W_HEADING    * heading_score
+                   + W_CLEARANCE  * clearance_score
+                   + W_VELOCITY   * velocity_score
+                   + W_SMOOTHNESS * smoothness_score)
+
+            if score > best_score:
+                best_score = score
                 best_v, best_w = v, w
 
-    if max_score <= -1e8:
-        best_v = 0.0
-        best_w = -MAX_W if curr_heading_deg > 0 else +MAX_W
+    # 데드존: 작은 w는 0으로 → 직진 시 잔떨림 제거
+    if abs(best_w) < W_DEADZONE:
+        best_w = 0.0
 
-    if abs(best_w) < DEAD_BAND_W: best_w = 0.0
-    smoothed_w = W_SMOOTH_ALPHA * last_w_command + (1 - W_SMOOTH_ALPHA) * best_w
-    if best_w != 0: last_w_sign = 1 if best_w > 0 else -1
+    return best_v, best_w, safe_count
 
-    last_w_command = smoothed_w
-    return best_v, smoothed_w, num_safe
 
-# ── 5. 메인 루프 ──────────────────────────────────────────────────────────────
+# ════════════════════════════════════════════════════════════════════════════
+# RECOVERY: 단계별 강제 탈출
+# ════════════════════════════════════════════════════════════════════════════
+def pick_recovery_direction(prox):
+    """좌/우 어느 쪽이 더 trav(통과 가능)한지 보고 회전 방향 결정."""
+    left_room  = prox['front_left']  + prox['left']
+    right_room = prox['front_right'] + prox['right']
+    return 1 if left_room >= right_room else -1   # +1=좌회전, -1=우회전
+
+
+def recovery_step(elapsed, attempt, initial_sign, prox):
+    """
+    한 사이클(REC_CYCLE = 3.0초):
+      Phase 1 (0 ~ 0.8s)      : 순수 후진
+      Phase 2 (0.8 ~ 2.2s)    : 후진 + 회전
+      Phase 3 (2.2 ~ 3.0s)    : 제자리 회전 (강하게)
+    홀수번째 시도는 반대 방향으로.
+    """
+    # 시도 횟수에 따라 방향 번갈아 가며
+    sign = initial_sign if (attempt % 2 == 0) else -initial_sign
+
+    if elapsed < REC_BACK_DUR:
+        return -0.15, 0.0
+
+    elif elapsed < REC_BACK_DUR + REC_TURN_DUR:
+        return -0.08, MAX_W * sign
+
+    else:
+        # 제자리에서 강하게 회전
+        return 0.0, MAX_W * sign
+
+
+# ════════════════════════════════════════════════════════════════════════════
+# 메인 루프
+# ════════════════════════════════════════════════════════════════════════════
 def main():
-    global current_state, stuck_timer, emergency_timer
-    global arduino_heading_deg, last_v_command, last_w_command, recovery_count
+    global current_state, arduino_heading_deg
+    global prev_v_cmd, prev_w_cmd
+    global rec_start_time, rec_attempt, rec_initial_sign
 
-    print("="*60, flush=True)
-    print("DWA Pro 플래너 시작 (버그 픽스 완료)", flush=True)
-    print("="*60, flush=True)
+    print("=" * 60, flush=True)
+    print("DWA Pro v2 시작", flush=True)
+    print(f"  안전거리      : {SAFETY_DIST_MM:.0f} mm", flush=True)
+    print(f"  로봇반경      : {ROBOT_RADIUS_MM:.0f} mm", flush=True)
+    print(f"  라이다 필터   : {LIDAR_NOISE_MM:.0f} mm 미만 무시", flush=True)
+    print(f"  진동방지 가중 : {W_SMOOTHNESS}", flush=True)
+    print("=" * 60, flush=True)
 
+    # 시리얼 초기화
     try:
-        lidar = serial.Serial(LIDAR_PORT, BAUDRATE_LIDAR, timeout=1)
+        lidar = serial.Serial(LIDAR_PORT, BAUDRATE, timeout=1)
         time.sleep(0.5)
     except Exception as e:
-        print(f"✗ 라이다 에러: {e}", flush=True); return
-        
+        print(f"✗ 라이다 연결 실패: {e}", flush=True); return
+
     try:
-        arduino = serial.Serial(ARDUINO_PORT, BAUDRATE_ARDUINO, timeout=0.1)
+        arduino = serial.Serial(ARDUINO_PORT, BAUDRATE, timeout=0.1)
         time.sleep(0.5)
     except Exception as e:
-        print(f"✗ 아두이노 에러: {e}", flush=True); lidar.close(); return
+        print(f"✗ 아두이노 연결 실패: {e}", flush=True); lidar.close(); return
 
+    # 초기 정지 명령 (아두이노 모드 락은 공백 구분자 → 고급 모드)
     arduino.write(b"0.00 0.00\n")
-    time.sleep(0.2)
+    time.sleep(0.3)
 
+    # 라이다 스캔 시작
     try:
-        lidar.write(bytes([0xA5, 0x25]))
+        lidar.write(bytes([0xA5, 0x25]))   # STOP
         time.sleep(0.1)
         lidar.reset_input_buffer()
-        lidar.write(bytes([0xA5, 0x20]))
+        lidar.write(bytes([0xA5, 0x20]))   # SCAN
         time.sleep(0.5)
-        lidar.read(7)
-    except Exception as e: pass
+        lidar.read(7)                       # response descriptor 소비
+    except Exception:
+        pass
 
     if not find_lidar_sync(lidar):
-        arduino.write(b"0.00 0.00\n"); lidar.close(); arduino.close(); return
+        print("✗ 라이다 동기화 실패", flush=True)
+        arduino.write(b"0.00 0.00\n")
+        lidar.close(); arduino.close(); return
 
-    scan_points = []
-    last_send = time.time()
-    SEND_INTERVAL = 0.1
-    last_cmd_time = time.time()
-    dwa_count = 0
-    
-    current_v, current_w = 0.0, 0.0
+    scan_points    = []
+    last_send_time = time.time()
+    last_cmd_time  = time.time()
+    dwa_count      = 0
 
     try:
         while True:
+            # 1) 아두이노로부터 헤딩 수신
             read_arduino(arduino)
+
+            # 2) 라이다 1패킷 수신
             raw = lidar.read(5)
             if len(raw) == 5:
-                result = parse_packet(raw)
-                if result is not None:
-                    angle_raw, distance, s_flag = result
+                pkt = parse_packet(raw)
+                if pkt is not None:
+                    angle_raw, distance, s_flag = pkt
                     now = time.time()
 
-                    if s_flag == 1 and scan_points and (now - last_send >= SEND_INTERVAL):
+                    # 노이즈 필터: 8cm 미만만 버림 (13cm 안전거리 영역은 살림!)
+                    if distance > LIDAR_NOISE_MM:
+                        scan_points.append((angle_raw, distance))
+
+                    # 한 바퀴 완료 (s_flag=1) + 전송 주기 도달
+                    if s_flag == 1 and len(scan_points) > 30 \
+                       and (now - last_send_time >= SEND_INTERVAL):
+
                         dwa_count += 1
-                        last_cmd_time = now
-
                         prox = analyze_proximity(scan_points)
-                        em_v, em_w, em_reason = emergency_check(prox)
+                        front_min = min(prox['front'],
+                                        prox['front_left'],
+                                        prox['front_right'])
 
-                        # ★ [버그수정 2] RECOVERY 중에는 EMERGENCY로 납치되지 않도록 방어!
-                        if em_v is not None and current_state == RobotState.DRIVE:
-                            v, w = em_v, em_w
-                            num_safe = -1
-                            current_state = RobotState.EMERGENCY
-                            emergency_timer = 0.3
-                            last_v_command, last_w_command = v, w
-                            print(f"[!비상!] {em_reason}", flush=True)
+                        # ── 상태 머신 ─────────────────────────────────────
+                        if current_state == RobotState.DRIVE:
+                            # 좁은 영역이면 속도 제한
+                            narrow = front_min < 350.0
 
-                        elif current_state == RobotState.EMERGENCY:
-                            emergency_timer -= SEND_INTERVAL
-                            if emergency_timer <= 0: current_state = RobotState.DRIVE
-                            v, w, num_safe = last_v_command, last_w_command, 0
+                            v, w, safe_count = run_dwa(
+                                scan_points, prev_v_cmd, prev_w_cmd, narrow
+                            )
 
-                        elif current_state == RobotState.DRIVE:
-                            # 후진 등에서 복귀할 때 Dynamic Window 붕괴(Stutter) 방지
-                            if current_v < 0: current_v = 0.0 
-                            
-                            v, w, num_safe = run_dwa(scan_points, arduino_heading_deg, current_v, current_w)
-                            if v < 0.05:
-                                stuck_timer += SEND_INTERVAL
-                                if stuck_timer >= 2.0:
-                                    # ★ [버그수정 1] arduino.write(b"ESC\n") 삭제 -> 파이썬이 탈출 지휘!
-                                    current_state = RobotState.RECOVERY
-                                    stuck_timer = 0.0
-                                    recovery_count += 1 
-                            else:
-                                stuck_timer = 0.0
+                            # 13cm 안으로 들어왔거나 모든 궤적이 막혔으면 RECOVERY로
+                            if front_min < EMERGENCY_THRESHOLD_MM or safe_count == 0:
+                                print(f"  [RECOVERY 진입] front_min={front_min:.0f}mm, "
+                                      f"safe={safe_count}", flush=True)
+                                current_state    = RobotState.RECOVERY
+                                rec_start_time   = now
+                                rec_attempt      = 0
+                                rec_initial_sign = pick_recovery_direction(prox)
+                                v, w = -0.15, 0.0
+                                safe_count = -1
 
-                        else: # RobotState.RECOVERY
-                            stuck_timer += SEND_INTERVAL
-                            if stuck_timer < 0.5:
-                                v, w = -0.15, 0.0 # 0.5초간 똑바로 후진
-                            else:
-                                turn_sign = 1 if (recovery_count % 2 == 1) else -1 
-                                if prox['left'] > prox['right'] + 300: turn_sign = 1
-                                elif prox['right'] > prox['left'] + 300: turn_sign = -1
-                                
-                                v, w = -0.10, MAX_W * turn_sign
-                            
-                            num_safe = 0
-                            last_v_command, last_w_command = v, w
-                            if stuck_timer >= 2.5:
-                                current_state = RobotState.DRIVE
-                                stuck_timer = 0.0
-                                current_v = 0.0 # 탈출 후 정지 상태에서 안정적 출발
+                        else:  # RECOVERY
+                            elapsed = now - rec_start_time
+                            v, w = recovery_step(elapsed, rec_attempt,
+                                                  rec_initial_sign, prox)
+                            safe_count = -1
 
-                        current_v, current_w = v, w 
+                            # 사이클 종료 시점: 탈출 여부 점검
+                            if elapsed >= REC_CYCLE:
+                                if front_min > RECOVERY_CLEAR_MM:
+                                    # 탈출 성공
+                                    print(f"  [탈출 성공] front_min={front_min:.0f}mm "
+                                          f"(시도 {rec_attempt+1}회차)", flush=True)
+                                    current_state = RobotState.DRIVE
+                                    prev_v_cmd = 0.0
+                                    prev_w_cmd = 0.0
+                                else:
+                                    # 사이클 재시작 (방향 바꿔서)
+                                    rec_attempt += 1
+                                    rec_start_time = now
+                                    print(f"  [재시도] {rec_attempt}회차, "
+                                          f"방향 {'L' if (rec_attempt % 2 == 0) == (rec_initial_sign > 0) else 'R'}",
+                                          flush=True)
+
+                                    # 일정 횟수 이상 실패 시 좌/우 거리 다시 계산
+                                    if rec_attempt >= REC_MAX_ATTEMPT:
+                                        rec_attempt      = 0
+                                        rec_initial_sign = pick_recovery_direction(prox)
+                                        print(f"  [재계획] 방향 다시 결정", flush=True)
+
+                        # 명령 송신
                         cmd = f"{v:.2f} {w:.2f}\n"
                         arduino.write(cmd.encode('utf-8'))
+                        last_cmd_time = now
 
-                        st = {1:"D",2:"R",3:"E"}.get(current_state, "?")
-                        print(f"[{dwa_count:4d}] {st} v={v:+.2f} w={w:+.2f} "
-                              f"hdg={arduino_heading_deg:+5.0f}° "
-                              f"F={prox['front']:.0f} L={prox['left']:.0f} R={prox['right']:.0f} "
-                              f"safe={num_safe}", flush=True)
+                        # 이전 명령 갱신 (진동 방지용)
+                        prev_v_cmd = v
+                        prev_w_cmd = w
 
-                        scan_points = []
-                        last_send = now
+                        # 로그
+                        st_tag = "DRIVE" if current_state == RobotState.DRIVE else "RECOV"
+                        print(f"[{dwa_count:4d}] {st_tag} "
+                              f"v={v:+.2f} w={w:+.2f}  "
+                              f"hdg={arduino_heading_deg:+6.1f}°  "
+                              f"F={prox['front']:5.0f} FL={prox['front_left']:5.0f} "
+                              f"FR={prox['front_right']:5.0f}  "
+                              f"safe={safe_count}",
+                              flush=True)
 
-                    # ★ [버그수정 3] 코앞 데이터(150mm 이하) 증발 막기 위해 기준치 60으로 하향 조정
-                    if distance > 60:
-                        scan_points.append((normalize_angle(angle_raw), distance))
+                        scan_points    = []
+                        last_send_time = now
 
+            # 3) Keep-alive (아두이노 0.5초 워치독보다 짧게)
             now = time.time()
-            if now - last_cmd_time > 1.0:
-                arduino.write(b"0.00 0.00\n")
+            if now - last_cmd_time > KEEPALIVE_INTERVAL:
+                # 마지막 명령을 그대로 재전송 (정지 강제하지 않음)
+                cmd = f"{prev_v_cmd:.2f} {prev_w_cmd:.2f}\n"
+                arduino.write(cmd.encode('utf-8'))
                 last_cmd_time = now
 
-    except KeyboardInterrupt: print("\n종료...", flush=True)
-    except Exception as e: print(f"[에러] {e}", flush=True)
+    except KeyboardInterrupt:
+        print("\n사용자 중단", flush=True)
+    except Exception as e:
+        print(f"[에러] {e}", flush=True)
     finally:
-        try: arduino.write(b"0.00 0.00\n"); time.sleep(0.1); lidar.write(bytes([0xA5, 0x25]))
-        except: pass
-        lidar.close(); arduino.close(); print("✓ 종료", flush=True)
+        try:
+            arduino.write(b"0.00 0.00\n")
+            time.sleep(0.1)
+            lidar.write(bytes([0xA5, 0x25]))   # STOP
+        except Exception:
+            pass
+        lidar.close()
+        arduino.close()
+        print("✓ 종료", flush=True)
+
 
 if __name__ == "__main__":
     main()
