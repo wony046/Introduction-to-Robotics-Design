@@ -5,23 +5,24 @@ import math
 # ── 1. 설정 및 파라미터 ───────────────────────────────────────────────────────
 LIDAR_PORT       = "/dev/ttyUSB0"
 ARDUINO_PORT     = "/dev/ttyAMA3"
+BAUDRATE_LIDAR   = 460800
+BAUDRATE_ARDUINO = 9600
 
-# 로봇 하드웨어 (mm) - 직사각형 히트박스 기준
-ROBOT_FRONT = 110      # 라이다 중심 ~ 앞범퍼
-ROBOT_BACK  = 150      # 라이다 중심 ~ 뒷범퍼
-ROBOT_HALF_W = 110     # 라이다 중심 ~ 좌우 끝
-MARGIN      = 30       # 수평/수직 안전 여유폭
+# 로봇 하드웨어 (mm) 
+ROBOT_FRONT  = 110      # 앞
+ROBOT_BACK   = 150      # 뒤 (긴 엉덩이 충돌 방지 핵심)
+ROBOT_HALF_W = 110      # 좌우
+MARGIN       = 35       # 안전 여유폭
 
-# 주행 성능
+# 주행 성능 
 MAX_V = 0.35           # m/s
-MIN_V = 0.05           # m/s
 MAX_W = 1.5            # rad/s
 
-# DWA 채점 가중치 (환경에 맞춰 튜닝)
-W_HEADING   = 2.0      # 목표 방향 추종
-W_CLEARANCE = 1.5      # 장애물 회피 (안전)
-W_VELOCITY  = 1.0      # 직진 본능
-BIAS_BONUS  = 0.3      # 방향 고착화 (지그재그 방지)
+# DWA 채점 가중치
+W_HEADING   = 2.0      
+W_CLEARANCE = 1.8      
+W_VELOCITY  = 1.0      
+BIAS_BONUS  = 0.3      
 
 # ── 2. FSM 및 전역 상태 ───────────────────────────────────────────────────────
 class RobotState:
@@ -31,42 +32,60 @@ class RobotState:
 current_state = RobotState.DRIVE
 stuck_timer = 0.0
 last_w_sign = 0.0
+arduino_heading_deg = 0.0
 
-# ── 3. 유틸리티 함수 ──────────────────────────────────────────────────────────
+# ── 3. 유틸리티 및 라이다 파싱 ────────────────────────────────────────────────
 def normalize_angle(angle):
-    """각도를 -180 ~ 180도로 정규화"""
     while angle > 180: angle -= 360
     while angle < -180: angle += 360
     return angle
 
+def parse_packet(data):
+    if len(data) != 5: return None
+    s_flag = data[0] & 0x01
+    s_inv_flag = (data[0] & 0x02) >> 1
+    if s_inv_flag != (1 - s_flag): return None
+    if (data[1] & 0x01) != 1: return None
+    angle_q6 = (data[1] >> 1) | (data[2] << 7)
+    angle = angle_q6 / 64.0
+    distance_q2 = data[3] | (data[4] << 8)
+    distance = distance_q2 / 4.0
+    return angle, distance
+
+def read_arduino(arduino):
+    global arduino_heading_deg
+    while arduino.in_waiting > 0:
+        try:
+            line = arduino.readline().decode('utf-8', errors='ignore').strip()
+            if line.startswith('H:'):
+                arduino_heading_deg = float(line[2:])
+        except Exception:
+            pass
+
 # ── 4. DWA 코어 (수학적 시뮬레이션) ───────────────────────────────────────────
 def generate_vw_window(current_v, current_w):
-    """현재 속도에서 선택 가능한 v, w 윈도우 생성 (단순화 버전)"""
     v_cands = [0.0, 0.15, 0.25, MAX_V]
     w_cands = [-MAX_W, -1.0, -0.5, 0.0, 0.5, 1.0, MAX_W]
     return v_cands, w_cands
 
 def check_collision_and_clearance(v_m_s, w_rad_s, scan_points, predict_t=1.0, step=0.2):
-    """미래 궤적(1초)을 직사각형 히트박스로 시뮬레이션하여 충돌 검사"""
     v_mm_s = v_m_s * 1000.0
-    
-    # 연산 최적화: 시뮬레이션 중 로봇 반경 밖의 점들은 무시
     max_dist = abs(v_mm_s * predict_t) + max(ROBOT_FRONT, ROBOT_BACK) + MARGIN + 100
+    
     local_pts = [(dist * math.cos(math.radians(ang)), dist * math.sin(math.radians(ang))) 
                  for ang, dist in scan_points if 0 < dist <= max_dist]
                  
-    if not local_pts: return 1000.0 # 앞이 뻥 뚫림
+    if not local_pts: return 1000.0 
     
     curr_x, curr_y, curr_th = 0.0, 0.0, 0.0
     t = 0.0
-    min_clear_sq = 1000000.0 # 제곱 거리로 비교 (루트 연산 최소화)
+    min_clear_sq = 1000000.0 
 
     front_bound = ROBOT_FRONT + MARGIN
     back_bound  = -ROBOT_BACK - MARGIN
     side_bound  = ROBOT_HALF_W + MARGIN
 
     while t <= predict_t:
-        # Kinematics 운동학적 위치 추정 (Euler Integration)
         curr_x += v_mm_s * math.cos(curr_th) * step
         curr_y += v_mm_s * math.sin(curr_th) * step
         curr_th += w_rad_s * step
@@ -76,14 +95,11 @@ def check_collision_and_clearance(v_m_s, w_rad_s, scan_points, predict_t=1.0, st
         
         for px, py in local_pts:
             dx, dy = px - curr_x, py - curr_y
-            
-            # 회전 변환 (라이다 점을 현재 로봇의 로컬 좌표계로 가져옴)
             lx = dx * cos_t + dy * sin_t
             ly = -dx * sin_t + dy * cos_t
             
-            # [직사각형 충돌 검사]
             if back_bound <= lx <= front_bound and -side_bound <= ly <= side_bound:
-                return -1.0 # 충돌 궤적 폐기!
+                return -1.0 # 충돌 궤적
                 
             dist_sq = dx**2 + dy**2
             if dist_sq < min_clear_sq:
@@ -101,77 +117,109 @@ def run_dwa(scan_points, target_heading, current_v, current_w):
     for v in v_cands:
         for w in w_cands:
             clearance = check_collision_and_clearance(v, w, scan_points)
-            if clearance <= 0: continue # 박치기하는 길은 무시
+            if clearance <= 0: continue 
             
-            # 1. 헤딩 점수 (목표 각도와의 일치율)
             pred_turn = math.degrees(w * 1.0)
             fut_heading = normalize_angle(target_heading - pred_turn)
             score_heading = max(0.0, 1.0 - (abs(fut_heading) / 180.0))
-            
-            # 2. 여유공간 점수 (장애물과 멀수록 좋음)
             score_clearance = min(1.0, clearance / 1000.0)
-            
-            # 3. 속도 점수
             score_velocity = max(0.0, v / MAX_V)
             
-            # 4. 방향 고착 보너스
             bias = BIAS_BONUS if (w * last_w_sign > 0) else 0.0
-            
-            total_score = (W_HEADING * score_heading) + \
-                          (W_CLEARANCE * score_clearance) + \
-                          (W_VELOCITY * score_velocity) + bias
+            total_score = (W_HEADING * score_heading) + (W_CLEARANCE * score_clearance) + (W_VELOCITY * score_velocity) + bias
                           
             if total_score > max_score:
                 max_score = total_score
                 best_v, best_w = v, w
                 
-    if best_w != 0:
-        last_w_sign = 1.0 if best_w > 0 else -1.0
-        
+    if best_w != 0: last_w_sign = 1.0 if best_w > 0 else -1.0
     return best_v, best_w
 
 # ── 5. 메인 루프 (교통정리) ───────────────────────────────────────────────────
 def main():
-    global current_state, stuck_timer
+    global current_state, stuck_timer, arduino_heading_deg
     
-    # (통신 포트 초기화 로직 생략 - 이전 코드와 동일하게 적용)
-    # lidar = serial.Serial(...)
-    
+    print("라이다 및 아두이노 초기화 중...")
+    try:
+        lidar = serial.Serial(LIDAR_PORT, BAUDRATE_LIDAR, timeout=1)
+        arduino = serial.Serial(ARDUINO_PORT, BAUDRATE_ARDUINO, timeout=1)
+    except Exception as e:
+        print(f"[에러] 포트 연결 실패: {e}")
+        return
+
+    # 라이다 스캔 시작 명령
+    lidar.write(bytes([0xA5, 0x40]))
+    time.sleep(1)
+    lidar.write(bytes([0xA5, 0x20]))
+    lidar.read(7) # 응답 헤더 무시
+    print("주행 시작!")
+
+    scan_points = []
+    last_send = time.time()
+    SEND_INTERVAL = 0.1 # 0.1초마다 갱신
     current_v, current_w = 0.0, 0.0
-    target_heading = 0.0 # 아두이노에서 받아올 값
-    dt = 0.1
-    
-    print("DWA + FSM Navigation Started")
-    
+
     try:
         while True:
-            scan_points = [] # 라이다에서 파싱된 [(angle, dist), ...] 데이터
+            # 1. 아두이노 헤딩 읽기
+            read_arduino(arduino)
+
+            # 2. 라이다 데이터 읽기
+            raw = lidar.read(5)
+            result = parse_packet(raw)
+            if result is None: continue
+
+            angle_raw, distance = result
+            s_flag = raw[0] & 0x01
             
-            # [상태 머신 로직]
-            if current_state == RobotState.DRIVE:
-                v, w = run_dwa(scan_points, target_heading, current_v, current_w)
+            if distance > 0:
+                scan_points.append((normalize_angle(angle_raw), distance))
+
+            # 3. 라이다가 1바퀴(한 프레임) 다 돌았고, 전송 주기가 지났을 때 연산 시작
+            now = time.time()
+            if s_flag == 1 and scan_points and (now - last_send >= SEND_INTERVAL):
                 
-                if v == 0.0:
-                    stuck_timer += dt
-                    if stuck_timer >= 2.0:
-                        print("[경고] 2초간 정지 -> Recovery 모드 진입!")
-                        current_state = RobotState.RECOVERY
+                # [FSM 상태 머신]
+                if current_state == RobotState.DRIVE:
+                    v, w = run_dwa(scan_points, arduino_heading_deg, current_v, current_w)
+                    
+                    if v == 0.0:
+                        stuck_timer += SEND_INTERVAL
+                        if stuck_timer >= 2.0:
+                            print("[상태 전환] 갇힘 감지! Recovery 모드 진입")
+                            arduino.write(b"ESC\n") # 아두이노에 탈출 모드 알림
+                            current_state = RobotState.RECOVERY
+                            stuck_timer = 0.0
+                    else:
                         stuck_timer = 0.0
-                else:
-                    stuck_timer = 0.0
+                        
+                elif current_state == RobotState.RECOVERY:
+                    v, w = -0.1, 1.5 # 뒤로 빼면서 크게 회전 (1.5 rad/s)
+                    stuck_timer += SEND_INTERVAL
                     
-            elif current_state == RobotState.RECOVERY:
-                v, w = -0.1, 1.0 # 뒤로 살짝 빼면서 회전하여 시야 확보
+                    # 1.5초 정도 강제 탈출 후 다시 Drive 모드로 복귀
+                    if stuck_timer >= 1.5:
+                        print("[상태 전환] 탈출 완료. Drive 모드 복귀")
+                        current_state = RobotState.DRIVE
+                        stuck_timer = 0.0
                 
-                # 정면이 500mm 이상 확보되면 탈출
-                front_clear = True # 실제로는 라이다 스캔으로 검사 구현 필요
-                if front_clear:
-                    print("[회복] 탈출 공간 확보 -> Drive 모드 복귀")
-                    current_state = RobotState.DRIVE
-                    
-            current_v, current_w = v, w
-            # arduino.write(f"{v:.2f} {w:.2f}\n".encode())
-            time.sleep(dt)
-            
+                # 모터 제어 명령 전송
+                current_v, current_w = v, w
+                cmd = f"{v:.2f} {w:.2f}\n"
+                arduino.write(cmd.encode('utf-8'))
+                # print(f"전송: {cmd.strip()} / 헤딩: {arduino_heading_deg:.1f}") # 필요시 주석 해제하여 디버깅
+                
+                scan_points = [] # 스캔 데이터 초기화
+                last_send = now
+
     except KeyboardInterrupt:
-        print("종료")
+        print("\n종료 중...")
+    finally:
+        lidar.write(bytes([0xA5, 0x25])) # 라이다 정지
+        arduino.write(b"0.00 0.00\n")    # 아두이노 모터 정지
+        lidar.close()
+        arduino.close()
+        print("종료 완료.")
+
+if __name__ == "__main__":
+    main()
