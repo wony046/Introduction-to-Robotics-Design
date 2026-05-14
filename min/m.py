@@ -38,6 +38,7 @@ V_MAX        = 25.0       # cm/s
 V_REVERSE    = -4.8       # cm/s
 V_SAMPLES    = 7
 W_MAX_DPS    = 90.0       # deg/s
+W_MIN_DPS    = 17.0
 W_SAMPLES    = 15
 DT_PREDICT   = 0.6
 DT_STEP      = 0.1
@@ -394,6 +395,9 @@ def main():
                     merged_obs = memory_for_dwa()
 
                     v, w, mode = decide(scan_data, merged_obs)
+
+                    if 0.0 < abs(w) < W_MIN_DPS:
+                        w = W_MIN_DPS if w > 0 else -W_MIN_DPS
 
                     try:
                         arduino.write(f"{v:.1f},{w:.1f}\n".encode('utf-8'))
