@@ -12,10 +12,11 @@ import time
 import math
 import serial
 
-# ── 1. 하드웨어 포트 (본인 환경에 맞게 수정) ─────────────────────────────────
-LIDAR_PORT   = '/dev/ttyUSB0'
-ARDUINO_PORT = '/dev/ttyAMA3'
-BAUDRATE     = 115200
+# ── 1. 하드웨어 포트 ─────────────────────────────────────────────────────────
+LIDAR_PORT       = "/dev/ttyUSB0"
+ARDUINO_PORT     = "/dev/ttyAMA3"
+BAUDRATE_LIDAR   = 460800
+BAUDRATE_ARDUINO = 115200
 
 # ── 2. 안전 파라미터 (사용자 요구사항) ──────────────────────────────────────
 SAFETY_DIST_MM         = 130.0   # 13cm: 이 안쪽으로 들어오면 비상
@@ -271,13 +272,13 @@ def main():
 
     # 시리얼 초기화
     try:
-        lidar = serial.Serial(LIDAR_PORT, BAUDRATE, timeout=1)
+        lidar = serial.Serial(LIDAR_PORT, BAUDRATE_LIDAR, timeout=1)
         time.sleep(0.5)
     except Exception as e:
         print(f"✗ 라이다 연결 실패: {e}", flush=True); return
 
     try:
-        arduino = serial.Serial(ARDUINO_PORT, BAUDRATE, timeout=0.1)
+        arduino = serial.Serial(ARDUINO_PORT, BAUDRATE_ARDUINO, timeout=0.1)
         time.sleep(0.5)
     except Exception as e:
         print(f"✗ 아두이노 연결 실패: {e}", flush=True); lidar.close(); return
