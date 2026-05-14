@@ -14,7 +14,7 @@ import serial
 
 # ── 1. 하드웨어 포트 (본인 환경에 맞게 수정) ─────────────────────────────────
 LIDAR_PORT   = '/dev/ttyUSB0'
-ARDUINO_PORT = '/dev/ttyACM3'
+ARDUINO_PORT = '/dev/ttyAMA3'
 BAUDRATE     = 115200
 
 # ── 2. 안전 파라미터 (사용자 요구사항) ──────────────────────────────────────
