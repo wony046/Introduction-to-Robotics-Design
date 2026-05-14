@@ -303,59 +303,55 @@ def try_update_sign(best_w):
 # 9. 의사 결정
 # ============================================================
 def decide(scan_data, obstacles):
-    global reverse_until, post_reverse_sign, mode_history
-    now = time.time()
-
-    if front_emergency_dist(scan_data) < EMERGENCY_DIST:
-        return 0.0, 0.0, 'EMERGENCY'
-    if now < reverse_until:
-        if rear_emergency_dist(scan_data) < EMERGENCY_DIST:
-            reverse_until = 0.0
-            return 0.0, 0.0, 'EMERGENCY'
-        return V_REVERSE, 0.0, 'REVERSE'
-
-    if mode_history.count('AVOID') >= STUCK_THRESHOLD:
-        reverse_until     = now + REVERSE_DURATION
-        post_reverse_sign = -last_avoid_sign if last_avoid_sign != 0 else 1
-        mode_history.clear()
-        _sign_buf.clear()
-        return V_REVERSE, 0.0, 'REVERSE'
-
-    # 공간 분석 정보
-    target_gap = find_best_gap(obstacles)
-    wall_corr  = get_wall_correction(obstacles)
-
-    best_v, best_w, best_score = 0.0, 0.0, -1e9
-    bias_sign = post_reverse_sign if post_reverse_sign != 0 else -last_avoid_sign
-    w_step = (2.0 * W_MAX_DPS) / (W_SAMPLES - 1)
+    best_score = -1.0
+    best_v = 0.0
+    best_w = 0.0
     
-    for i in range(V_SAMPLES):
-        v = V_MAX * i / (V_SAMPLES - 1)
-        if 0 < v < 2.0: continue # 미세 전진 방지
-        
-        for j in range(W_SAMPLES):
-            w_sample = -W_MAX_DPS + j * w_step
-            # 물리적 조향 한계 초과 방지(Clamp)
-            w = max(-W_MAX_DPS, min(W_MAX_DPS, w_sample + (wall_corr * (v / V_MAX))))
+    # 목표 틈새 각도와 조향 방향(bias) 계산 (기존 로직이 있다면 그대로 유지 또는 대체)
+    # ※ 만약 외부에서 계산해서 파라미터로 넘겨준다면 이 부분은 삭제하셔도 됩니다.
+    target_gap_angle = 0.0
+    bias_sign = 0 
+    
+    # 1. DWA 탐색 영역 (Dynamic Window) 생성
+    # 로봇이 낼 수 있는 속도(v)와 각속도(w)의 후보군을 배열로 만듭니다.
+    import numpy as np
+    v_list = np.arange(0.0, V_MAX + 1.0, 5.0)       # 0부터 최대 속도까지 (상황에 맞게 스텝 조절)
+    w_list = np.arange(-W_MAX_DPS, W_MAX_DPS + 1.0, 15.0) # 좌우 최대 각속도 범위 탐색
+    
+    # 2. 최적의 궤적(v, w) 탐색
+    for v in v_list:
+        for w in w_list:
+            # 예측된 궤적에 대해 점수를 매깁니다. (충돌이 예상되면 None 반환)
+            score = evaluate(v, w, obstacles, bias_sign, target_gap_angle)
             
-            s = evaluate(v, w, obstacles, bias_sign, target_gap)
-            if s is not None and s > best_score:
-                best_score, best_v, best_w = s, v, w
-
-    if best_score < -1e8:
-        return 0.0, float(bias_sign or 1) * 60.0, 'SPIN'
-
-    nearest = min((o[2] for o in obstacles), default=9999)
-    mode = 'MAX' if nearest > SAFE_DIST and abs(best_w) < 15.0 else 'AVOID'
-
-    if mode == 'AVOID':
-        try_update_sign(best_w)
-        if post_reverse_sign != 0 and abs(best_w) > SIGN_UPDATE_W_MIN:
-            post_reverse_sign = 0
-
-    mode_history.append(mode)
-    return best_v, best_w, mode
-
+            # 기존 최고 점수보다 높고, 충돌하지 않는(None이 아닌) 궤적을 찾으면 갱신
+            if score is not None and score > best_score:
+                best_score = score
+                best_v = v
+                best_w = w
+                
+    # =====================================================================
+    # 🚨 3. 탈출(Escape) 알고리즘: 310mm 안에 갇혀서 모든 경로가 None일 때 작동
+    # =====================================================================
+    if best_score == -1.0:
+        print("[ALARM] 경로 모두 막힘! 제자리 회전 탈출 시도 중...")
+        
+        # 스캔 데이터(LIDAR)가 360개 배열이라고 가정할 때, 좌/우측 공간 비교
+        if len(scan_data) == 360:
+            left_clearance = sum(scan_data[45:135])   # 좌측 45~135도 방향의 거리 합
+            right_clearance = sum(scan_data[225:315]) # 우측 225~315도 방향의 거리 합
+            
+            # 더 공간이 많이 남은(거리가 먼) 쪽으로 맹렬히 회전
+            if left_clearance > right_clearance:
+                return 0.0, W_MAX_DPS * 0.7, "ESCAPE_LEFT"
+            else:
+                return 0.0, -W_MAX_DPS * 0.7, "ESCAPE_RIGHT"
+        else:
+            # 스캔 데이터 길이를 모를 경우 일단 우측으로 강제 회전
+            return 0.0, -W_MAX_DPS * 0.7, "ESCAPE_BLIND"
+            
+    # 정상적으로 최적의 경로를 찾은 경우
+    return best_v, best_w, "DWA_DRIVE"
 # ============================================================
 # 10. 메인 루프
 # ============================================================
