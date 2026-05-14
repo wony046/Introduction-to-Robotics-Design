@@ -70,10 +70,11 @@ def generate_vw_window(current_v, current_w):
 
 def check_collision_and_clearance(v_m_s, w_rad_s, scan_points, predict_t=1.0, step=0.2):
     v_mm_s = v_m_s * 1000.0
-    max_dist = abs(v_mm_s * predict_t) + max(ROBOT_FRONT, ROBOT_BACK) + MARGIN + 100
     
-    # ★ 수정 1: 수학적 거울 반전(Mirroring) 해결
-    # 라이다의 회전 방향(시계)과 수학의 회전 방향(반시계)을 맞추기 위해 Y축(sin)에 마이너스(-) 부호 적용
+    # ★ 수식 문제 완벽 해결: v속도에 따라 시야를 좁히던 "치트" 연산 삭제!
+    # 모든 시뮬레이션(v=0이든 v=0.35든)이 똑같이 1.2미터(1200mm) 앞까지 공평하게 검사하도록 고정합니다.
+    max_dist = 1200.0 
+    
     local_pts = [(dist * math.cos(math.radians(ang)), -dist * math.sin(math.radians(ang))) 
                  for ang, dist in scan_points if 0 < dist <= max_dist]
                  
