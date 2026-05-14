@@ -36,9 +36,9 @@ W_SMOOTH         = 0.6
 # 각 측면 하위 5% 거리 → 선형 weight → 차분으로 w_side 생성
 SIDE_D_MIN       = 150   # mm: 이 미만 → weight = 1.0 (최대 보정)
 SIDE_D_MAX       = 400   # mm: 이 이상 → weight = 0.0 (보정 없음)
-SIDE_W_GAIN      = 1.5   # rad/s: |weight_R - weight_L| = 1일 때 회전 게인
+SIDE_W_GAIN      = 1.0   # rad/s: |weight_R - weight_L| = 1일 때 회전 게인
 SIDE_V_REDUCE    = 0.5   # max_weight=1.0일 때 선속도 50% 감속
-SIDE_PERCENTILE  = 5     # %: 하위 N% 거리 평균을 측면 대표값으로 사용
+SIDE_PERCENTILE  = 10     # %: 하위 N% 거리 평균을 측면 대표값으로 사용
 
 # ── 근접 후보 (방법 A) ────────────────────────────────────────────────────────
 PROXIMITY_HORIZ = 170    # mm: danger zone(140mm) 밖이어도 이 이내면 ref 후보 포함
