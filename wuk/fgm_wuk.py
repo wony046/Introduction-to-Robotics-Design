@@ -12,7 +12,7 @@ import math
 LIDAR_PORT       = "/dev/ttyUSB0"
 ARDUINO_PORT     = "/dev/ttyAMA3"
 BAUDRATE_LIDAR   = 460800
-BAUDRATE_ARDUINO = 115200
+BAUDRATE_ARDUINO = 9600
 
 # ── FGM 알고리즘 파라미터 ──────────────────────────────────────────────────────
 ROBOT_RADIUS     = 130   # mm: 로봇 절반 너비(110) + 안전 마진(20)
