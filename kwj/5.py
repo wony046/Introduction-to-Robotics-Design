@@ -14,10 +14,10 @@ ESCAPE_SPEED = 0
 STEER_GAIN = 1.3         
 SMOOTHING_FACTOR = 0.5   
 
-# ★ 극도로 타이트해진 측면 최소 마진 1.5cm (15mm)
 MARGIN = 15            
-ROBOT_FRONT = 115 + MARGIN  # 130mm
-ROBOT_SIDE = 105 + MARGIN   # 120mm (이 선을 넘으면 충돌로 간주)
+ROBOT_FRONT = 115 + MARGIN  
+ROBOT_SIDE = 105 + MARGIN   
+ROBOT_REAR = 130 + MARGIN   
 
 SAFE_RADIUS = 300      
 DANGER_RADIUS = 50     
@@ -46,7 +46,6 @@ def calculate_steering(scan_data):
     left_wall_min = 9999
     right_wall_min = 9999
 
-    # [1] 데이터 파싱 및 거리 분류
     for angle, distance in scan_data:
         if angle > 180: angle -= 360
         if -135 <= angle <= 135 and distance > 0:
@@ -61,12 +60,10 @@ def calculate_steering(scan_data):
             x = distance * math.cos(rad)
             y = distance * math.sin(rad)
             
-            # 전방 궤적 확인 (차폭 120mm 기준)
             if x > 0 and abs(y) <= ROBOT_SIDE:
                 if x < front_clear_dist:
                     front_clear_dist = x
                     
-            # 측면 거리 확인 (전방 40cm, 후방 10cm 구역)
             if -100 < x < 400:
                 if 10 <= angle <= 130:     
                     if y < left_wall_min: left_wall_min = y
@@ -84,34 +81,39 @@ def calculate_steering(scan_data):
     right_vol = sum(min(bins.get(a, 1000), 1000) for a in range(-90, 0, 5))
 
     # ========================================================
-    # [3] 방향 결정: ★ 순수 차등 P-제어 (Differential P-Control) ★
+    # [3] 방향 결정: ★ 골목길 데드존 + 둔감화 로직 ★
     # ========================================================
-    
-    # 1. 계산의 일관성을 위해 너무 먼 거리는 400mm로 캡핑(Capping)
     eff_left = min(left_wall_min, 400)
     eff_right = min(right_wall_min, 400)
-    
-    # 2. 오차 계산: 왼쪽 공간과 오른쪽 공간의 차이
-    # diff가 양수면 왼쪽이 더 넓음 -> 좌회전(+) 필요
-    # diff가 음수면 오른쪽이 더 넓음 -> 우회전(-) 필요
     diff = eff_left - eff_right
     
-    # 3. 비례 제어 (P-Gain = 0.3)
-    target_ideal_angle = diff * 0.3  
+    # 1. 좁은 골목길(Tunnel) 감지: 양쪽 벽이 모두 200mm 이내일 때
+    in_narrow_alley = (eff_left < 200 and eff_right < 200)
+
+    # 2. 데드존(Deadzone): 양쪽 오차가 3cm(30mm) 이내면 "완벽한 중앙"으로 간주
+    if abs(diff) < 30:
+        diff = 0
+
+    # 3. 동적 P-Gain: 골목길에서는 민감도를 확 낮춰서 와리가리 차단
+    p_gain = 0.15 if in_narrow_alley else 0.35
+    target_ideal_angle = diff * p_gain  
     
-    # 4. [초비상 마진 1.5cm 방어] 물리적으로 긁히기 직전(125mm 이하)일 때만 강제 회피!
-    if right_wall_min < ROBOT_SIDE + 5: # 120 + 5 = 125mm
-        target_ideal_angle += (125 - right_wall_min) * 2.0
-    if left_wall_min < ROBOT_SIDE + 5:
-        target_ideal_angle -= (125 - left_wall_min) * 2.0
-        
-    target_ideal_angle = max(-65, min(65, target_ideal_angle))
+    # 4. 비상 회피 마진 억제: 골목길에서는 호들갑 떨지 않고 직진 유지!
+    if not in_narrow_alley:
+        if right_wall_min < ROBOT_SIDE + 5: 
+            target_ideal_angle += (125 - right_wall_min) * 2.0
+        if left_wall_min < ROBOT_SIDE + 5:
+            target_ideal_angle -= (125 - left_wall_min) * 2.0
+            
+    # 5. 조향 한계 제한: 골목길에서는 핸들을 15도 이상 꺾지 못하게 강제 (엉덩이 충돌 방지)
+    if in_narrow_alley:
+        target_ideal_angle = max(-15, min(15, target_ideal_angle))
+    else:
+        target_ideal_angle = max(-65, min(65, target_ideal_angle))
     
-    # 소프트 관성(Low-Pass Filter)
     ideal_angle = (0.35 * target_ideal_angle) + (0.65 * last_ideal_angle)
     last_ideal_angle = ideal_angle
 
-    # [스코어링 - 이제 로봇은 맹목적으로 ideal_angle을 추종합니다]
     best_angle = 0
     min_score = float('inf')
     
@@ -119,25 +121,21 @@ def calculate_steering(scan_data):
         dist = bins[angle]
         raw_dist = min(dist, 1000)
         
-        # 기본 거리 확보 점수
         score = 2000 - (raw_dist * 2.0)
-        
-        # ★ P-제어로 계산된 '가장 완벽한 중앙선(ideal_angle)'을 강하게 추종
         score += abs(angle - ideal_angle) * 3.5 
         
-        # 거시적 공간 중력 보너스
         if left_vol > right_vol + 2000 and angle > 0: score -= 300
         elif right_vol > left_vol + 2000 and angle < 0: score -= 300
         
-        # 틈새 보너스
         for gap_angle in gaps:
             if abs(angle - gap_angle) <= 10:
                 score -= 600 
                 
-        # 절대 히트박스 페널티 (차폭 120mm 이내의 충돌 궤적 차단)
         rad = math.radians(angle)
         x = raw_dist * math.cos(rad)
         y = raw_dist * math.sin(rad)
+        
+        # 물리적 히트박스 페널티
         if (abs(y) <= ROBOT_SIDE) and (x <= ROBOT_FRONT):
             score += 8000 
 
@@ -146,7 +144,7 @@ def calculate_steering(scan_data):
             best_angle = angle
 
     # ========================================================
-    # [4] 속도 결정 (순수 거리 기반)
+    # [4] 속도 결정
     # ========================================================
     if min_score >= 8000:
         speed = SPEED_REVERSE
@@ -183,7 +181,7 @@ def main():
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
-    print("[INFO] 차등 오차 P-제어(Differential P-Control) 장착 완료!")
+    print("[INFO] 골목길 둔감화(Deadzone) 적용! 핑퐁 없는 직진 시작!")
 
     scan_data = []
 
