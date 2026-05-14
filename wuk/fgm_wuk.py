@@ -19,7 +19,7 @@ BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 115200
 
 # ── FGM 알고리즘 파라미터 ──────────────────────────────────────────────────────
-ROBOT_RADIUS     = 130   # mm: 물리적 로봇 반경 (충돌 한계선)
+ROBOT_RADIUS     = 150   # mm: 물리적 로봇 반경 (충돌 한계선)
 MAX_RANGE        = 1000  # mm: 이 거리보다 멀면 완전히 뚫린 길로 간주
 # [Fix 3] SAFE_DIST: 140 → 250 (ROBOT_RADIUS + 120)
 # 이유: 140은 Inflation 후 장애물 바로 옆 10mm만 남겨 1.1m 복도에서 갭이 거의 안 잡힘.
@@ -33,7 +33,7 @@ BRAKE_START_DIST = 500   # mm: 동적 감속이 시작되는 전방 거리
 FORWARD_SPEED    = 0.40  # m/s: 직진 최고 속도
 MIN_SPEED        = 0.15  # m/s: 주행 시 유지할 최저 속도
 Kp_W             = 0.015 # 조향 P제어 게인
-MAX_W            = 2.0   # rad/s: 최대 각속도
+MAX_W            = 4.0   # rad/s: 최대 각속도
 SEND_INTERVAL    = 0.1   # 초: 명령 전송 주기
 
 # ── Deadlock 탈출 타이밍 파라미터 ─────────────────────────────────────────────
