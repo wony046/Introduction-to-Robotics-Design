@@ -1,7 +1,7 @@
 """
 RPLIDAR C1 장애물 회피 - Follow the Gap Method (FGM)
 * 경기장: 폭 1.1m x 길이 3.1m
-* 특징: Inflation 기반, 헤딩 오차 보정, 막힌 길(Trap) 필터링
+* 특징: Inflation 기반, 헤딩 오차 보정, 부드러운 연속 주행(Smooth Driving)
 """
 
 import serial
@@ -14,26 +14,27 @@ ARDUINO_PORT     = "/dev/ttyAMA3"
 BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 115200
 
-# ── FGM 알고리즘 파라미터 (★환경에 맞게 튜닝 필수★) ──────────────────────────
+# ── FGM 알고리즘 파라미터 ──────────────────────────────────────────────────────
 ROBOT_RADIUS     = 130   # mm: 로봇 절반 너비(110) + 안전 마진(20)
 MAX_RANGE        = 1000  # mm: 이 거리보다 멀면 빈 공간(Gap)으로 취급
 SAFE_DIST        = 250   # mm: 최소 통과 보장 거리 임계값
-MIN_GAP_DEPTH    = 300  # mm: 갇힘(ㄱ자) 방지. Gap 내부 최대 거리가 이보다 길어야 함
-GAP_MARGIN_DEG   = 5    # deg: 갭의 가장자리를 탈 때 추가로 띄우는 안전 각도
+MIN_GAP_DEPTH    = 300   # mm: 갇힘(ㄱ자) 방지. Gap 내부 최대 거리가 이보다 길어야 함
+GAP_MARGIN_DEG   = 5     # deg: 갭의 가장자리를 탈 때 추가로 띄우는 안전 각도
 
 # ── 속도 및 제어 파라미터 ─────────────────────────────────────────────────────
 FORWARD_SPEED    = 0.40  # m/s: 기본 직진 속도
-MIN_SPEED        = 0.20  # m/s: 회전 시 최소 속도
+MIN_SPEED        = 0.15  # m/s: 회전 시 최소 속도 (코너링을 위해 조금 낮춤)
 Kp_W             = 0.015 # 조향각(deg)을 각속도(rad/s)로 변환하는 P제어 게인
-MAX_W            = 2   # rad/s: 최대 각속도
+MAX_W            = 2.0   # rad/s: 최대 각속도
 SEND_INTERVAL    = 0.1   # 초: 아두이노 명령 전송 주기
 
 # ── 전역 상태 ─────────────────────────────────────────────────────────────────
 arduino_heading_deg = 0.0
+prev_w = 0.0  # 부드러운 조향(도리도리 방지)을 위한 이전 각속도 저장 변수
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 유틸리티 & 파서 (기존 로직 유지)
+# 유틸리티 & 파서
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def normalize_angle(angle):
@@ -68,16 +69,13 @@ def read_arduino(arduino):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def apply_fgm(scan_dict, heading_deg):
-    """
-    1. 배열화 -> 2. Inflation -> 3. Gap 추출 -> 4. 타겟 각도 선정
-    """
+    global prev_w
+
     # 1. 1D 배열화 (-90도 ~ +90도, 1도 간격)
     angles = list(range(-90, 91))
     raw_ranges = []
     for a in angles:
-        # 스캔 데이터가 없으면 안전한 빈 공간(MAX_RANGE)으로 간주
         dist = scan_dict.get(a, MAX_RANGE)
-        # 센서 노이즈(0) 처리
         if dist <= 0: dist = MAX_RANGE
         raw_ranges.append(dist)
 
@@ -85,17 +83,15 @@ def apply_fgm(scan_dict, heading_deg):
     inflated_ranges = list(raw_ranges)
     for i, dist in enumerate(raw_ranges):
         if dist < MAX_RANGE:
-            # 해당 거리에서 로봇 반경이 차지하는 각도 계산 (가까울수록 크게 부풀어오름)
             if dist > ROBOT_RADIUS:
                 spread_deg = math.degrees(math.asin(ROBOT_RADIUS / dist))
             else:
-                spread_deg = 90 # 이미 충돌 반경 안이면 최대치 팽창
+                spread_deg = 90
             
             spread_idx = int(spread_deg)
             start_idx = max(0, i - spread_idx)
             end_idx = min(len(raw_ranges) - 1, i + spread_idx)
             
-            # 팽창 범위 내의 값들을 최솟값으로 덮어씌움
             for j in range(start_idx, end_idx + 1):
                 inflated_ranges[j] = min(inflated_ranges[j], dist)
 
@@ -112,38 +108,36 @@ def apply_fgm(scan_dict, heading_deg):
     if current_gap:
         gaps.append(current_gap)
 
-    # 4. 막힌 길 필터링 (Depth Check) 및 가장 넓은 길 찾기
+    # 4. 막힌 길 필터링
     valid_gaps = []
     for gap in gaps:
-        # 이 gap 범위 내에서 실제 도달한 최대 거리 확인
         max_depth = max(raw_ranges[idx] for idx in gap)
         if max_depth >= MIN_GAP_DEPTH:
             valid_gaps.append(gap)
 
-    # 길이 모두 막혔을 경우 제자리 회전 또는 정지
+    # 길이 모두 막혔을 경우 (안전 최우선 제자리 회전)
     if not valid_gaps:
-        print("  [경고] 진행 가능한 Gap이 없습니다! 제자리 대기.")
-        return 0.0, MAX_W if heading_deg < 0 else -MAX_W
+        print("  [경고] 진행 가능한 Gap이 없습니다! 탐색 회전.")
+        v = 0.0
+        w = MAX_W if heading_deg < 0 else -MAX_W
+        prev_w = w
+        return v, w
 
-    # 글로벌 목표는 0도 (직진). 현재 로봇 기준 목적지 방향(로컬)
     target_angle_local = -heading_deg
     
-    # 5. 최적의 조향각(Target Angle) 계산
+    # 5. 최적의 조향각 계산
     best_target_angle = 0
     min_cost = float('inf')
 
     for gap in valid_gaps:
-        # 배열 인덱스를 실제 각도로 변환
         gap_start_angle = angles[gap[0]]
         gap_end_angle = angles[gap[-1]]
         
-        # 기하학적 투영: 목적지 방향이 Gap '안'에 있다면 그대로 직진!
         if gap_start_angle <= target_angle_local <= gap_end_angle:
             best_target_angle = target_angle_local
             min_cost = 0 
-            break # 완벽한 길이므로 더 이상 찾을 필요 없음
+            break
 
-        # 목적지가 Gap 밖에 있다면, Gap의 양 끝단 중 목적지와 가까운 곳 선택
         dist_to_start = abs(target_angle_local - gap_start_angle)
         dist_to_end = abs(target_angle_local - gap_end_angle)
         
@@ -157,16 +151,41 @@ def apply_fgm(scan_dict, heading_deg):
             min_cost = cost
             best_target_angle = candidate_angle
 
-    # 6. v, w 제어량 계산
-    # 목표 방향과 현재 방향의 차이가 크면 감속, 직선에 가까우면 가속
-    heading_error = best_target_angle
-    w = heading_error * Kp_W
-    w = max(min(w, MAX_W), -MAX_W) # 제한
+    # ─────────────────────────────────────────────────────────────────
+    # 6. 부드러운 주행을 위한 v, w 제어량 계산 (Smooth Control)
+    # ─────────────────────────────────────────────────────────────────
     
-    speed_factor = max(0.0, 1.0 - abs(heading_error) / 45.0) # 45도 이상 꺾이면 최저속도
-    v = MIN_SPEED + (FORWARD_SPEED - MIN_SPEED) * speed_factor
+    # [조향 제어] P제어 및 로우패스 필터 (진동 방지)
+    heading_error = best_target_angle
+    w_target = heading_error * Kp_W
+    w_target = max(min(w_target, MAX_W), -MAX_W)
+    
+    w = 0.6 * w_target + 0.4 * prev_w
+    prev_w = w
 
-    print(f"  [FGM] 목적지방향: {target_angle_local:.1f}° | 조향결정: {best_target_angle:.1f}° | v: {v:.2f}, w: {w:.2f}")
+    # [전방 거리 확인] 로봇 정면(-15도 ~ +15도)의 최단 거리 측정
+    front_dists = [scan_dict.get(a, MAX_RANGE) for a in range(-15, 16) if a in scan_dict]
+    min_front_dist = min(front_dists) if front_dists else MAX_RANGE
+
+    # [선속도 제어]
+    # 1. 조향각에 의한 감속 비율 (크게 꺾어야 하면 감속)
+    angle_speed_factor = max(0.0, 1.0 - abs(heading_error) / 45.0)
+
+    # 2. 전방 거리에 의한 감속 비율 
+    # 500mm부터 부드럽게 감속을 시작하되, 130mm에 도달할 때까지 속도가 서서히 0에 수렴하도록 변경
+    dist_speed_factor = max(0.0, min(1.0, (min_front_dist - 130) / 370.0))
+
+    # 두 가지 감속 요인 중 더 강한(값이 작은) 요인을 채택
+    final_speed_factor = min(angle_speed_factor, dist_speed_factor)
+    
+    # 최종 속도 계산
+    v = MIN_SPEED + (FORWARD_SPEED - MIN_SPEED) * final_speed_factor
+
+    # [최후의 보루] 로봇의 최소 반경인 130mm 이내로 들어오면 물리적 충돌 직전이므로 즉시 정지
+    if min_front_dist <= 130:
+        v = 0.0
+
+    print(f"  [FGM] 조향결정: {best_target_angle:5.1f}° | 전방거리: {min_front_dist:4.0f}mm | v: {v:.2f}, w: {w:.2f}")
     return v, w
 
 
@@ -181,7 +200,6 @@ def main():
     arduino = serial.Serial(ARDUINO_PORT, BAUDRATE_ARDUINO, timeout=1)
     time.sleep(2)
 
-    # 라이다 스캔 시작
     lidar.write(bytes([0xA5, 0x40]))
     time.sleep(1)
     lidar.write(bytes([0xA5, 0x20]))
@@ -201,14 +219,11 @@ def main():
             angle_raw, distance = result
             s_flag = raw[0] & 0x01
             
-            # 각도를 -180 ~ +180으로 정규화
             norm_angle = normalize_angle(angle_raw)
             
-            # 전방 180도 데이터만 수집 (반올림하여 딕셔너리에 저장)
             if -90 <= norm_angle <= 90:
                 scan_dict[int(round(norm_angle))] = distance
 
-            # 새로운 스캔 사이클이 시작될 때마다 연산 및 전송
             if s_flag == 1:
                 now = time.time()
                 if now - last_send >= SEND_INTERVAL:
