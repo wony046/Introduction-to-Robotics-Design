@@ -71,8 +71,8 @@ def read_arduino(arduino):
 def apply_fgm(scan_dict, heading_deg):
     global prev_w
 
-    # 1. 1D 배열화 (-90도 ~ +90도, 1도 간격)
-    angles = list(range(-90, 91))
+    # 1. 1D 배열화 (-120도 ~ +120도, 1도 간격)
+    angles = list(range(-120, 121))
     raw_ranges = []
     for a in angles:
         dist = scan_dict.get(a, MAX_RANGE)
@@ -146,7 +146,14 @@ def apply_fgm(scan_dict, heading_deg):
         else:
             candidate_angle = gap_end_angle - GAP_MARGIN_DEG
             
-        cost = abs(target_angle_local - candidate_angle)
+        # [여기부터 수정!] 
+        # 틈새의 양 끝 각도를 빼서 '길의 너비'를 구합니다.
+        gap_width = gap_end_angle - gap_start_angle 
+        
+        # 비용(Cost) 계산 시, 너비가 넓을수록 오차를 깎아주는(용서해주는) 가중치를 적용합니다.
+        # 가중치 0.8 : 틈새가 1도 넓을 때마다 각도 오차를 0.8도 줄여줌. (넓은 길 압도적 선호)
+        cost = abs(target_angle_local - candidate_angle) - (gap_width * 0.8)
+        
         if cost < min_cost:
             min_cost = cost
             best_target_angle = candidate_angle
@@ -221,7 +228,7 @@ def main():
             
             norm_angle = normalize_angle(angle_raw)
             
-            if -90 <= norm_angle <= 90:
+            if -120 <= norm_angle <= 120:
                 scan_dict[int(round(norm_angle))] = distance
 
             if s_flag == 1:
