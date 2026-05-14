@@ -1,7 +1,11 @@
 """
-RPLIDAR C1 장애물 회피 - Follow the Gap Method (FGM)
+RPLIDAR C1 장애물 회피 - Follow the Gap Method (FGM) PRO v2
 * 경기장: 폭 1.1m x 길이 3.1m
-* 특징: Inflation 기반, 헤딩 오차 보정, 부드러운 연속 주행(Smooth Driving)
+* 적용: 240도 광각 시야, 동적 전방 감시, 3단계 탈출 머신, 넓은 길 우대 알고리즘
+* v2 수정 사항:
+    [Fix 1] raw_ranges ZeroDivisionError 방어 코드 추가
+    [Fix 2] Deadlock Phase 3 무한 재진입 버그 수정 (쿨다운 변수 도입)
+    [Fix 3] SAFE_DIST 140 → 250 (ROBOT_RADIUS + 120)으로 현실화
 """
 
 import serial
@@ -15,26 +19,42 @@ BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 115200
 
 # ── FGM 알고리즘 파라미터 ──────────────────────────────────────────────────────
-ROBOT_RADIUS     = 130   # mm: 로봇 절반 너비(110) + 안전 마진(20)
-MAX_RANGE        = 1000  # mm: 이 거리보다 멀면 빈 공간(Gap)으로 취급
-SAFE_DIST        = 250   # mm: 최소 통과 보장 거리 임계값
-MIN_GAP_DEPTH    = 300   # mm: 갇힘(ㄱ자) 방지. Gap 내부 최대 거리가 이보다 길어야 함
-GAP_MARGIN_DEG   = 5     # deg: 갭의 가장자리를 탈 때 추가로 띄우는 안전 각도
+ROBOT_RADIUS     = 130   # mm: 물리적 로봇 반경 (충돌 한계선)
+MAX_RANGE        = 1000  # mm: 이 거리보다 멀면 완전히 뚫린 길로 간주
+# [Fix 3] SAFE_DIST: 140 → 250 (ROBOT_RADIUS + 120)
+# 이유: 140은 Inflation 후 장애물 바로 옆 10mm만 남겨 1.1m 복도에서 갭이 거의 안 잡힘.
+#       로봇 한쪽 여유 12cm(=ROBOT_RADIUS + 120)이 현실적인 안전 기준.
+SAFE_DIST        = ROBOT_RADIUS + 120  # = 250mm
+MIN_GAP_DEPTH    = 300   # mm: ㄱ자 함정 방지 (갭의 최대 깊이가 이보다 깊어야 함)
+GAP_MARGIN_DEG   = 5     # deg: 장애물 가장자리에서 띄울 여유 각도
+BRAKE_START_DIST = 500   # mm: 동적 감속이 시작되는 전방 거리
 
 # ── 속도 및 제어 파라미터 ─────────────────────────────────────────────────────
-FORWARD_SPEED    = 0.40  # m/s: 기본 직진 속도
-MIN_SPEED        = 0.15  # m/s: 회전 시 최소 속도 (코너링을 위해 조금 낮춤)
-Kp_W             = 0.015 # 조향각(deg)을 각속도(rad/s)로 변환하는 P제어 게인
+FORWARD_SPEED    = 0.40  # m/s: 직진 최고 속도
+MIN_SPEED        = 0.15  # m/s: 주행 시 유지할 최저 속도
+Kp_W             = 0.015 # 조향 P제어 게인
 MAX_W            = 2.0   # rad/s: 최대 각속도
-SEND_INTERVAL    = 0.1   # 초: 아두이노 명령 전송 주기
+SEND_INTERVAL    = 0.1   # 초: 명령 전송 주기
 
-# ── 전역 상태 ─────────────────────────────────────────────────────────────────
-arduino_heading_deg = 0.0
-prev_w = 0.0  # 부드러운 조향(도리도리 방지)을 위한 이전 각속도 저장 변수
+# ── Deadlock 탈출 타이밍 파라미터 ─────────────────────────────────────────────
+DEADLOCK_ROTATE_DURATION  = 1.5  # 초: Phase 1 탐색 회전 지속 시간
+DEADLOCK_REVERSE_DURATION = 1.0  # 초: Phase 2 후진 지속 시간 (0.5s → 1.0s로 여유 증가)
+# [Fix 2] 쿨다운: Phase 3 리셋 직후 재진입 방지 대기 시간
+DEADLOCK_COOLDOWN_SEC     = 1.0  # 초
+
+# ── 전역 상태 관리 ─────────────────────────────────────────────────────────────
+arduino_heading_deg   = 0.0
+prev_w                = 0.0    # 조향 스무딩 용도
+
+# Deadlock State Machine 변수
+deadlock_start        = None   # Phase 시작 타임스탬프
+deadlock_phase        = 0      # 0: 정상, 1: 탐색 회전, 2: 후진
+# [Fix 2] 쿨다운 만료 시각 (이 시각 이전에는 Deadlock 재진입 차단)
+deadlock_cooldown_until = 0.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 유틸리티 & 파서
+# 유틸리티 & 패킷 파서
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def normalize_angle(angle):
@@ -42,15 +62,15 @@ def normalize_angle(angle):
 
 def parse_packet(data):
     if len(data) != 5: return None
-    s_flag = data[0] & 0x01
+    s_flag     = data[0] & 0x01
     s_inv_flag = (data[0] & 0x02) >> 1
     if s_inv_flag != (1 - s_flag): return None
     if (data[1] & 0x01) != 1: return None
-    
-    angle_q6 = (data[1] >> 1) | (data[2] << 7)
-    angle = angle_q6 / 64.0
+
+    angle_q6   = (data[1] >> 1) | (data[2] << 7)
+    angle      = angle_q6 / 64.0
     distance_q2 = data[3] | (data[4] << 8)
-    distance = distance_q2 / 4.0
+    distance   = distance_q2 / 4.0
     return angle, distance
 
 def read_arduino(arduino):
@@ -69,33 +89,35 @@ def read_arduino(arduino):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def apply_fgm(scan_dict, heading_deg):
-    global prev_w
+    global prev_w, deadlock_start, deadlock_phase, deadlock_cooldown_until
 
-    # 1. 1D 배열화 (-120도 ~ +120도, 1도 간격)
+    # ── 1. 1D 배열화 (-120° ~ +120°, 240° 광각 시야) ─────────────────────────
     angles = list(range(-120, 121))
     raw_ranges = []
     for a in angles:
         dist = scan_dict.get(a, MAX_RANGE)
-        if dist <= 0: dist = MAX_RANGE
+        # [Fix 1] dist가 0이면 MAX_RANGE로 대체 → Inflation에서 ZeroDivisionError 방지
+        if dist <= 0:
+            dist = MAX_RANGE
         raw_ranges.append(dist)
 
-    # 2. 장애물 팽창 (Inflation)
+    # ── 2. 장애물 팽창 (Inflation) ────────────────────────────────────────────
     inflated_ranges = list(raw_ranges)
     for i, dist in enumerate(raw_ranges):
         if dist < MAX_RANGE:
             if dist > ROBOT_RADIUS:
                 spread_deg = math.degrees(math.asin(ROBOT_RADIUS / dist))
             else:
-                spread_deg = 90
-            
-            spread_idx = int(spread_deg)
-            start_idx = max(0, i - spread_idx)
-            end_idx = min(len(raw_ranges) - 1, i + spread_idx)
-            
+                spread_deg = 120  # 충돌 반경 내부 → 좌우 완전 차단
+
+            spread_idx = math.ceil(spread_deg)  # 올림으로 보수적 팽창
+            start_idx  = max(0, i - spread_idx)
+            end_idx    = min(len(raw_ranges) - 1, i + spread_idx)
+
             for j in range(start_idx, end_idx + 1):
                 inflated_ranges[j] = min(inflated_ranges[j], dist)
 
-    # 3. Gap(빈 공간) 찾기
+    # ── 3. Gap(빈 공간) 탐색 ─────────────────────────────────────────────────
     gaps = []
     current_gap = []
     for i, dist in enumerate(inflated_ranges):
@@ -108,91 +130,122 @@ def apply_fgm(scan_dict, heading_deg):
     if current_gap:
         gaps.append(current_gap)
 
-    # 4. 막힌 길 필터링
+    # ── 4. ㄱ자 함정 갭 필터링 (Depth 조건) ──────────────────────────────────
     valid_gaps = []
     for gap in gaps:
         max_depth = max(raw_ranges[idx] for idx in gap)
         if max_depth >= MIN_GAP_DEPTH:
             valid_gaps.append(gap)
 
-    # 길이 모두 막혔을 경우 (안전 최우선 제자리 회전)
+    # ── Deadlock 3단계 탈출 정책 ──────────────────────────────────────────────
     if not valid_gaps:
-        print("  [경고] 진행 가능한 Gap이 없습니다! 탐색 회전.")
-        v = 0.0
-        w = MAX_W if heading_deg < 0 else -MAX_W
-        prev_w = w
-        return v, w
+        now = time.time()
 
+        # [Fix 2] 쿨다운 중이면 회전만 유지하고 상태 재진입 차단
+        if now < deadlock_cooldown_until:
+            print(f"  [Deadlock] 쿨다운 중... ({deadlock_cooldown_until - now:.1f}s 남음)")
+            return 0.0, MAX_W
+
+        if deadlock_start is None:
+            deadlock_start = now
+            deadlock_phase = 1
+
+        elapsed = now - deadlock_start
+        print(f"  [경고] Deadlock! Phase {deadlock_phase} ({elapsed:.1f}s)")
+
+        if elapsed < DEADLOCK_ROTATE_DURATION:
+            # Phase 1: 더 트인 쪽으로 탐색 회전
+            left_max  = max([raw_ranges[i] for i, a in enumerate(angles) if  10 <= a <= 120], default=0)
+            right_max = max([raw_ranges[i] for i, a in enumerate(angles) if -120 <= a <= -10], default=0)
+            w = MAX_W if left_max > right_max else -MAX_W
+            prev_w = w
+            return 0.0, w
+
+        elif elapsed < DEADLOCK_ROTATE_DURATION + DEADLOCK_REVERSE_DURATION:
+            # Phase 2: 후진으로 공간 확보
+            deadlock_phase = 2
+            prev_w = 0.0
+            return -0.20, 0.0
+
+        else:
+            # Phase 3: 상태 리셋 + 쿨다운 설정 → 즉시 재진입 방지
+            # [Fix 2] cooldown_until을 설정해야 다음 프레임에 Phase 1로 재진입하지 않음
+            deadlock_start          = None
+            deadlock_phase          = 0
+            deadlock_cooldown_until = time.time() + DEADLOCK_COOLDOWN_SEC
+            prev_w                  = MAX_W
+            print("  [Deadlock] Phase 3: 리셋 완료, 쿨다운 시작")
+            return 0.0, MAX_W
+
+    else:
+        # 정상 주행 가능 → Deadlock 상태 전체 초기화
+        deadlock_start          = None
+        deadlock_phase          = 0
+        deadlock_cooldown_until = 0.0
+
+    # ── 5. 최적 조향각 계산 (클램프 기반 너비 보너스) ──────────────────────────
     target_angle_local = -heading_deg
-    
-    # 5. 최적의 조향각 계산
-    best_target_angle = 0
-    min_cost = float('inf')
+    best_target_angle  = 0
+    min_cost           = float('inf')
 
     for gap in valid_gaps:
         gap_start_angle = angles[gap[0]]
-        gap_end_angle = angles[gap[-1]]
-        
+        gap_end_angle   = angles[gap[-1]]
+
+        # 목표 방향이 갭 내부에 있으면 즉시 채택
         if gap_start_angle <= target_angle_local <= gap_end_angle:
             best_target_angle = target_angle_local
-            min_cost = 0 
+            min_cost = 0
             break
 
         dist_to_start = abs(target_angle_local - gap_start_angle)
-        dist_to_end = abs(target_angle_local - gap_end_angle)
-        
-        if dist_to_start < dist_to_end:
-            candidate_angle = gap_start_angle + GAP_MARGIN_DEG
-        else:
-            candidate_angle = gap_end_angle - GAP_MARGIN_DEG
-            
-        # [여기부터 수정!] 
-        # 틈새의 양 끝 각도를 빼서 '길의 너비'를 구합니다.
-        gap_width = gap_end_angle - gap_start_angle 
-        
-        # 비용(Cost) 계산 시, 너비가 넓을수록 오차를 깎아주는(용서해주는) 가중치를 적용합니다.
-        # 가중치 0.8 : 틈새가 1도 넓을 때마다 각도 오차를 0.8도 줄여줌. (넓은 길 압도적 선호)
-        cost = abs(target_angle_local - candidate_angle) - (gap_width * 0.8)
-        
+        dist_to_end   = abs(target_angle_local - gap_end_angle)
+
+        candidate_angle = (gap_start_angle + GAP_MARGIN_DEG
+                           if dist_to_start < dist_to_end
+                           else gap_end_angle - GAP_MARGIN_DEG)
+
+        gap_width      = gap_end_angle - gap_start_angle
+        raw_cost       = abs(target_angle_local - candidate_angle)
+        # 너비 보너스: 오차의 90% 이상은 깎지 못하도록 상한 적용 → cost 음수 역전 방지
+        width_discount = min(raw_cost * 0.9, gap_width * 0.5)
+        cost           = raw_cost - width_discount
+
         if cost < min_cost:
-            min_cost = cost
+            min_cost          = cost
             best_target_angle = candidate_angle
 
-    # ─────────────────────────────────────────────────────────────────
-    # 6. 부드러운 주행을 위한 v, w 제어량 계산 (Smooth Control)
-    # ─────────────────────────────────────────────────────────────────
-    
-    # [조향 제어] P제어 및 로우패스 필터 (진동 방지)
-    heading_error = best_target_angle
-    w_target = heading_error * Kp_W
+    # ── 6. v, w 제어량 계산 ───────────────────────────────────────────────────
+
+    # 조향 제어 (P 게인 + 로우패스 필터)
+    w_target = best_target_angle * Kp_W
     w_target = max(min(w_target, MAX_W), -MAX_W)
-    
-    w = 0.6 * w_target + 0.4 * prev_w
-    prev_w = w
+    w        = 0.6 * w_target + 0.4 * prev_w
+    prev_w   = w
 
-    # [전방 거리 확인] 로봇 정면(-15도 ~ +15도)의 최단 거리 측정
-    front_dists = [scan_dict.get(a, MAX_RANGE) for a in range(-15, 16) if a in scan_dict]
-    min_front_dist = min(front_dists) if front_dists else MAX_RANGE
+    # 동적 전방 감시 (로봇 폭 기반 삼각함수 판별)
+    min_front_dist = MAX_RANGE
+    for a, d in scan_dict.items():
+        if d <= 0: continue
+        lateral_dist = d * abs(math.sin(math.radians(a)))
+        if lateral_dist <= ROBOT_RADIUS:
+            frontal_dist = d * math.cos(math.radians(a))
+            if frontal_dist > 0:
+                min_front_dist = min(min_front_dist, frontal_dist)
 
-    # [선속도 제어]
-    # 1. 조향각에 의한 감속 비율 (크게 꺾어야 하면 감속)
-    angle_speed_factor = max(0.0, 1.0 - abs(heading_error) / 45.0)
-
-    # 2. 전방 거리에 의한 감속 비율 
-    # 500mm부터 부드럽게 감속을 시작하되, 130mm에 도달할 때까지 속도가 서서히 0에 수렴하도록 변경
-    dist_speed_factor = max(0.0, min(1.0, (min_front_dist - 130) / 370.0))
-
-    # 두 가지 감속 요인 중 더 강한(값이 작은) 요인을 채택
+    # 선속도 제어 (파라미터 연동)
+    angle_speed_factor = max(0.0, 1.0 - abs(best_target_angle) / 45.0)
+    dist_speed_factor  = max(0.0, min(1.0,
+        (min_front_dist - ROBOT_RADIUS) / (BRAKE_START_DIST - ROBOT_RADIUS)
+    ))
     final_speed_factor = min(angle_speed_factor, dist_speed_factor)
-    
-    # 최종 속도 계산
     v = MIN_SPEED + (FORWARD_SPEED - MIN_SPEED) * final_speed_factor
 
-    # [최후의 보루] 로봇의 최소 반경인 130mm 이내로 들어오면 물리적 충돌 직전이므로 즉시 정지
-    if min_front_dist <= 130:
+    # 최후의 물리적 충돌 방지 브레이크
+    if min_front_dist <= ROBOT_RADIUS:
         v = 0.0
 
-    print(f"  [FGM] 조향결정: {best_target_angle:5.1f}° | 전방거리: {min_front_dist:4.0f}mm | v: {v:.2f}, w: {w:.2f}")
+    print(f"  [FGM] 조향: {best_target_angle:5.1f}° | 전방거리: {min_front_dist:4.0f}mm | v: {v:.2f}, w: {w:.2f}")
     return v, w
 
 
@@ -201,9 +254,9 @@ def apply_fgm(scan_dict, heading_deg):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def main():
-    print("=== RPi FGM Navigation Started ===")
-    
-    lidar = serial.Serial(LIDAR_PORT, BAUDRATE_LIDAR, timeout=1)
+    print("=== RPi FGM PRO v2 Navigation Started ===")
+
+    lidar   = serial.Serial(LIDAR_PORT,   BAUDRATE_LIDAR,   timeout=1)
     arduino = serial.Serial(ARDUINO_PORT, BAUDRATE_ARDUINO, timeout=1)
     time.sleep(2)
 
@@ -219,24 +272,27 @@ def main():
         while True:
             read_arduino(arduino)
 
-            raw = lidar.read(5)
+            raw    = lidar.read(5)
             result = parse_packet(raw)
             if result is None: continue
 
             angle_raw, distance = result
             s_flag = raw[0] & 0x01
-            
+
             norm_angle = normalize_angle(angle_raw)
-            
-            if -120 <= norm_angle <= 120:
-                scan_dict[int(round(norm_angle))] = distance
+
+            # 240° 범위 내, 유효한 값만 최솟값으로 저장
+            if -120 <= norm_angle <= 120 and distance > 0:
+                angle_key = int(round(norm_angle))
+                if angle_key not in scan_dict or distance < scan_dict[angle_key]:
+                    scan_dict[angle_key] = distance
 
             if s_flag == 1:
                 now = time.time()
                 if now - last_send >= SEND_INTERVAL:
                     if scan_dict:
                         v, w = apply_fgm(scan_dict, arduino_heading_deg)
-                        cmd = f"{v:.2f} {w:.2f}\n"
+                        cmd  = f"{v:.2f} {w:.2f}\n"
                         arduino.write(cmd.encode())
                         last_send = now
                     scan_dict.clear()
