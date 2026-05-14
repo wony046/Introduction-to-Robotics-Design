@@ -10,7 +10,7 @@ BAUDRATE_ARDUINO = 9600
 
 # 로봇 하드웨어 (mm) 
 ROBOT_FRONT  = 110      # 앞
-ROBOT_BACK   = 150      # 뒤 (긴 엉덩이 충돌 방지 핵심)
+ROBOT_BACK   = 150      # 뒤 (엉덩이 충돌 방지)
 ROBOT_HALF_W = 110      # 좌우
 MARGIN       = 35       # 안전 여유폭
 
@@ -72,7 +72,9 @@ def check_collision_and_clearance(v_m_s, w_rad_s, scan_points, predict_t=1.0, st
     v_mm_s = v_m_s * 1000.0
     max_dist = abs(v_mm_s * predict_t) + max(ROBOT_FRONT, ROBOT_BACK) + MARGIN + 100
     
-    local_pts = [(dist * math.cos(math.radians(ang)), dist * math.sin(math.radians(ang))) 
+    # ★ 수정 1: 수학적 거울 반전(Mirroring) 해결
+    # 라이다의 회전 방향(시계)과 수학의 회전 방향(반시계)을 맞추기 위해 Y축(sin)에 마이너스(-) 부호 적용
+    local_pts = [(dist * math.cos(math.radians(ang)), -dist * math.sin(math.radians(ang))) 
                  for ang, dist in scan_points if 0 < dist <= max_dist]
                  
     if not local_pts: return 1000.0 
@@ -119,11 +121,10 @@ def run_dwa(scan_points, curr_heading, current_v, current_w):
             clearance = check_collision_and_clearance(v, w, scan_points)
             if clearance <= 0: continue 
             
-            # ★ 버그 수정: 현재 각도에 예측 회전량을 '더해야' 미래 각도가 됨
+            # ★ 수정 2: 로봇 하드웨어 배선에 맞춘 헤딩 뺄셈(-) 유지
             pred_turn = math.degrees(w * 1.0)
             fut_heading = normalize_angle(curr_heading - pred_turn) 
             
-            # 0도(정면)에 가까울수록 높은 점수
             score_heading = max(0.0, 1.0 - (abs(fut_heading) / 180.0))
             score_clearance = min(1.0, clearance / 1000.0)
             score_velocity = max(0.0, v / MAX_V)
@@ -137,7 +138,7 @@ def run_dwa(scan_points, curr_heading, current_v, current_w):
                 
     if best_w != 0: last_w_sign = 1.0 if best_w > 0 else -1.0
     return best_v, best_w
-    
+
 # ── 5. 메인 루프 (교통정리) ───────────────────────────────────────────────────
 def main():
     global current_state, stuck_timer, arduino_heading_deg
@@ -175,7 +176,9 @@ def main():
             angle_raw, distance = result
             s_flag = raw[0] & 0x01
             
-            if distance > 0:
+            # ★ 수정 3: 로봇 내부 노이즈 필터링 (가장 중요한 부분)
+            # 150mm 이하의 데이터는 라이다 본체나 선 등 '내 몸통'을 찍은 것이므로 무시합니다!
+            if distance > 150:
                 scan_points.append((normalize_angle(angle_raw), distance))
 
             # 3. 라이다가 1바퀴(한 프레임) 다 돌았고, 전송 주기가 지났을 때 연산 시작
@@ -197,10 +200,9 @@ def main():
                         stuck_timer = 0.0
                         
                 elif current_state == RobotState.RECOVERY:
-                    v, w = -0.1, 1.5 # 뒤로 빼면서 크게 회전 (1.5 rad/s)
+                    v, w = -0.1, 1.5 # 뒤로 빼면서 크게 회전
                     stuck_timer += SEND_INTERVAL
                     
-                    # 1.5초 정도 강제 탈출 후 다시 Drive 모드로 복귀
                     if stuck_timer >= 1.5:
                         print("[상태 전환] 탈출 완료. Drive 모드 복귀")
                         current_state = RobotState.DRIVE
@@ -210,7 +212,6 @@ def main():
                 current_v, current_w = v, w
                 cmd = f"{v:.2f} {w:.2f}\n"
                 arduino.write(cmd.encode('utf-8'))
-                # print(f"전송: {cmd.strip()} / 헤딩: {arduino_heading_deg:.1f}") # 필요시 주석 해제하여 디버깅
                 
                 scan_points = [] # 스캔 데이터 초기화
                 last_send = now
