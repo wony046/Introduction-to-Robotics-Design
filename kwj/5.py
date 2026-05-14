@@ -14,10 +14,11 @@ ESCAPE_SPEED = 0
 STEER_GAIN = 1.3         
 SMOOTHING_FACTOR = 0.5   
 
-MARGIN = 20            
-ROBOT_FRONT = 115 + MARGIN  
-ROBOT_SIDE = 105 + MARGIN   
-ROBOT_REAR = 130 + MARGIN   
+# ★ 측면 여유 마진 1.5cm (15mm) 적용
+MARGIN = 15            
+ROBOT_FRONT = 115 + MARGIN  # 130mm
+ROBOT_SIDE = 105 + MARGIN   # 120mm
+ROBOT_REAR = 130 + MARGIN   # 145mm
 
 SAFE_RADIUS = 300      
 DANGER_RADIUS = 50     
@@ -31,7 +32,7 @@ lidar_ser = serial.Serial(LIDAR_PORT, 460800, timeout=1)
 
 last_chosen_angle = 0
 last_steer_pwm = 0
-last_ideal_angle = 0  # ★ 추가: 목표 각도의 관성을 위한 변수
+last_ideal_angle = 0
 
 # ==========================================
 # 2. 핵심 회피 알고리즘 (두뇌)
@@ -61,18 +62,19 @@ def calculate_steering(scan_data):
             x = distance * math.cos(rad)
             y = distance * math.sin(rad)
             
+            # 전방 궤적 확인 (타이트해진 ROBOT_SIDE 120mm 적용)
             if x > 0 and abs(y) <= ROBOT_SIDE:
                 if x < front_clear_dist:
                     front_clear_dist = x
                     
-            # ★ 처방 1: 측면 시야를 90도 -> 130도로 대폭 확대 (뒤통수까지 감시)
+            # 측면 130도까지 감시
             if -100 < x < 400:
                 if 10 <= angle <= 130:     
                     if y < left_wall_min: left_wall_min = y
                 elif -130 <= angle <= -10: 
                     if abs(y) < right_wall_min: right_wall_min = abs(y)
 
-    # [2] 틈새(Gap) 파악
+    # 틈새 파악
     gaps = []
     angles = sorted(bins.keys())
     for i in range(1, len(angles)):
@@ -80,26 +82,25 @@ def calculate_steering(scan_data):
             target = angles[i] if bins[angles[i]] > bins[angles[i-1]] else angles[i-1]
             gaps.append(target)
 
-    left_vol = sum(min(bins[a], 1000) for a in range(10, 91, 5) if a in bins)
-    right_vol = sum(min(bins[a], 1000) for a in range(-90, 0, 5) if a in bins)
+    # ★ 좌우 공간 전체 넓이(체적) 측정
+    left_vol = sum(min(bins.get(a, 1000), 1000) for a in range(10, 91, 5))
+    right_vol = sum(min(bins.get(a, 1000), 1000) for a in range(-90, 0, 5))
 
     # ========================================================
-    # [3] 방향 결정 (가상 중심선 필터링)
+    # [3] 방향 결정 (가상 중심선 필터링 + 순수 스코어링)
     # ========================================================
     target_ideal_angle = 0
-    WALL_SAFE_DIST = 220 
     
-    # 벽이 가까우면 밀어내는 힘 계산
+    # 측면 안전거리 매우 타이트하게 조절 (120mm 차폭 + 여유 30mm)
+    WALL_SAFE_DIST = 150 
+    
     if right_wall_min < WALL_SAFE_DIST:
-        target_ideal_angle += (WALL_SAFE_DIST - right_wall_min) * 0.7  
+        target_ideal_angle += (WALL_SAFE_DIST - right_wall_min) * 1.5  
     if left_wall_min < WALL_SAFE_DIST:
-        target_ideal_angle -= (WALL_SAFE_DIST - left_wall_min) * 0.7   
+        target_ideal_angle -= (WALL_SAFE_DIST - left_wall_min) * 1.5   
         
     target_ideal_angle = max(-60, min(60, target_ideal_angle))
-    
-    # ★ 처방 2: 생각의 관성(Low-Pass Filter). 타겟 각도가 미친 듯이 널뛰는 것을 방지
-    # 끈적하게 각도를 유지해서 코너 진입 시 와리가리 원천 차단
-    ideal_angle = (0.3 * target_ideal_angle) + (0.7 * last_ideal_angle)
+    ideal_angle = (0.4 * target_ideal_angle) + (0.6 * last_ideal_angle)
     last_ideal_angle = ideal_angle
 
     best_angle = 0
@@ -109,43 +110,55 @@ def calculate_steering(scan_data):
         dist = bins[angle]
         raw_dist = min(dist, 1000)
         
-        # 1. 기본 거리 점수
-        score = 1000 - raw_dist
-            
-        # 2. 직진 본능 (0도가 아니라 끈적한 ideal_angle을 따라감)
-        score += abs(angle - ideal_angle) * 3.0
+        # 1. 기본 거리 점수: 멀수록 폭발적으로 점수 하락 (2000 기준에서 두 배로 뺌)
+        score = 2000 - (raw_dist * 2.0)
         
-        # 3. 틈새(Gap) 보너스
+        # 2. 중심선 추종 본능
+        score += abs(angle - ideal_angle) * 2.0
+        
+        # 3. ★ 매크로 공간 중력 (최대한 뚫린 방향 유도 핵심)
+        # 한쪽이 2000mm 이상 압도적으로 넓으면 강력한 유도 보너스 부여
+        if left_vol > right_vol + 2000 and angle > 0:
+            score -= 500
+        elif right_vol > left_vol + 2000 and angle < 0:
+            score -= 500
+            
+        # 4. ★ 소프트 관성 보너스 (상태 고정 없이 와리가리 방지)
+        # 방금 선택했던 방향과 같은 방향의 각도들에게 할인 혜택
+        if (last_chosen_angle > 10 and angle > 10) or (last_chosen_angle < -10 and angle < -10):
+            score -= 300 
+        
+        # 5. 틈새 보너스
         for gap_angle in gaps:
             if abs(angle - gap_angle) <= 10:
-                score -= 400 
+                score -= 600 
                 
-        # 4. 거시적 방향 보너스
-        if left_vol > right_vol + 1500 and angle > 0: score -= 150
-        elif right_vol > left_vol + 1500 and angle < 0: score -= 150
-            
-        # 5. 절대 충돌 방지(히트박스)
+        # 6. 절대 히트박스 페널티 (물리적 충돌 궤적은 완전 배제)
         rad = math.radians(angle)
         x = raw_dist * math.cos(rad)
         y = raw_dist * math.sin(rad)
-        if (abs(y) < ROBOT_SIDE + 20) and (x < ROBOT_FRONT + 30):
-            score += 5000 
+        if (abs(y) < ROBOT_SIDE + 5) and (x < ROBOT_FRONT + 10):
+            score += 8000 
 
         if score < min_score:
             min_score = score
             best_angle = angle
 
     # ========================================================
-    # [4] 속도 결정
+    # [4] 속도 결정 (순수 거리 기반)
     # ========================================================
+    
+    # 사면초가
     if min_score >= 8000:
         speed = SPEED_REVERSE
         steer_pwm = 80 if last_chosen_angle < 0 else -80
         
-    elif front_clear_dist < 180: 
+    # 제자리 회전 모드 (전방 15cm 이내 막힘)
+    elif front_clear_dist < 150: 
         speed = ESCAPE_SPEED
         steer_pwm = 90 if best_angle > 0 else -90
         
+    # 일반 주행
     else:
         if front_clear_dist < 300 or closest_obj_dist < 200: speed = SPEED_SAFETY
         elif front_clear_dist < 500 or closest_obj_dist < 350: speed = SPEED_DRIVE
@@ -173,7 +186,7 @@ def main():
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
-    print("[INFO] 뒤통수 시야 확보 & 생각의 관성 장착! 주행 시작!")
+    print("[INFO] 순수 스코어링 & 소프트 관성 주행 시작!")
 
     scan_data = []
 
@@ -193,10 +206,8 @@ def main():
             if s_flag == 1:
                 if len(scan_data) > 30: 
                     speed, steer = calculate_steering(scan_data)
-                    
                     command = f"{int(speed)},{int(steer)}\n"
                     arduino.write(command.encode('utf-8'))
-                    
                 scan_data = []
 
             if distance > 0:
@@ -210,4 +221,4 @@ def main():
         lidar_ser.close()
 
 if __name__ == '__main__':
-    main()
+    main()    
