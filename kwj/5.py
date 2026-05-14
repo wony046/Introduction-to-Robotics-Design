@@ -45,7 +45,7 @@ def calculate_steering(scan_data):
     
     bins = {angle: 9999 for angle in range(-135, 136, 5)}
     closest_obj_dist = 9999
-    front_clear_dist = 9999 # ★ 내 직진 궤적 상의 전방 최단 거리
+    front_clear_dist = 9999 # 내 직진 궤적 상의 전방 최단 거리
     
     # [1] 라이다 데이터 파싱 및 필터링
     for angle, distance in scan_data:
@@ -58,7 +58,7 @@ def calculate_steering(scan_data):
             if bin_angle in bins and distance < bins[bin_angle]:
                 bins[bin_angle] = distance
                 
-            # ★ 정면 차폭 이내의 장애물 거리 구하기
+            # 정면 차폭 이내의 장애물 거리 구하기
             rad = math.radians(angle)
             x = distance * math.cos(rad)
             y = distance * math.sin(rad)
@@ -82,7 +82,6 @@ def calculate_steering(scan_data):
     best_angle = 0
     min_score = float('inf')
     
-    # 측면 벽 최단 거리 계산 (전방 40cm 이내)
     right_wall_min = min((bins[a] * math.sin(math.radians(abs(a)))) for a in range(-90, 0, 5) if a in bins and bins[a] * math.cos(math.radians(a)) < 400) if any(bins[a] * math.cos(math.radians(a)) < 400 for a in range(-90, 0, 5) if a in bins) else 9999
     left_wall_min = min((bins[a] * math.sin(math.radians(a))) for a in range(5, 91, 5) if a in bins and bins[a] * math.cos(math.radians(a)) < 400) if any(bins[a] * math.cos(math.radians(a)) < 400 for a in range(5, 91, 5) if a in bins) else 9999
 
@@ -90,23 +89,25 @@ def calculate_steering(scan_data):
         dist = bins[angle]
         raw_dist = min(dist, 1000)
         
-        # 1. 기본 거리 점수
-        if raw_dist <= 600: score = (1000 / (raw_dist + 1))
+        # ====================================================
+        # ★ 1. 기본 거리 점수 (버그 픽스: 짧을수록 폭발적 페널티)
+        # ====================================================
+        if raw_dist <= 600:
+            score = (600 - raw_dist) * 2.0  # 60cm 이내 장애물은 1cm당 2점씩 강력한 패널티!
         else:
-            effective_dist = 600 + (raw_dist - 600) * 0.5
-            score = (1000 / (effective_dist + 1))
+            score = 0 # 60cm 이상 뻥 뚫려있으면 페널티 0점 (가장 좋은 길)
             
-        # 2. 직진 본능 (핸들을 불필요하게 꺾는 것을 방지)
-        score += abs(angle) * 3.0
+        # 2. 직진 본능 (핸들 불필요하게 꺾는 것 방지)
+        score += abs(angle) * 2.0  # 민감도를 살짝 낮춰서 부드럽게 유도
         
         # 3. 틈새(Gap) 보너스 (-)
         for gap_angle in gaps:
             if abs(angle - gap_angle) <= 10:
-                score -= 300 
+                score -= 400 
                 
         # 4. 거시적 방향 보너스 (-)
-        if left_vol > right_vol + 1500 and angle > 0: score -= 100
-        elif right_vol > left_vol + 1500 and angle < 0: score -= 100
+        if left_vol > right_vol + 1500 and angle > 0: score -= 150
+        elif right_vol > left_vol + 1500 and angle < 0: score -= 150
             
         # 5. 절대 마진 보호 (히트박스)
         rad = math.radians(angle)
@@ -115,18 +116,10 @@ def calculate_steering(scan_data):
         if (abs(y) < ROBOT_SIDE) and (x < ROBOT_FRONT):
             score += 5000 
             
-        # ====================================================
-        # 6. ★ 조건부 측면 방어 (와리가리 방지 핵심) ★
-        # ====================================================
-        # 전방이 40cm 이상 뚫려있고, 거의 직진(±10도)을 평가할 때는
-        # 절대 마진(ROBOT_SIDE)만 안 긁히면 측면을 완전히 무시합니다.
+        # 6. 조건부 측면 방어
         if front_clear_dist > 400 and abs(angle) <= 10:
             if left_wall_min < ROBOT_SIDE or right_wall_min < ROBOT_SIDE:
                 score += 2000 # 긁히기 직전이면 패널티
-            # 그 외에는 side repulsion 점수(밀어내기)를 아예 더하지 않습니다!
-            
-        # 전방이 막혔거나, 크게 회전(±15도 이상)해야 할 때는 
-        # 어깨 스윕 볼륨을 감안하여 기존의 강력한 측면 방어를 가동합니다.
         else:
             if right_wall_min < 240:
                 repel = (240 - right_wall_min) * 1.5
@@ -139,7 +132,6 @@ def calculate_steering(scan_data):
                 if left_wall_min < 180: repel += (180 - left_wall_min) * 3.0
                 if angle < 0: score -= repel            
                 elif angle > 0: score += (repel * 2.0)  
-        # ====================================================
 
         # 최고 좋은 길 갱신
         if score < min_score:
@@ -152,7 +144,7 @@ def calculate_steering(scan_data):
     if min_score > 3000: 
         return SPEED_REVERSE, (80 if last_chosen_angle < 0 else -80)
     
-    if front_clear_dist <= 180:
+    if front_clear_dist <= 150: # 180 -> 150으로 낮춰서 미리 부드럽게 도는 시간을 더 범
         steer_val = 90 if best_angle > 0 else -90
         return ESCAPE_SPEED, steer_val
 
@@ -181,7 +173,7 @@ def main():
     time.sleep(1)
     lidar_ser.write(bytes([0xA5, 0x20])) 
     time.sleep(0.5)
-    print("[INFO] 직진 우선 본능 장착 완료! 자율주행 시작! (정지: Ctrl+C)")
+    print("[INFO] 선행 회피(Pre-steering) 버그 픽스 완료! 자율주행 시작!")
 
     scan_data = []
 
