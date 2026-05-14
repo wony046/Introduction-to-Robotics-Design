@@ -61,7 +61,7 @@ GAP_MIN_WIDTH    = 300   # mm (최소 통과 가능 틈새 폭)
 
 WALL_TARGET_DIST = 200   # mm (벽과의 목표 거리)
 WALL_GAIN        = 0.08  # 벽 오차 → 조향 보정 게인
-RANSAC_MAX_TRIALS = 15   # RANSAC 연산량 제한 (지연 방지용)
+RANSAC_MAX_TRIALS = 9   # RANSAC 연산량 제한 (지연 방지용)
 
 # ============================================================
 # 5. 상태 머신 및 메모리 파라미터
