@@ -1,21 +1,66 @@
-# ── 1. 설정 및 파라미터 ─────────────────────────────────────────
+import serial
+import time
+import math
+
+# ── 1. 설정 및 파라미터 ───────────────────────────────────────────────────────
 LIDAR_PORT       = "/dev/ttyUSB0"
 ARDUINO_PORT     = "/dev/ttyAMA3"
 BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 9600
 
-ROBOT_FRONT  = 110
-ROBOT_BACK   = 150
-ROBOT_HALF_W = 110
-MARGIN       = 30       # 여유폭 약간 줄임 (35→30)
+# 로봇 하드웨어 (mm) 
+ROBOT_FRONT  = 110      # 앞
+ROBOT_BACK   = 150      # 뒤 (엉덩이 충돌 방지)
+ROBOT_HALF_W = 110      # 좌우
+MARGIN       = 35       # 안전 여유폭
 
-MAX_V = 0.35
-MAX_W = 1.5
+# 주행 성능 
+MAX_V = 0.35           # m/s
+MAX_W = 1.5            # rad/s
 
-W_HEADING   = 2.0
-W_CLEARANCE = 1.8
-W_VELOCITY  = 1.0
-BIAS_BONUS  = 0.3
+# DWA 채점 가중치
+W_HEADING   = 2.0      
+W_CLEARANCE = 1.8      
+W_VELOCITY  = 1.0      
+BIAS_BONUS  = 0.3      
+
+# ── 2. FSM 및 전역 상태 ───────────────────────────────────────────────────────
+class RobotState:
+    DRIVE = 1
+    RECOVERY = 2
+
+current_state = RobotState.DRIVE
+stuck_timer = 0.0
+last_w_sign = 0.0
+arduino_heading_deg = 0.0
+
+# ── 3. 유틸리티 및 라이다 파싱 ────────────────────────────────────────────────
+def normalize_angle(angle):
+    while angle > 180: angle -= 360
+    while angle < -180: angle += 360
+    return angle
+
+def parse_packet(data):
+    if len(data) != 5: return None
+    s_flag = data[0] & 0x01
+    s_inv_flag = (data[0] & 0x02) >> 1
+    if s_inv_flag != (1 - s_flag): return None
+    if (data[1] & 0x01) != 1: return None
+    angle_q6 = (data[1] >> 1) | (data[2] << 7)
+    angle = angle_q6 / 64.0
+    distance_q2 = data[3] | (data[4] << 8)
+    distance = distance_q2 / 4.0
+    return angle, distance
+
+def read_arduino(arduino):
+    global arduino_heading_deg
+    while arduino.in_waiting > 0:
+        try:
+            line = arduino.readline().decode('utf-8', errors='ignore').strip()
+            if line.startswith('H:'):
+                arduino_heading_deg = float(line[2:])
+        except Exception:
+            pass
 
 # ── 4. DWA 코어 ────────────────────────────────────────────────
 
