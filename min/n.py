@@ -6,7 +6,7 @@ import math
 LIDAR_PORT       = "/dev/ttyUSB0"
 ARDUINO_PORT     = "/dev/ttyAMA3"
 BAUDRATE_LIDAR   = 460800
-BAUDRATE_ARDUINO = 9600
+BAUDRATE_ARDUINO = 115200
 
 # 로봇 하드웨어 (mm)
 ROBOT_FRONT  = 110
