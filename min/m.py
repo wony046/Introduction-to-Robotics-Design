@@ -28,7 +28,7 @@ lidar_ser = serial.Serial(LIDAR_PORT,  460800, timeout=1)
 # ============================================================
 LIDAR_TO_EDGE    = 110    # mm 
 ROBOT_HALF_WIDTH = 110    # mm 
-COLLISION_MARGIN = 40     # mm (안전성 강화를 위해 40mm로 상향)
+COLLISION_MARGIN = 45     # mm (안전성 강화를 위해 40mm로 상향)
 COLLISION_RADIUS = ROBOT_HALF_WIDTH + COLLISION_MARGIN  # 150mm
 
 # ============================================================
@@ -38,7 +38,7 @@ V_MAX        = 25.0       # cm/s
 V_REVERSE    = -4.8       # cm/s
 V_SAMPLES    = 7
 W_MAX_DPS    = 90.0       # deg/s
-W_MIN_DPS    = 17.0
+W_MIN_DPS    = 30.0
 W_SAMPLES    = 15
 DT_PREDICT   = 0.6
 DT_STEP      = 0.1
