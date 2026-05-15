@@ -25,16 +25,16 @@ BAUDRATE_ARDUINO = 115200
 # ── 2. 안전 ─────────────────────────────────────────────────────────────────
 SAFETY_DIST_MM         = 130.0
 ROBOT_RADIUS_MM        = 150.0
-EMERGENCY_THRESHOLD_MM = 150.0
+EMERGENCY_THRESHOLD_MM = 140.0
 RECOVERY_CLEAR_MM      = 220.0
 LIDAR_NOISE_MM         = 80.0
 
 # ── 3. DWA ──────────────────────────────────────────────────────────────────
 MAX_V         = 0.45
-MAX_V_NARROW  = 0.20
+MAX_V_NARROW  = 0.15
 MAX_W         = 1.50
 DT            = 0.10
-PREDICT_TIME  = 1.00
+PREDICT_TIME  = 0.6
 
 W_HEADING     = 1.5
 W_CLEARANCE   = 2.5
@@ -50,7 +50,7 @@ REC_SPIN_DUR     = 0.3
 REC_CYCLE        = REC_BACK_DUR + REC_TURN_DUR + REC_SPIN_DUR
 REC_STUCK_CYCLE  = REC_BACK_DUR * 1.5 + 1.2
 REC_MAX_ATTEMPT  = 2
-REC_MAX_STUCK    = 5   # stuck_count 상한
+REC_MAX_STUCK    = 5   # stuck_count 상한 — 이 이상 증가해도 행동은 같고 로그만 오염
 
 KEEPALIVE_INTERVAL = 0.30
 SPIN_LOCK_COUNT    = 12     # ~125ms × 12 = 1.5s
@@ -65,16 +65,16 @@ class RobotState:
 @dataclass
 class DriveState:
     """주행 관련 가변 상태를 한 곳에 모아 전역 변수 제거."""
-    current_state:    int             = RobotState.DRIVE
-    arduino_heading:  float           = 0.0
+    current_state:    int            = RobotState.DRIVE
+    arduino_heading:  float          = 0.0
     goal_heading:     Optional[float] = None
-    prev_v:           float           = 0.0
-    prev_w:           float           = 0.0
-    rec_start_time:   float           = 0.0
-    rec_attempt:      int             = 0
-    rec_initial_sign: int             = 1
-    stuck_count:      int             = 0
-    spin_count:       int             = 0
+    prev_v:           float          = 0.0
+    prev_w:           float          = 0.0
+    rec_start_time:   float          = 0.0
+    rec_attempt:      int            = 0
+    rec_initial_sign: int            = 1
+    stuck_count:      int            = 0
+    spin_count:       int            = 0
 
 
 def normalize_angle_deg(angle):
@@ -137,7 +137,7 @@ def start_lidar(lidar):
         lidar.write(bytes([0xA5, 0x25]))
         time.sleep(0.1)
         try:
-            lidar.dtr = False
+            lidar.dtr = False       # 일부 어댑터에서 지원 안 할 수 있음
         except AttributeError:
             pass
         time.sleep(0.5)
@@ -163,6 +163,11 @@ def read_arduino(arduino, state: DriveState):
 
 
 def analyze_proximity(scan_points):
+    """라이다 0°=정면, +가 우측(CW), -가 좌측(CCW).
+
+    front와 front_left/front_right는 ±10°~25° 구간이 의도적으로 겹침.
+    경계 장애물을 인접 두 섹터 모두에서 포착해 보수적 안전 거리를 유지한다.
+    """
     p = {'front': 99999, 'front_left': 99999, 'front_right': 99999,
          'left':  99999, 'right':       99999, 'back': 99999}
     for a, d in scan_points:
@@ -183,16 +188,25 @@ def analyze_proximity(scan_points):
 
 
 def _scan_to_cartesian(scan_points):
+    """scan_points → numpy 장애물 좌표 (ox, oy).
+
+    라이다 CW 각도 규약(+가 우측)을 로봇 좌표계(x=정면, y=좌측)로 변환.
+    run_dwa 안에서 후보별로 반복 호출되지 않도록 DWA 진입 전 1회만 실행.
+    """
     if not scan_points:
         return np.empty(0), np.empty(0)
     angles_rad = np.radians([a for a, _ in scan_points])
     dists      = np.array([d for _, d in scan_points])
     ox =  dists * np.cos(angles_rad)
-    oy = -dists * np.sin(angles_rad)
+    oy = -dists * np.sin(angles_rad)   # CW → 표준 y축 반전
     return ox, oy
 
 
 def calculate_clearance(v, w, ox, oy):
+    """numpy 벡터화: 궤적 전 스텝 × 전 장애물 거리를 한 번에 계산.
+
+    반환값: 최소 이격 거리(mm), 충돌 예측 시 -1.0
+    """
     if len(ox) == 0:
         return 99999.0
 
@@ -202,11 +216,12 @@ def calculate_clearance(v, w, ox, oy):
 
     steps = int(PREDICT_TIME / DT)
     j = np.arange(steps)
-    thetas = j * w * DT
+    thetas = j * w * DT                                     # 각 스텝의 헤딩
 
-    robot_x = np.cumsum(v * np.cos(thetas) * DT * 1000.0)
+    robot_x = np.cumsum(v * np.cos(thetas) * DT * 1000.0)  # (steps,) mm
     robot_y = np.cumsum(v * np.sin(thetas) * DT * 1000.0)
 
+    # (steps, N) 거리² 행렬 — sqrt는 비교 후 최솟값에 한 번만
     dx = ox[np.newaxis, :] - robot_x[:, np.newaxis]
     dy = oy[np.newaxis, :] - robot_y[:, np.newaxis]
     dists_sq = dx * dx + dy * dy
@@ -217,12 +232,13 @@ def calculate_clearance(v, w, ox, oy):
 
 
 def run_dwa(scan_points, prev_v, prev_w, narrow_mode, goal_angle_rad=0.0):
+    # t=0 즉시 충돌 검사 (정면 ±30° 한정)
     for a_deg, d in scan_points:
         na = normalize_angle_deg(a_deg)
         if abs(na) < 30 and d < ROBOT_RADIUS_MM:
             return 0.0, 0.0, 0
 
-    ox, oy = _scan_to_cartesian(scan_points)
+    ox, oy = _scan_to_cartesian(scan_points)   # 좌표 변환 1회
     v_max = MAX_V_NARROW if narrow_mode else MAX_V
 
     if narrow_mode:
@@ -387,7 +403,7 @@ def main():
                                 needs_recovery = (
                                     state.spin_count >= SPIN_LOCK_COUNT
                                     or prox['front'] < EMERGENCY_THRESHOLD_MM
-                                    or safe_count == 0
+                                    or (safe_count == 0 and front_min < EMERGENCY_THRESHOLD_MM)
                                 )
                                 if needs_recovery:
                                     reason = ("SPIN" if state.spin_count >= SPIN_LOCK_COUNT
