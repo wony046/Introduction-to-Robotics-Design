@@ -19,11 +19,11 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 # 로봇 & 속도 파라미터
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROBOT_HALF_WIDTH = 125  # mm: 라이다 중심 ~ 좌우 끝
+ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
 FORWARD_SPEED    = 0.35
 MIN_SPEED        = 0.07
-MAX_W            = 2.0
+MAX_W            = 1.5
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
 W_SMOOTH         = 0.6
 
@@ -61,7 +61,7 @@ LAYER_PERCENTILE = 5    # %: 하위 N% dist 평균으로 레이어 대표점 계
 # STOP rectangle: 전방 100~150mm 사이, horiz < 110mm (220mm 폭)
 
 STOP_FWD_MIN  = 100
-STOP_FWD_MAX  = 180
+STOP_FWD_MAX  = 180   # 50mm → 80mm 구간으로 확장 (히스테리시스 효과)
 STOP_HORIZ_TH = 110
 
 # STOP 탈출: ±135° 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
@@ -176,10 +176,19 @@ def find_stop_escape_direction(scan_points):
     if not sectors:
         return 0.0, 0.0
 
-    # 각 sector 평균 거리 → 가장 먼 sector 선택
     sector_avg = {c: sum(d_list) / len(d_list) for c, d_list in sectors.items()}
-    best = max(sector_avg.keys(), key=lambda c: sector_avg[c])
-    return float(best), sector_avg[best]
+
+    # STOP_ESCAPE_MIN_GAP 이상 통과 가능한 섹터만 후보로 사용
+    valid = {}
+    for c, avg_dist in sector_avg.items():
+        gap_l = get_gap_width(scan_points, c, avg_dist, is_left=True)
+        gap_r = get_gap_width(scan_points, c, avg_dist, is_left=False)
+        if gap_l + gap_r >= STOP_ESCAPE_MIN_GAP:
+            valid[c] = avg_dist
+
+    candidates = valid if valid else sector_avg  # 유효 갭 없으면 fallback
+    best = max(candidates.keys(), key=lambda c: candidates[c])
+    return float(best), candidates[best]
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -398,8 +407,8 @@ def find_vw_command(scan_points, heading_deg):
         else:
             pivot_w = -math.copysign(MAX_W, target)
 
-        # STOP 빠져나간 후 새 방향 결정하도록 메모리 리셋
-        avoidance_w_sign = 0.0
+        # 피봇 방향을 메모리에 유지 (리셋 X → 탈출 후에도 같은 방향 고수)
+        avoidance_w_sign = math.copysign(1.0, pivot_w)
 
         if DEBUG_STOP:
             print(f"  [STOP] zone detected -> escape target={target:+.0f}° "
