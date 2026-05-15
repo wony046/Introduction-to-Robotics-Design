@@ -19,11 +19,11 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 # 로봇 & 속도 파라미터
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
+ROBOT_HALF_WIDTH = 125  # mm: 라이다 중심 ~ 좌우 끝
 
 FORWARD_SPEED    = 0.35
 MIN_SPEED        = 0.07
-MAX_W            = 1.5
+MAX_W            = 2.0
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
 W_SMOOTH         = 0.6
 
@@ -61,7 +61,7 @@ LAYER_PERCENTILE = 5    # %: 하위 N% dist 평균으로 레이어 대표점 계
 # STOP rectangle: 전방 100~150mm 사이, horiz < 110mm (220mm 폭)
 
 STOP_FWD_MIN  = 100
-STOP_FWD_MAX  = 150
+STOP_FWD_MAX  = 180
 STOP_HORIZ_TH = 110
 
 # STOP 탈출: ±135° 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
