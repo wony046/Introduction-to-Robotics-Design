@@ -22,29 +22,31 @@ DETECTION_RANGE  = 1500  # mm: LiDAR 최대 신뢰 거리
 FORWARD_RANGE    = 800   # mm: 위험구역 전방 깊이
 
 # ── 속도 파라미터 ─────────────────────────────────────────────────────────────
-FORWARD_SPEED    = 0.35  # m/s: 최고 선속도
-MIN_SPEED        = 0.07  # m/s: 최소 선속도
-SLOW_START_DIST  = 400   # mm: 이 전방거리부터 감속 시작
-STOP_FWD_RANGE   = 180   # mm: 앞범퍼 스윙아웃 방지를 위한 정지 거리
+FORWARD_SPEED    = 0.35
+MIN_SPEED        = 0.07
+SLOW_START_DIST  = 400
+STOP_FWD_RANGE   = 180
 W_GAIN           = 1.2
 MAX_W            = 1.5
-W_MIN_DANGER     = 0.5   # rad/s: 위험구역 최소 회전
+W_MIN_DANGER     = 0.5
 W_SMOOTH         = 0.6
 
-# ── 측면 보정 (방법 A: 차분 방식) ─────────────────────────────────────────────
+# ── 측면 보정 (additive 방식) ─────────────────────────────────────────────────
 # 측면 밴드 = "바운딩 박스 밖 + ±90° 이내 모든 포인트"
-# 각 측면 하위 5% 거리 → 선형 weight → 차분으로 w_side 생성
-SIDE_D_MIN       = 150   # mm: 이 미만 → weight = 1.0 (최대 보정)
-SIDE_D_MAX       = 400   # mm: 이 이상 → weight = 0.0 (보정 없음)
-SIDE_W_GAIN      = 1.0   # rad/s: |weight_R - weight_L| = 1일 때 회전 게인
-SIDE_V_REDUCE    = 0.5   # max_weight=1.0일 때 선속도 50% 감속
-SIDE_PERCENTILE  = 10     # %: 하위 N% 거리 평균을 측면 대표값으로 사용
+# 좌/우 하위 N% 거리 → 선형 weight → 차분 → 전방 w에 *덧셈*
+# 블렌딩(가중평균)이 아닌 덧셈이므로 전방 방향 결정을 절대 뒤집지 않음
+SIDE_D_MIN        = 150   # mm: 이 미만 → weight = 1.0
+SIDE_D_MAX        = 400   # mm: 이 이상 → weight = 0.0
+SIDE_W_ADD_GAIN   = 0.4   # rad/s: 전방 w에 더해지는 최대 추가량 (±)
+                           #        작게 유지 → 방향 결정은 전방 로직 우선
+SIDE_V_REDUCE     = 0.5   # max_weight=1.0일 때 선속도 50% 감속
+SIDE_PERCENTILE   = 10    # %: 하위 N% 거리 평균을 측면 대표값으로 사용
 
-# ── 근접 후보 (방법 A) ────────────────────────────────────────────────────────
-PROXIMITY_HORIZ = 170    # mm: danger zone(140mm) 밖이어도 이 이내면 ref 후보 포함
+# ── 근접 후보 ────────────────────────────────────────────────────────────────
+PROXIMITY_HORIZ = 170
 
 # ── 헤딩 방향 점수제 ──────────────────────────────────────────────────────────
-HEADING_WEIGHT_MM = 5.0  # 헤딩 1°당 여유공간 5mm의 가중치 보너스
+HEADING_WEIGHT_MM = 5.0
 
 # ── 스캔 파라미터 ─────────────────────────────────────────────────────────────
 SCAN_HALF_ANGLE  = 90
@@ -56,12 +58,11 @@ DEPTH_JUMP_THRES = 120
 STOP_FRONT_DEADBAND = 15
 
 # ── 디버그 출력 토글 ──────────────────────────────────────────────────────────
-# 노이즈 줄이고 싶을 때 False로 끄세요. SIDE/BLEND는 사용자 관심사라 기본 ON.
-DEBUG_SIDE  = True    # [SIDE] 좌우 거리 / 가중치 / w_side / v_scale
-DEBUG_BLEND = True    # [BLEND] 전방 명령 → 측면 블렌딩 결과
-DEBUG_FRONT = True    # [FRONT], [FRONT_CMD] 전방 기준점 및 명령
-DEBUG_GAP   = True    # [GAP L/R] 빈공간 너비 계산
-DEBUG_DIR   = True    # [DIR], [STOP] 방향 결정/전환
+DEBUG_SIDE  = True
+DEBUG_BLEND = True
+DEBUG_FRONT = True
+DEBUG_GAP   = True
+DEBUG_DIR   = True
 
 # ── 전역 상태 ─────────────────────────────────────────────────────────────────
 arduino_heading_deg = 0.0
@@ -96,10 +97,11 @@ def percentile_low(values, pct):
 
 def calc_side_correction(scan_points, danger_threshold):
     """
-    측면 거리 기반 v/w 보정 신호 계산 (A안 = 차분 방식)
+    측면 거리 기반 v/w 보정 신호 (additive 방식)
 
-    측면 밴드 = "바운딩 박스 밖 + ±90° 이내 모든 포인트"
-    좌/우 각각 하위 SIDE_PERCENTILE% 거리 → 선형 weight → 차분
+    좌/우 하위 SIDE_PERCENTILE% 거리 → 선형 weight → 차분
+    → w_side: 전방 w에 덧셈으로 작용 (최대 ±SIDE_W_ADD_GAIN)
+    → v_scale: 선속도 감속 (가까운 쪽 weight 기반)
     """
     left_dists, right_dists = [], []
 
@@ -121,9 +123,10 @@ def calc_side_correction(scan_points, danger_threshold):
     weight_L = max(0.0, min(1.0, (SIDE_D_MAX - d_left)  / rng))
     weight_R = max(0.0, min(1.0, (SIDE_D_MAX - d_right) / rng))
 
-    # ⚙ ── 알고리즘 본체: A안 차분 ─────────────────────────────────────────
-    # weight_R > weight_L → 오른쪽이 더 가까움 → w_side > 0 → 좌회전
-    w_side = SIDE_W_GAIN * (weight_R - weight_L)
+    # ⚙ ── A안 차분 (additive) ─────────────────────────────────────────────
+    # weight_R > weight_L → 오른쪽이 더 가까움 → w_side > 0 → 좌회전 방향
+    # 최대 ±SIDE_W_ADD_GAIN (0.4) 의 작은 추가 신호로 전방 w에 덧셈
+    w_side = SIDE_W_ADD_GAIN * (weight_R - weight_L)
     max_weight = max(weight_L, weight_R)
     v_scale = 1.0 - SIDE_V_REDUCE * max_weight
     # ──────────────────────────────────────────────────────────────────────
@@ -138,16 +141,29 @@ def calc_side_correction(scan_points, danger_threshold):
     }
 
 
-def apply_side_correction(v_front, w_front, side_info):
-    """전방 명령(v_front, w_front)에 측면 보정 블렌딩."""
-    mw = side_info['max_weight']
-    w_blended = (1.0 - mw) * w_front + mw * side_info['w_side']
+def apply_side_correction(v_front, w_front, side_info, is_stop=False):
+    """
+    측면 보정 적용 (additive 방식):
+      - w: 전방 w에 w_side를 *덧셈* (블렌딩 아님 → 방향 절대 뒤집기 불가)
+      - v: 항상 v_scale 적용 (벽 가까울 때 감속)
+      - is_stop=True: STOP zone에서는 w_side 무시 (탈출 방향 방해 방지)
+    """
+    w_side = side_info['w_side']
     v_blended = v_front * side_info['v_scale']
+
+    if is_stop:
+        w_blended = w_front           # STOP: 측면 w 무시
+    else:
+        w_blended = w_front + w_side  # DANGER/CLEAR: 덧셈
+
     w_blended = max(-MAX_W, min(MAX_W, w_blended))
-    if DEBUG_BLEND and mw > 0.01:
-        print(f"  [BLEND] mw={mw:.2f}: "
+
+    if DEBUG_BLEND and abs(w_side) > 0.01:
+        mode = "STOP" if is_stop else "ADD"
+        print(f"  [BLEND/{mode}] w_side={w_side:+.2f}: "
               f"v({v_front:.2f}->{v_blended:.2f})  "
               f"w({w_front:+.2f}->{w_blended:+.2f})")
+
     return v_blended, w_blended
 
 
@@ -269,7 +285,7 @@ def find_vw_command(scan_points, heading_deg):
     global avoidance_w_sign, stop_zone_w_sign, no_danger_count
     threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN
 
-    # ── 0. 측면 보정 미리 계산 (모든 분기에 동일 적용) ────────────────────
+    # ── 0. 측면 보정 미리 계산 ────────────────────────────────────────────
     side_info = calc_side_correction(scan_points, threshold)
     if DEBUG_SIDE:
         si = side_info
@@ -298,7 +314,7 @@ def find_vw_command(scan_points, heading_deg):
             stop_zone_w_sign = 0.0
         if DEBUG_FRONT:
             print(f"  [FRONT] no danger points  ->  v={FORWARD_SPEED:.2f} w=0.00")
-        return apply_side_correction(FORWARD_SPEED, 0.0, side_info)
+        return apply_side_correction(FORWARD_SPEED, 0.0, side_info, is_stop=False)
     no_danger_count = 0
 
     # ── 2. 근접 후보 수집 ─────────────────────────────────────────────────
@@ -342,7 +358,7 @@ def find_vw_command(scan_points, heading_deg):
         stop_zone_w_sign = 0.0
         if DEBUG_FRONT:
             print(f"  [FRONT_CMD] v={v:.2f}  w=0.00  (no horiz error, passing through)")
-        return apply_side_correction(v, 0.0, side_info)
+        return apply_side_correction(v, 0.0, side_info, is_stop=False)
 
     # ── 4. 회전 방향 결정 ─────────────────────────────────────────────────
     if stop_points:
@@ -383,7 +399,10 @@ def find_vw_command(scan_points, heading_deg):
 
     if DEBUG_FRONT:
         print(f"  [FRONT_CMD] v={v:.2f}  w={w:+.2f}  (horiz_err={horiz_error:.0f}mm)")
-    return apply_side_correction(v, w, side_info)
+
+    # STOP zone 여부에 따라 측면 보정 모드 분기
+    is_stop = (len(stop_points) > 0)
+    return apply_side_correction(v, w, side_info, is_stop=is_stop)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -392,10 +411,11 @@ def find_vw_command(scan_points, heading_deg):
 
 def main():
     global prev_w
-    print("=== RPLIDAR Obstacle Avoidance (Side Correction A: Differential) ===")
+    print("=== RPLIDAR Obstacle Avoidance (Side Correction: Additive A) ===")
     print(f"  BoundingBox : horiz {ROBOT_HALF_WIDTH + SAFETY_MARGIN}mm x fwd {FORWARD_RANGE}mm")
     print(f"  SideCorr    : D=[{SIDE_D_MIN}~{SIDE_D_MAX}]mm  bottom {SIDE_PERCENTILE}% percentile")
-    print(f"  SideGain    : w_gain={SIDE_W_GAIN}  v_reduce={SIDE_V_REDUCE}")
+    print(f"  SideCorr    : add_gain={SIDE_W_ADD_GAIN} (additive mode, max +/-{SIDE_W_ADD_GAIN} rad/s)")
+    print(f"  SideCorr    : v_reduce={SIDE_V_REDUCE}  (STOP zone: w_side disabled)")
     print(f"  MinPassage  : {MIN_PASSAGE_WIDTH}mm")
     print(f"  ProximityRef: horiz < {PROXIMITY_HORIZ}mm (ref stabilization)")
     print(f"  NoiseFilter : ignore dist < {LIDAR_MIN_VALID}mm")
