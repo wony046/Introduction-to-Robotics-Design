@@ -19,7 +19,7 @@ from typing import Optional
 # ── 1. 하드웨어 ─────────────────────────────────────────────────────────────
 LIDAR_PORT = "/dev/ttyUSB0"
 ARDUINO_PORT = "/dev/ttyAMA3"
-BAUDRATE_LIDAR   = 460800
+BAUDRATE_LIDAR  = 460800
 BAUDRATE_ARDUINO = 115200
 
 # ── 2. 안전 ─────────────────────────────────────────────────────────────────
