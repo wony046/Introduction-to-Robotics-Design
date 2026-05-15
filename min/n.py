@@ -24,8 +24,8 @@ BAUDRATE_ARDUINO = 115200
 
 # ── 2. 안전 ─────────────────────────────────────────────────────────────────
 SAFETY_DIST_MM         = 130.0
-ROBOT_RADIUS_MM        = 150.0   # 물리적 안전 반경 (정지/회전 시 사용)
-DWA_RADIUS_MM          = 100.0   # DWA 궤적 계획 반경 (전진 시 사용)
+ROBOT_RADIUS_MM        = 110.0   # 물리적 안전 반경 — 로봇 좌우 22cm → 반경 11cm
+DWA_RADIUS_MM          = 110.0   # DWA 궤적 계획 반경 (물리 반경과 동일)
 EMERGENCY_THRESHOLD_MM = 140.0
 RECOVERY_CLEAR_MM      = 220.0
 LIDAR_NOISE_MM         = 80.0
@@ -44,12 +44,10 @@ W_SMOOTHNESS  = 0.8
 W_DEADZONE    = 0.10
 
 # ── 4. RECOVERY ─────────────────────────────────────────────────────────────
-REC_BACK_DUR     = 0.8
-REC_TURN_DUR     = 0.6
+REC_TURN_DUR     = 1.4   # 회전 지속 시간 (초)
 REC_TURN_W_RATIO = 0.7
-REC_SPIN_DUR     = 0.3
-REC_CYCLE        = REC_BACK_DUR + REC_TURN_DUR + REC_SPIN_DUR
-REC_STUCK_CYCLE  = REC_BACK_DUR * 1.5 + 1.2
+REC_CYCLE        = REC_TURN_DUR
+REC_STUCK_CYCLE  = 2.0
 REC_MAX_ATTEMPT  = 2
 REC_MAX_STUCK    = 5   # stuck_count 상한 — 이 이상 증가해도 행동은 같고 로그만 오염
 
@@ -294,20 +292,11 @@ def pick_recovery_direction(prox, goal_angle_rad=0.0):
     return 1 if left_room >= right_room else -1
 
 
-def recovery_step(elapsed, attempt, initial_sign, prox, stuck=0):
+def recovery_step(attempt, initial_sign, stuck=0):
     sign = initial_sign if (attempt % 2 == 0) else -initial_sign
     if stuck >= 1:
-        if elapsed < REC_BACK_DUR * 1.5:
-            return -0.20, 0.0
-        else:
-            return 0.0, MAX_W * sign
-    turn_w = MAX_W * REC_TURN_W_RATIO * sign
-    if elapsed < REC_BACK_DUR:
-        return -0.15, 0.0
-    elif elapsed < REC_BACK_DUR + REC_TURN_DUR:
-        return -0.08, turn_w
-    else:
-        return 0.0, turn_w
+        return 0.0, MAX_W * sign
+    return 0.0, MAX_W * REC_TURN_W_RATIO * sign
 
 
 def main():
@@ -426,19 +415,15 @@ def main():
                                     state.spin_count       = 0
                                     state.rec_initial_sign = pick_recovery_direction(
                                         prox, goal_angle_rad)
-                                    v, w = -0.15, 0.0
+                                    v, w = 0.0, MAX_W * REC_TURN_W_RATIO * state.rec_initial_sign
                                     safe_count = -1
 
                             else:
                                 elapsed = now - state.rec_start_time
-                                v, w = recovery_step(elapsed, state.rec_attempt,
-                                                     state.rec_initial_sign, prox,
+                                v, w = recovery_step(state.rec_attempt,
+                                                     state.rec_initial_sign,
                                                      state.stuck_count)
                                 safe_count = -1
-
-                                if v < 0 and prox['back'] < 200:
-                                    v = 0.0
-                                    w = MAX_W * REC_TURN_W_RATIO * state.rec_initial_sign
 
                                 cycle = REC_STUCK_CYCLE if state.stuck_count >= 1 else REC_CYCLE
                                 if elapsed >= cycle:
