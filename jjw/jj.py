@@ -45,7 +45,8 @@ SLOW_START_DIST  = 400   # mm: 이 전방거리부터 감속 시작
 STOP_FWD_RANGE   = 180   # mm: 앞범퍼 스윙아웃 방지를 위한 정지 거리
 W_GAIN           = 1.2
 MAX_W            = 1.5
-W_MIN_DANGER     = 0.5   # rad/s: 위험구역 최소 회전
+W_MIN_DANGER     = 0.45  # rad/s: 정지 중(stop zone) 최소 회전
+W_MIN_MOVING     = 0.10  # rad/s: 이동 중 최소 회전 (비례제어 실효성 확보)
 W_SMOOTH         = 0.6
 
 # ── 측면 감지 (수직/수평 거리 기반) ──────────────────────────────────────────
@@ -66,6 +67,7 @@ ANGLE_STEP       = 5
 SEND_INTERVAL    = 0.1
 DEPTH_JUMP_THRES = 120   # mm: 이 이상 거리 변화 시 다른 물체로 간주 (양방향)
 LIDAR_WATCHDOG_TIMEOUT = 0.5  # s: 이 시간 이상 새 스캔 없으면 비상 정지
+NO_DANGER_RESET        = 10   # 회피 방향 메모리 유지 사이클 수 (10 × 100ms = 1s)
 
 # ── Stop zone 정면 노이즈 억제 ────────────────────────────────────────────────
 STOP_FRONT_DEADBAND = 15  # deg: 이 각도 이내 정면 장애물은 기존 방향 유지
@@ -199,8 +201,11 @@ def get_gap_width(scan_points, ref_angle, ref_dist, is_left):
               f"(edge {edge_p[1]:.0f}mm × {rem_angle:.0f}°)")
         return width
 
-    print(f"  [gap {'L' if is_left else 'R'}] 스캔 각도 부족 → 0mm")
-    return 0.0
+    # 스캔 끝까지 연속 벽: 마지막 edge_p의 수평거리 - 로봇 반폭을 여유 공간으로 추정
+    horiz_edge = abs(edge_p[1] * math.sin(math.radians(edge_p[0])))
+    available  = max(horiz_edge - ROBOT_HALF_WIDTH, 0.0)
+    print(f"  [gap {'L' if is_left else 'R'}] 스캔 각도 부족 → 수평여유 {available:.0f}mm")
+    return available
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -294,7 +299,6 @@ def find_vw_command(scan_points, heading_deg):
         if fwd > 0 and fwd <= FORWARD_RANGE and horiz < threshold:
             danger_points.append((angle_norm, dist, horiz, fwd))
 
-    NO_DANGER_RESET = 3
     if not danger_points:
         no_danger_count += 1
         if no_danger_count >= NO_DANGER_RESET:
@@ -406,7 +410,8 @@ def find_vw_command(scan_points, heading_deg):
 
     # ── 5. 각속도 계산 ────────────────────────────────────────────────────────
     # horiz_error는 danger zone 기준으로 계산 (proximity 장애물 영향 없음)
-    w_mag = max(min(W_GAIN * horiz_error / threshold, MAX_W), W_MIN_DANGER)
+    w_min = W_MIN_DANGER if v == 0.0 else W_MIN_MOVING
+    w_mag = max(min(W_GAIN * horiz_error / threshold, MAX_W), w_min)
     w     = avoidance_w_sign * w_mag
 
     print(f"  [명령] v:{v:.2f}  w:{w:.2f}  (수평오차:{horiz_error:.0f}mm)")
@@ -470,6 +475,8 @@ def main():
                 now = time.time()
                 if now - last_send >= SEND_INTERVAL:
                     v, w = find_vw_command(front_points, arduino_heading_deg)
+                    if w * prev_w < 0:   # 방향 전환 시 관성 제거
+                        prev_w = 0.0
                     w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
                     prev_w = w
                     cmd = f"{v:.2f} {w:.2f}\n"
