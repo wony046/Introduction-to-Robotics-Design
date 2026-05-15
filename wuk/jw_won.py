@@ -68,6 +68,7 @@ STOP_HORIZ_TH = 110
 STOP_ESCAPE_SCAN_HALF = 135
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
 STOP_SECTOR_SIZE      = 10                          # deg: 갭 검색 sector 크기
+STOP_MAX_CYCLES       = 8                           # 연속 STOP 사이클 상한 (초과 시 강제 탈출)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 방향 점수제 (gap + layer 통합)
@@ -98,6 +99,7 @@ arduino_heading_deg   = 0.0
 avoidance_w_sign      = 0.0   # 방향 메모리 (옵션 A: 한 번 정하면 유지)
 no_active_count       = 0
 prev_w                = 0.0
+stop_cycle_count      = 0     # 연속 STOP 사이클 카운터
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -187,7 +189,14 @@ def find_stop_escape_direction(scan_points):
             valid[c] = avg_dist
 
     candidates = valid if valid else sector_avg  # 유효 갭 없으면 fallback
-    best = max(candidates.keys(), key=lambda c: candidates[c])
+
+    # 전방 선호 보정: 전방(0°)에 가까울수록 가산점 (90°에서 factor=0.5, 135°에서 0.15)
+    # → 옆/뒤 방향이 거리는 멀어도 전방 방향이 우선되어 불필요한 U턴 방지
+    def forward_score(c, dist):
+        factor = (1.0 + math.cos(math.radians(c))) / 2.0  # 0°=1.0, 90°=0.5, 180°=0.0
+        return dist * factor
+
+    best = max(candidates.keys(), key=lambda c: forward_score(c, candidates[c]))
     return float(best), candidates[best]
 
 
@@ -396,9 +405,9 @@ def find_vw_layered(scan_points, heading_deg):
 
 def find_vw_command(scan_points, heading_deg):
     """STOP zone 우선 검사 → 활성 시 STOP escape, 아니면 계층형 처리."""
-    global avoidance_w_sign
+    global avoidance_w_sign, stop_cycle_count
 
-    if detect_stop_zone(scan_points):
+    if detect_stop_zone(scan_points) and stop_cycle_count < STOP_MAX_CYCLES:
         target, gap_dist = find_stop_escape_direction(scan_points)
 
         # 피봇턴 방향: target angle 부호의 반대 (우측 갭이면 우회전 = w<0)
@@ -409,13 +418,18 @@ def find_vw_command(scan_points, heading_deg):
 
         # 피봇 방향을 메모리에 유지 (리셋 X → 탈출 후에도 같은 방향 고수)
         avoidance_w_sign = math.copysign(1.0, pivot_w)
+        stop_cycle_count += 1
 
         if DEBUG_STOP:
-            print(f"  [STOP] zone detected -> escape target={target:+.0f}° "
+            print(f"  [STOP] zone detected (cycle {stop_cycle_count}/{STOP_MAX_CYCLES}) "
+                  f"-> escape target={target:+.0f}° "
                   f"(gap_dist={gap_dist:.0f}mm)  pivot w={pivot_w:+.2f}")
 
         return 0.0, pivot_w
 
+    if stop_cycle_count >= STOP_MAX_CYCLES and DEBUG_STOP:
+        print(f"  [STOP] max cycles reached ({STOP_MAX_CYCLES}) -> force layered mode")
+    stop_cycle_count = 0
     return find_vw_layered(scan_points, heading_deg)
 
 
