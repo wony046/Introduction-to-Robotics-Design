@@ -65,12 +65,14 @@ SCAN_HALF_ANGLE  = 90
 ANGLE_STEP       = 5
 SEND_INTERVAL    = 0.1
 DEPTH_JUMP_THRES = 120   # mm: 이 이상 거리 변화 시 다른 물체로 간주 (양방향)
+LIDAR_WATCHDOG_TIMEOUT = 0.5  # s: 이 시간 이상 새 스캔 없으면 비상 정지
 
 # ── Stop zone 정면 노이즈 억제 ────────────────────────────────────────────────
 STOP_FRONT_DEADBAND = 15  # deg: 이 각도 이내 정면 장애물은 기존 방향 유지
 
 # ── 전역 상태 ─────────────────────────────────────────────────────────────────
 arduino_heading_deg = 0.0
+arduino_buf         = ""    # Arduino 시리얼 비블로킹 수신 버퍼
 avoidance_w_sign    = 0.0   # danger zone 방향 메모리
 stop_zone_w_sign    = 0.0   # stop zone 전용 방향 메모리 (danger zone과 독립)
 no_danger_count     = 0
@@ -108,12 +110,19 @@ def parse_packet(data):
     return (angle_q6 / 64.0), (distance_q2 / 4.0)
 
 def read_arduino(arduino):
-    global arduino_heading_deg
-    while arduino.in_waiting > 0:
-        try:
-            line = arduino.readline().decode('utf-8', errors='ignore').strip()
-            if line.startswith('H:'): arduino_heading_deg = float(line[2:])
-        except Exception: pass
+    """비블로킹: 가용 바이트 전체를 한번에 읽고 완성된 줄만 처리"""
+    global arduino_heading_deg, arduino_buf
+    if arduino.in_waiting <= 0:
+        return
+    try:
+        arduino_buf += arduino.read(arduino.in_waiting).decode('utf-8', errors='ignore')
+        while '\n' in arduino_buf:
+            line, arduino_buf = arduino_buf.split('\n', 1)
+            line = line.strip()
+            if line.startswith('H:'):
+                arduino_heading_deg = float(line[2:])
+    except Exception:
+        pass
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -428,14 +437,24 @@ def main():
     lidar.write(bytes([0xA5, 0x20]))
     lidar.read(7)
 
-    scan_points  = []
-    last_send    = time.time()
-    last_cmd_str = ""
+    scan_points    = []
+    last_send      = time.time()
+    last_scan_time = time.time()  # watchdog: 마지막 정상 스캔 시각
+    last_cmd_str   = ""
 
     try:
         while True:
             read_arduino(arduino)
             raw = lidar.read(5)
+
+            # ── Watchdog: 라이다 데이터 끊김 감지 ──────────────────────────────
+            now = time.time()
+            if now - last_scan_time > LIDAR_WATCHDOG_TIMEOUT:
+                arduino.write(b"0.00 0.00\n")
+                print(f"[경고] 라이다 스캔 없음 ({LIDAR_WATCHDOG_TIMEOUT}s) → 비상 정지")
+                last_scan_time = now  # 스팸 방지: 다음 TIMEOUT 후 재경고
+
+            if len(raw) < 5: continue  # 타임아웃으로 부분 수신 시 건너뜀
             result = parse_packet(raw)
             if result is None: continue
 
@@ -443,6 +462,7 @@ def main():
             s_flag = raw[0] & 0x01
 
             if s_flag == 1 and scan_points:
+                last_scan_time = time.time()  # 정상 스캔 수신 → watchdog 리셋
                 front_points = [
                     (a, d) for a, d in scan_points
                     if is_in_front(a) and d > 0
