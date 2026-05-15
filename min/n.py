@@ -37,11 +37,12 @@ MAX_W         = 1.50
 DT            = 0.10
 PREDICT_TIME  = 0.6
 
-W_HEADING     = 1.5
-W_CLEARANCE   = 2.0
-W_VELOCITY    = 1.0
-W_SMOOTHNESS  = 0.5
-W_SPACE       = 1.5   # 궤적 최종 방향의 열린 공간 우선 점수
+# 우선순위 가중치 설계:
+#   2순위(거리) 최대 기여 = 10.0,  3순위(회전) 최대 기여 = 1.0
+#   → 거리 점수 0.1 차이가 회전 최대 이득을 초과 → 우선순위 보장
+W_CLEARANCE   = 5.0   # 2순위: 궤적 상 장애물 최소 이격 거리
+W_SPACE       = 5.0   # 2순위: 궤적 최종 방향의 열린 공간 거리
+W_ROTATION    = 1.0   # 3순위: 회전 최소화 (|w| 작을수록 유리)
 W_DEADZONE    = 0.10
 
 # ── 4. RECOVERY ─────────────────────────────────────────────────────────────
@@ -254,7 +255,7 @@ def open_space_score(scan_points, w, cone_deg=30.0, max_dist=4000.0):
     return min(avg / max_dist, 1.0)
 
 
-def run_dwa(scan_points, prev_v, prev_w, narrow_mode, goal_angle_rad=0.0):
+def run_dwa(scan_points, narrow_mode):
     # t=0 즉시 충돌 검사 (정면 ±30° 한정)
     for a_deg, d in scan_points:
         na = normalize_angle_deg(a_deg)
@@ -285,19 +286,17 @@ def run_dwa(scan_points, prev_v, prev_w, narrow_mode, goal_angle_rad=0.0):
             if clearance < 0: continue
             safe_count += 1
 
-            remaining = normalize_angle_rad(goal_angle_rad - w * PREDICT_TIME)
-            heading_score = (math.pi - abs(remaining)) / math.pi
-            heading_score -= 0.04 * abs(w) * (1.0 - abs(remaining) / math.pi)
-            clearance_score  = min(clearance / 1000.0, 1.0)
-            velocity_score   = v / max(v_max, 1e-3)
-            smoothness_score = -abs(w - prev_w) / (2.0 * MAX_W)
-            space_score      = space_scores[w]
+            # 1순위: 지나갈 수 있는가 → clearance < 0이면 위에서 continue 처리됨
+            # 2순위: 로봇으로부터 먼가 (궤적 이격 거리 + 전방 열린 공간)
+            # 3순위: 회전 최소화
+            clearance_score = min(clearance / 1000.0, 1.0)
+            space_score     = space_scores[w]
+            rotation_score  = 1.0 - abs(w) / MAX_W
 
-            score = (W_HEADING    * heading_score
-                   + W_CLEARANCE  * clearance_score
-                   + W_VELOCITY   * velocity_score
-                   + W_SMOOTHNESS * smoothness_score
-                   + W_SPACE      * space_score)
+            score = (W_CLEARANCE * clearance_score
+                   + W_SPACE     * space_score
+                   + W_ROTATION  * rotation_score
+                   + 0.05 * (v / max(v_max, 1e-3)))   # 정지 방지 미소 편향
 
             if score > best_score:
                 best_score = score
@@ -429,10 +428,7 @@ def main():
                             if state.current_state == RobotState.DRIVE:
                                 side_min = min(prox['left'], prox['right'])
                                 narrow = front_min < 350.0 or side_min < 140.0
-                                v, w, safe_count = run_dwa(
-                                    scan_points, state.prev_v, state.prev_w,
-                                    narrow, goal_angle_rad
-                                )
+                                v, w, safe_count = run_dwa(scan_points, narrow)
 
                                 if v <= 0.01 and abs(w) < 0.3:
                                     state.spin_count += 1
