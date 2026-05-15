@@ -2,172 +2,124 @@ import serial
 import time
 import math
 
-# ── 포트 ─────────────────────────────────────────────────────────────────────
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 포트 & 라이다 설정
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 LIDAR_PORT       = "/dev/ttyUSB0"
 ARDUINO_PORT     = "/dev/ttyAMA3"
 BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 115200
 
-# ── 라이다 보정 ───────────────────────────────────────────────────────────────
 LIDAR_OFFSET    = 20    # mm: 라이다 측정값 보정
-LIDAR_MIN_VALID = 100   # mm: 이 미만은 라이다 오류로 간주 → 무시
+LIDAR_MIN_VALID = 100   # mm: 이 미만 무시 (노이즈)
+DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 
-# ── 로봇 파라미터 & 기구학 ────────────────────────────────────────────────────
-ROBOT_HALF_WIDTH  = 110  # mm: 라이다 중심 ~ 좌우 끝
-SAFETY_MARGIN     = 30   # mm: 수평 안전 여유 → threshold = 140mm
-MIN_PASSAGE_WIDTH = 240  # mm: 이 물리적 너비 이상이어야 통과 가능하다고 판단
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 로봇 & 속도 파라미터
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# ── 위험구역 ──────────────────────────────────────────────────────────────────
-DETECTION_RANGE  = 1500  # mm: LiDAR 최대 신뢰 거리
-FORWARD_RANGE    = 800   # mm: 위험구역 전방 깊이
+ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
-# ── 속도 파라미터 ─────────────────────────────────────────────────────────────
 FORWARD_SPEED    = 0.35
 MIN_SPEED        = 0.07
-SLOW_START_DIST  = 400
-STOP_FWD_RANGE   = 180
-W_GAIN           = 1.2
 MAX_W            = 1.5
-W_MIN_DANGER     = 0.5
+W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
 W_SMOOTH         = 0.6
 
-# ── 측면 보정 (additive 방식) ─────────────────────────────────────────────────
-# 측면 밴드 = "바운딩 박스 밖 + ±90° 이내 모든 포인트"
-# 좌/우 하위 N% 거리 → 선형 weight → 차분 → 전방 w에 *덧셈*
-# 블렌딩(가중평균)이 아닌 덧셈이므로 전방 방향 결정을 절대 뒤집지 않음
-SIDE_D_MIN        = 150   # mm: 이 미만 → weight = 1.0
-SIDE_D_MAX        = 400   # mm: 이 이상 → weight = 0.0
-SIDE_W_ADD_GAIN   = 0.4   # rad/s: 전방 w에 더해지는 최대 추가량 (±)
-                           #        작게 유지 → 방향 결정은 전방 로직 우선
-SIDE_V_REDUCE     = 0.5   # max_weight=1.0일 때 선속도 50% 감속
-SIDE_PERCENTILE   = 10    # %: 하위 N% 거리 평균을 측면 대표값으로 사용
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 계층형 바운딩 박스 정의 (6개 레이어)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 각 레이어: 거리 범위, horiz 임계, w_gain, 기본 가중치, 동적 가중치 여부, v 영향 여부
 
-# ── 근접 후보 ────────────────────────────────────────────────────────────────
-PROXIMITY_HORIZ = 170
+LAYERS = [
+    # L1: 가장 가까움, 동적 가중치, 측면까지 넓게 봄
+    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200,
+     'w_gain':1.2, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
+    # L2: 가까움, 동적 가중치
+    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':170,
+     'w_gain':1.0, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
+    # L3: 중간
+    {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140,
+     'w_gain':0.8, 'weight_base':0.2, 'weight_dynamic':False, 'affects_v':True},
+    # L4: 중간-원거리
+    {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':140,
+     'w_gain':0.6, 'weight_base':0.1, 'weight_dynamic':False, 'affects_v':True},
+    # L5: 원거리, 미세 보정만 (v 영향 없음)
+    {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':120,
+     'w_gain':0.4, 'weight_base':0.05,'weight_dynamic':False, 'affects_v':False},
+    # L6: 최원거리, 미세 보정만
+    {'name':'L6', 'fwd_min':660, 'fwd_max':780, 'horiz_th':100,
+     'w_gain':0.3, 'weight_base':0.02,'weight_dynamic':False, 'affects_v':False},
+]
 
-# ── 헤딩 방향 점수제 ──────────────────────────────────────────────────────────
-HEADING_WEIGHT_MM = 5.0
+LAYER_PERCENTILE = 5    # %: 하위 N% dist 평균으로 레이어 대표점 계산
 
-# ── 스캔 파라미터 ─────────────────────────────────────────────────────────────
-SCAN_HALF_ANGLE  = 90
-ANGLE_STEP       = 5
-SEND_INTERVAL    = 0.1
-DEPTH_JUMP_THRES = 120
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STOP zone (계층형과 완전 별도)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STOP rectangle: 전방 100~150mm 사이, horiz < 110mm (220mm 폭)
 
-# ── Stop zone 정면 노이즈 억제 ────────────────────────────────────────────────
-STOP_FRONT_DEADBAND = 15
+STOP_FWD_MIN  = 100
+STOP_FWD_MAX  = 150
+STOP_HORIZ_TH = 110
 
-# ── 디버그 출력 토글 ──────────────────────────────────────────────────────────
-DEBUG_SIDE  = True
-DEBUG_BLEND = True
-DEBUG_FRONT = True
-DEBUG_GAP   = True
-DEBUG_DIR   = True
+# STOP 탈출: ±135° 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
+STOP_ESCAPE_SCAN_HALF = 135
+STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
+STOP_SECTOR_SIZE      = 10                          # deg: 갭 검색 sector 크기
 
-# ── 전역 상태 ─────────────────────────────────────────────────────────────────
-arduino_heading_deg = 0.0
-avoidance_w_sign    = 0.0
-stop_zone_w_sign    = 0.0
-no_danger_count     = 0
-prev_w              = 0.0
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 방향 점수제 (gap + layer 통합)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SCORE_ALPHA       = 1.0    # gap_width 계수
+SCORE_BETA        = 200    # layer push 계수
+HEADING_WEIGHT_MM = 5.0    # 헤딩 1° = 여유 5mm
+
+MIN_PASSAGE_WIDTH = 240    # 갭이 이보다 좁으면 차단으로 판단
+DEPTH_JUMP_THRES  = 120    # mm: 이상이면 다른 물체로 인식
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 스캔 범위 & 통신
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SCAN_WIDE_HALF = 135   # 메인에서 받는 스캔 범위 (STOP escape용)
+SEND_INTERVAL  = 0.1
+
+# ── 디버그 토글 ──────────────────────────────────────────────────────────────
+DEBUG_LAYERS = True    # 각 레이어 처리 결과
+DEBUG_STOP   = True    # STOP zone 감지 & 탈출
+DEBUG_DIR    = True    # 점수 계산 & 방향 결정
+DEBUG_FINAL  = True    # 최종 v, w
+
+# ── 전역 상태 ────────────────────────────────────────────────────────────────
+arduino_heading_deg   = 0.0
+avoidance_w_sign      = 0.0   # 방향 메모리 (옵션 A: 한 번 정하면 유지)
+no_active_count       = 0
+prev_w                = 0.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 유틸리티 & 수학 연산
+# 유틸리티
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def normalize_angle(angle):
     return angle - 360 if angle > 180 else angle
 
-def is_in_front(angle_norm):
-    return -SCAN_HALF_ANGLE <= angle_norm <= SCAN_HALF_ANGLE
+def is_in_front_90(a):
+    return -90 <= a <= 90
 
-def decompose(angle_norm_deg, distance_mm):
-    rad   = math.radians(angle_norm_deg)
-    horiz = abs(distance_mm * math.sin(rad))
-    fwd   = distance_mm * math.cos(rad)
+def is_in_wide_scan(a):
+    return -SCAN_WIDE_HALF <= a <= SCAN_WIDE_HALF
+
+def decompose(angle_deg, dist):
+    rad = math.radians(angle_deg)
+    horiz = abs(dist * math.sin(rad))
+    fwd   = dist * math.cos(rad)
     return horiz, fwd
 
-def percentile_low(values, pct):
-    """하위 pct% 거리의 평균 (노이즈 견고한 '가까운 거리' 추정)."""
-    if not values: return None
-    n_take = max(1, int(len(values) * pct / 100))
-    return sum(sorted(values)[:n_take]) / n_take
-
-
-def calc_side_correction(scan_points, danger_threshold):
-    """
-    측면 거리 기반 v/w 보정 신호 (additive 방식)
-
-    좌/우 하위 SIDE_PERCENTILE% 거리 → 선형 weight → 차분
-    → w_side: 전방 w에 덧셈으로 작용 (최대 ±SIDE_W_ADD_GAIN)
-    → v_scale: 선속도 감속 (가까운 쪽 weight 기반)
-    """
-    left_dists, right_dists = [], []
-
-    for angle_norm, dist in scan_points:
-        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
-        horiz, fwd = decompose(angle_norm, dist)
-
-        # 바운딩 박스 내부 제외 (전방 로직이 이미 처리)
-        in_bbox = (fwd > 0 and fwd <= FORWARD_RANGE and horiz < danger_threshold)
-        if in_bbox: continue
-
-        if   angle_norm < 0: left_dists.append(dist)
-        elif angle_norm > 0: right_dists.append(dist)
-
-    d_left  = percentile_low(left_dists,  SIDE_PERCENTILE) if left_dists  else SIDE_D_MAX
-    d_right = percentile_low(right_dists, SIDE_PERCENTILE) if right_dists else SIDE_D_MAX
-
-    rng = SIDE_D_MAX - SIDE_D_MIN
-    weight_L = max(0.0, min(1.0, (SIDE_D_MAX - d_left)  / rng))
-    weight_R = max(0.0, min(1.0, (SIDE_D_MAX - d_right) / rng))
-
-    # ⚙ ── A안 차분 (additive) ─────────────────────────────────────────────
-    # weight_R > weight_L → 오른쪽이 더 가까움 → w_side > 0 → 좌회전 방향
-    # 최대 ±SIDE_W_ADD_GAIN (0.4) 의 작은 추가 신호로 전방 w에 덧셈
-    w_side = SIDE_W_ADD_GAIN * (weight_R - weight_L)
-    max_weight = max(weight_L, weight_R)
-    v_scale = 1.0 - SIDE_V_REDUCE * max_weight
-    # ──────────────────────────────────────────────────────────────────────
-
-    return {
-        'w_side': w_side, 'v_scale': v_scale, 'max_weight': max_weight,
-        'weight_L': weight_L, 'weight_R': weight_R,
-        'd_left': d_left, 'd_right': d_right,
-        'n_left': len(left_dists), 'n_right': len(right_dists),
-        'raw_min_L': min(left_dists)  if left_dists  else None,
-        'raw_min_R': min(right_dists) if right_dists else None,
-    }
-
-
-def apply_side_correction(v_front, w_front, side_info, is_stop=False):
-    """
-    측면 보정 적용 (additive 방식):
-      - w: 전방 w에 w_side를 *덧셈* (블렌딩 아님 → 방향 절대 뒤집기 불가)
-      - v: 항상 v_scale 적용 (벽 가까울 때 감속)
-      - is_stop=True: STOP zone에서는 w_side 무시 (탈출 방향 방해 방지)
-    """
-    w_side = side_info['w_side']
-    v_blended = v_front * side_info['v_scale']
-
-    if is_stop:
-        w_blended = w_front           # STOP: 측면 w 무시
-    else:
-        w_blended = w_front + w_side  # DANGER/CLEAR: 덧셈
-
-    w_blended = max(-MAX_W, min(MAX_W, w_blended))
-
-    if DEBUG_BLEND and abs(w_side) > 0.01:
-        mode = "STOP" if is_stop else "ADD"
-        print(f"  [BLEND/{mode}] w_side={w_side:+.2f}: "
-              f"v({v_front:.2f}->{v_blended:.2f})  "
-              f"w({w_front:+.2f}->{w_blended:+.2f})")
-
-    return v_blended, w_blended
-
-
-def calc_law_of_cosines(d1, d2, angle_diff_deg):
+def cosine_dist(d1, d2, angle_diff_deg):
     theta = math.radians(abs(angle_diff_deg))
     return math.sqrt(d1**2 + d2**2 - 2 * d1 * d2 * math.cos(theta))
 
@@ -191,218 +143,271 @@ def read_arduino(arduino):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 코사인 법칙 기반 빈 공간 너비 계산
+# STOP zone 감지 & 탈출
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def detect_stop_zone(scan_points):
+    """STOP rectangle (fwd 100~150mm, horiz<110mm) 안에 장애물이 있는가?"""
+    for angle_norm, dist in scan_points:
+        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
+        if not is_in_front_90(angle_norm): continue
+        horiz, fwd = decompose(angle_norm, dist)
+        if STOP_FWD_MIN <= fwd <= STOP_FWD_MAX and horiz < STOP_HORIZ_TH:
+            return True
+    return False
+
+
+def find_stop_escape_direction(scan_points):
+    """
+    ±135° 범위를 STOP_SECTOR_SIZE(10°) sector로 나누어
+    각 sector의 평균 거리를 계산, 가장 빈 방향(angle deg) 반환.
+
+    Returns:
+      (target_angle_deg, gap_distance_mm)
+    """
+    sectors = {}  # sector_center → list of distances
+
+    for angle_norm, dist in scan_points:
+        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
+        if not is_in_wide_scan(angle_norm): continue
+        center = round(angle_norm / STOP_SECTOR_SIZE) * STOP_SECTOR_SIZE
+        sectors.setdefault(center, []).append(dist)
+
+    if not sectors:
+        return 0.0, 0.0
+
+    # 각 sector 평균 거리 → 가장 먼 sector 선택
+    sector_avg = {c: sum(d_list) / len(d_list) for c, d_list in sectors.items()}
+    best = max(sector_avg.keys(), key=lambda c: sector_avg[c])
+    return float(best), sector_avg[best]
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 레이어 처리
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def process_layer(scan_points, layer):
+    """
+    레이어 내 포인트들을 모아 분석.
+
+    반환:
+      None: 레이어 활성화 안 됨 (포인트 없음)
+      dict: 분석 결과
+        - weight: 이번 사이클 가중치 (동적 또는 고정)
+        - urgency: w_gain × horiz_error / horiz_th
+        - v_proposal: v 제안 (affects_v=True일 때만, 그 외 None)
+        - rep_angle/horiz/fwd: 하위 5% 평균 대표점
+        - push_left/push_right: 방향 점수용 (포인트 angle 부호로 분리)
+    """
+    pts = []
+    for angle_norm, dist in scan_points:
+        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
+        if not is_in_front_90(angle_norm): continue
+        horiz, fwd = decompose(angle_norm, dist)
+        if layer['fwd_min'] <= fwd < layer['fwd_max'] and horiz < layer['horiz_th']:
+            pts.append({
+                'angle': angle_norm, 'dist': dist,
+                'horiz': horiz, 'fwd': fwd,
+                'horiz_error': layer['horiz_th'] - horiz,
+            })
+
+    if not pts:
+        return None
+
+    # 하위 5% dist 포인트 → 대표점
+    n_take = max(1, int(len(pts) * LAYER_PERCENTILE / 100))
+    rep = sorted(pts, key=lambda p: p['dist'])[:n_take]
+
+    rep_angle = sum(p['angle'] for p in rep) / len(rep)
+    rep_horiz = sum(p['horiz'] for p in rep) / len(rep)
+    rep_fwd   = sum(p['fwd']   for p in rep) / len(rep)
+    rep_h_err = layer['horiz_th'] - rep_horiz
+
+    # 가중치
+    if layer['weight_dynamic']:
+        weight = max(layer['weight_base'],
+                     min(1.0, rep_h_err / layer['horiz_th']))
+    else:
+        weight = layer['weight_base']
+
+    # urgency (w 크기 기여)
+    urgency = layer['w_gain'] * rep_h_err / layer['horiz_th']
+
+    # v_proposal: 선형 보간 (near edge = MIN_SPEED, far edge = FORWARD_SPEED)
+    if layer['affects_v']:
+        progress = (rep_fwd - layer['fwd_min']) / (layer['fwd_max'] - layer['fwd_min'])
+        progress = max(0.0, min(1.0, progress))
+        v_proposal = MIN_SPEED + (FORWARD_SPEED - MIN_SPEED) * progress
+    else:
+        v_proposal = None
+
+    # push split: 하위 5% 포인트들을 좌/우로 나누어 horiz_error 합산
+    push_left  = sum(p['horiz_error'] for p in rep if p['angle'] < 0)
+    push_right = sum(p['horiz_error'] for p in rep if p['angle'] > 0)
+
+    return {
+        'name': layer['name'],
+        'weight': weight, 'urgency': urgency, 'v_proposal': v_proposal,
+        'rep_angle': rep_angle, 'rep_horiz': rep_horiz, 'rep_fwd': rep_fwd,
+        'push_left': push_left, 'push_right': push_right,
+        'n_points': len(pts),
+    }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Gap 너비 계산 (코사인 법칙)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def get_gap_width(scan_points, ref_angle, ref_dist, is_left):
-    if is_left:
-        search_points = sorted(
-            [p for p in scan_points if p[0] < ref_angle],
-            key=lambda x: x[0], reverse=True
-        )
-    else:
-        search_points = sorted(
-            [p for p in scan_points if p[0] > ref_angle],
-            key=lambda x: x[0]
-        )
+    """ref 기준 좌/우 첫 depth jump까지의 통과 가능 너비."""
+    front = [(a, d) for a, d in scan_points if is_in_front_90(a)]
 
-    if not search_points:
+    if is_left:
+        search = sorted([p for p in front if p[0] < ref_angle],
+                        key=lambda x: x[0], reverse=True)
+    else:
+        search = sorted([p for p in front if p[0] > ref_angle],
+                        key=lambda x: x[0])
+
+    if not search:
         return 0.0
 
     edge_p = (ref_angle, ref_dist)
-    tag = 'L' if is_left else 'R'
-
-    for i, p in enumerate(search_points):
+    for i, p in enumerate(search):
         if abs(p[1] - edge_p[1]) > DEPTH_JUMP_THRES:
-            wall_points = search_points[i:]
-            if wall_points:
-                min_width = min(
-                    calc_law_of_cosines(edge_p[1], wp[1], abs(edge_p[0] - wp[0]))
-                    for wp in wall_points
-                )
-                if DEBUG_GAP:
-                    print(f"  [GAP {tag}] edge={edge_p[0]:.0f}deg/{edge_p[1]:.0f}mm  "
-                          f"jump={p[1]-edge_p[1]:+.0f}mm  ->  width={min_width:.0f}mm")
-                return min_width
+            wall = search[i:]
+            if wall:
+                return min(cosine_dist(edge_p[1], wp[1], abs(edge_p[0] - wp[0]))
+                           for wp in wall)
         edge_p = p
 
-    rem_angle = abs((-SCAN_HALF_ANGLE - edge_p[0]) if is_left
-                    else (SCAN_HALF_ANGLE - edge_p[0]))
-
+    rem_angle = abs((-90 - edge_p[0]) if is_left else (90 - edge_p[0]))
     if rem_angle > 15:
-        width = calc_law_of_cosines(edge_p[1], edge_p[1], rem_angle)
-        if DEBUG_GAP:
-            print(f"  [GAP {tag}] wall extends to scan end  ->  "
-                  f"conservative width={width:.0f}mm "
-                  f"(edge {edge_p[1]:.0f}mm x {rem_angle:.0f}deg)")
-        return width
-
-    if DEBUG_GAP:
-        print(f"  [GAP {tag}] insufficient scan angle  ->  0mm")
+        return cosine_dist(edge_p[1], edge_p[1], rem_angle)
     return 0.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 회피 방향 결정
+# 계층형 v/w 산출 (메인 로직)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def select_direction_by_width(left_width, right_width, heading_deg):
-    """실제 통과 너비(mm) + 헤딩 보너스로 회피 방향 1회 결정."""
-    left_ok  = (left_width  >= MIN_PASSAGE_WIDTH)
-    right_ok = (right_width >= MIN_PASSAGE_WIDTH)
+def find_vw_layered(scan_points, heading_deg):
+    """
+    1. 6개 레이어 병렬 처리
+    2. gap 너비 계산 (가장 가까운 레이어의 대표점 기준)
+    3. 좌우 점수 통합 → 방향 결정 (avoidance_w_sign 적용)
+    4. v: affects_v 레이어 v_proposal의 가중 평균
+    5. w: 모든 활성 레이어 urgency의 가중 합 × direction
+    """
+    global avoidance_w_sign, no_active_count
 
-    if left_ok and not right_ok:
-        if DEBUG_DIR:
-            print(f"  [DIR] right blocked (width:{right_width:.0f}mm)  ->  force LEFT")
-        return 1.0
-    if right_ok and not left_ok:
-        if DEBUG_DIR:
-            print(f"  [DIR] left blocked (width:{left_width:.0f}mm)  ->  force RIGHT")
-        return -1.0
-    if not left_ok and not right_ok:
-        chosen = "LEFT" if left_width >= right_width else "RIGHT"
-        if DEBUG_DIR:
-            print(f"  [DIR] both narrow (L:{left_width:.0f} R:{right_width:.0f}mm)"
-                  f"  ->  push through {chosen}")
-        return 1.0 if left_width >= right_width else -1.0
+    # 1. 레이어 처리
+    layer_results = []
+    for layer in LAYERS:
+        r = process_layer(scan_points, layer)
+        if r is not None:
+            layer_results.append(r)
 
-    left_score  = left_width  + max(0.0, -heading_deg) * HEADING_WEIGHT_MM
-    right_score = right_width + max(0.0,  heading_deg) * HEADING_WEIGHT_MM
-    bonus_side = "R" if heading_deg > 0 else "L"
-    bonus_val  = abs(heading_deg) * HEADING_WEIGHT_MM
+    if DEBUG_LAYERS:
+        for r in layer_results:
+            v_str = f" v={r['v_proposal']:.2f}" if r['v_proposal'] is not None else ""
+            print(f"  [{r['name']}] n={r['n_points']:3d} "
+                  f"rep:h={r['rep_horiz']:.0f} a={r['rep_angle']:+.1f}° "
+                  f"f={r['rep_fwd']:.0f}  w={r['weight']:.2f} u={r['urgency']:.2f}{v_str}  "
+                  f"pL={r['push_left']:.0f} pR={r['push_right']:.0f}")
+
+    # 활성 레이어 없으면 직진
+    NO_ACTIVE_RESET = 3
+    if not layer_results:
+        no_active_count += 1
+        if no_active_count >= NO_ACTIVE_RESET:
+            avoidance_w_sign = 0.0
+        if DEBUG_FINAL:
+            print(f"  [FINAL] no active layers -> v={FORWARD_SPEED:.2f} w=0.00")
+        return FORWARD_SPEED, 0.0
+    no_active_count = 0
+
+    # 2. gap 너비 계산 (가장 가까운 레이어의 대표점 기준)
+    closest = min(layer_results, key=lambda r: r['rep_horiz'])
+    ref_angle = closest['rep_angle']
+    ref_dist  = math.sqrt(closest['rep_horiz']**2 + closest['rep_fwd']**2)
+
+    gap_L = get_gap_width(scan_points, ref_angle, ref_dist, is_left=True)
+    gap_R = get_gap_width(scan_points, ref_angle, ref_dist, is_left=False)
+
+    # 3. 좌우 점수 통합
+    sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
+    sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
+
+    score_L = (SCORE_ALPHA * gap_L
+               + SCORE_BETA  * sum_pR
+               + max(0.0, -heading_deg) * HEADING_WEIGHT_MM)
+    score_R = (SCORE_ALPHA * gap_R
+               + SCORE_BETA  * sum_pL
+               + max(0.0,  heading_deg) * HEADING_WEIGHT_MM)
+
     if DEBUG_DIR:
-        print(f"  [DIR_SCORE] L={left_score:.0f}  R={right_score:.0f}  "
-              f"(width L={left_width:.0f}mm R={right_width:.0f}mm  "
-              f"heading_bonus {bonus_side}+{bonus_val:.0f})")
-    return 1.0 if left_score >= right_score else -1.0
+        print(f"  [GAP] L={gap_L:.0f}mm R={gap_R:.0f}mm  "
+              f"(ref={ref_angle:+.1f}°/{ref_dist:.0f}mm from {closest['name']})")
+        print(f"  [SCORE] L={score_L:.0f}  R={score_R:.0f}  "
+              f"(gap αL={SCORE_ALPHA*gap_L:.0f}/αR={SCORE_ALPHA*gap_R:.0f}  "
+              f"push βL={SCORE_BETA*sum_pL:.0f}/βR={SCORE_BETA*sum_pR:.0f})")
+
+    # 4. 방향 결정 (avoidance_w_sign 옵션 A: 한 번 결정 후 고수)
+    if avoidance_w_sign == 0.0:
+        avoidance_w_sign = 1.0 if score_L >= score_R else -1.0
+        if DEBUG_DIR:
+            print(f"  [DIR_LOCK] {'LEFT' if avoidance_w_sign > 0 else 'RIGHT'}")
+    direction = avoidance_w_sign
+
+    # 5. v 계산: affects_v 레이어 v_proposal의 가중 평균
+    v_layers = [r for r in layer_results if r['v_proposal'] is not None]
+    if v_layers:
+        total_w = sum(r['weight'] for r in v_layers)
+        v = sum(r['weight'] * r['v_proposal'] for r in v_layers) / total_w
+    else:
+        v = FORWARD_SPEED   # L5/L6만 활성 → 최대 속도
+
+    # 6. w 크기: 모든 활성 레이어 urgency 가중 합
+    total_w_all = sum(r['weight'] for r in layer_results)
+    w_mag = sum(r['weight'] * r['urgency'] for r in layer_results) / total_w_all
+    w_mag = max(min(w_mag, MAX_W), W_MIN_DANGER)
+
+    w = direction * w_mag
+
+    if DEBUG_FINAL:
+        print(f"  [FINAL] v={v:.2f} w={w:+.2f} dir={'L' if direction > 0 else 'R'}")
+
+    return v, w
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# v/w 명령 계산
+# 메인 진입점 (STOP 우선)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def find_vw_command(scan_points, heading_deg):
-    global avoidance_w_sign, stop_zone_w_sign, no_danger_count
-    threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN
+    """STOP zone 우선 검사 → 활성 시 STOP escape, 아니면 계층형 처리."""
+    global avoidance_w_sign
 
-    # ── 0. 측면 보정 미리 계산 ────────────────────────────────────────────
-    side_info = calc_side_correction(scan_points, threshold)
-    if DEBUG_SIDE:
-        si = side_info
-        rmin_L = si['raw_min_L'] if si['raw_min_L'] is not None else 0
-        rmin_R = si['raw_min_R'] if si['raw_min_R'] is not None else 0
-        print(f"  [SIDE]  L: d={si['d_left']:.0f}mm wL={si['weight_L']:.2f} "
-              f"n={si['n_left']} min={rmin_L:.0f}  |  "
-              f"R: d={si['d_right']:.0f}mm wR={si['weight_R']:.2f} "
-              f"n={si['n_right']} min={rmin_R:.0f}")
-        print(f"          ->  w_side={si['w_side']:+.2f}  "
-              f"v_scale={si['v_scale']:.2f}  mw={si['max_weight']:.2f}")
+    if detect_stop_zone(scan_points):
+        target, gap_dist = find_stop_escape_direction(scan_points)
 
-    # ── 1. 위험 포인트 수집 ───────────────────────────────────────────────
-    danger_points = []
-    for angle_norm, dist in scan_points:
-        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
-        horiz, fwd = decompose(angle_norm, dist)
-        if fwd > 0 and fwd <= FORWARD_RANGE and horiz < threshold:
-            danger_points.append((angle_norm, dist, horiz, fwd))
+        # 피봇턴 방향: target angle 부호의 반대 (우측 갭이면 우회전 = w<0)
+        if abs(target) < 5:
+            pivot_w = -MAX_W  # 정면이 가장 빈 경우 default 우회전
+        else:
+            pivot_w = -math.copysign(MAX_W, target)
 
-    NO_DANGER_RESET = 3
-    if not danger_points:
-        no_danger_count += 1
-        if no_danger_count >= NO_DANGER_RESET:
-            avoidance_w_sign = 0.0
-            stop_zone_w_sign = 0.0
-        if DEBUG_FRONT:
-            print(f"  [FRONT] no danger points  ->  v={FORWARD_SPEED:.2f} w=0.00")
-        return apply_side_correction(FORWARD_SPEED, 0.0, side_info, is_stop=False)
-    no_danger_count = 0
-
-    # ── 2. 근접 후보 수집 ─────────────────────────────────────────────────
-    proximity_points = []
-    for angle_norm, dist in scan_points:
-        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
-        horiz, fwd = decompose(angle_norm, dist)
-        if fwd > 0 and fwd <= FORWARD_RANGE and threshold <= horiz < PROXIMITY_HORIZ:
-            proximity_points.append((angle_norm, dist, horiz, fwd))
-
-    # ── 3. 선속도 결정 ────────────────────────────────────────────────────
-    stop_points = [p for p in danger_points
-                   if p[3] <= STOP_FWD_RANGE and p[2] < ROBOT_HALF_WIDTH]
-    frontal     = [p for p in danger_points if p[3] >= p[2]]
-    n_fwd_ref   = min((p[3] for p in frontal), default=SLOW_START_DIST + 1)
-
-    horiz_ref_danger          = min(danger_points, key=lambda p: p[2])
-    _, _, n_horiz, _          = horiz_ref_danger
-    horiz_error               = threshold - n_horiz
-
-    ref_candidates            = danger_points + proximity_points
-    horiz_ref_stable          = min(ref_candidates, key=lambda p: p[2])
-    ref_angle, ref_dist, _, _ = horiz_ref_stable
-
-    is_proximity_ref = horiz_ref_stable not in danger_points
-    if DEBUG_FRONT:
-        print(f"  [FRONT] fwd={n_fwd_ref:.0f}mm  stop={len(stop_points)}  "
-              f"ref_angle={ref_angle:.1f}deg  horiz(danger)={n_horiz:.0f}mm"
-              + ("  [proximity_ref]" if is_proximity_ref else ""))
-
-    if stop_points:
-        v = 0.0
-    elif n_fwd_ref >= SLOW_START_DIST:
-        v = FORWARD_SPEED
-    else:
-        ratio = (n_fwd_ref - STOP_FWD_RANGE) / (SLOW_START_DIST - STOP_FWD_RANGE)
-        v = max(FORWARD_SPEED * ratio, MIN_SPEED)
-
-    if horiz_error <= 0:
+        # STOP 빠져나간 후 새 방향 결정하도록 메모리 리셋
         avoidance_w_sign = 0.0
-        stop_zone_w_sign = 0.0
-        if DEBUG_FRONT:
-            print(f"  [FRONT_CMD] v={v:.2f}  w=0.00  (no horiz error, passing through)")
-        return apply_side_correction(v, 0.0, side_info, is_stop=False)
 
-    # ── 4. 회전 방향 결정 ─────────────────────────────────────────────────
-    if stop_points:
-        stop_angle = min(stop_points, key=lambda p: p[2])[0]
-        if abs(stop_angle) < STOP_FRONT_DEADBAND and stop_zone_w_sign != 0.0:
-            avoidance_w_sign = stop_zone_w_sign
-            if DEBUG_DIR:
-                print(f"  [STOP] front noise (angle:{stop_angle:.1f}deg)  ->  "
-                      f"keep prev dir ({'LEFT' if avoidance_w_sign > 0 else 'RIGHT'})")
-        else:
-            avoidance_w_sign = 1.0 if stop_angle >= 0 else -1.0
-            stop_zone_w_sign = avoidance_w_sign
-            if DEBUG_DIR:
-                print(f"  [STOP] angle:{stop_angle:.1f}deg  ->  "
-                      f"{'LEFT' if avoidance_w_sign > 0 else 'RIGHT'} (immediate)")
-    else:
-        stop_zone_w_sign = 0.0
-        left_width  = get_gap_width(scan_points, ref_angle, ref_dist, is_left=True)
-        right_width = get_gap_width(scan_points, ref_angle, ref_dist, is_left=False)
+        if DEBUG_STOP:
+            print(f"  [STOP] zone detected -> escape target={target:+.0f}° "
+                  f"(gap_dist={gap_dist:.0f}mm)  pivot w={pivot_w:+.2f}")
 
-        if avoidance_w_sign == 0.0:
-            avoidance_w_sign = select_direction_by_width(left_width, right_width, heading_deg)
-            if DEBUG_DIR:
-                print(f"  [DIR_LOCK] {'LEFT' if avoidance_w_sign > 0 else 'RIGHT'}")
-        else:
-            committed_width = left_width  if avoidance_w_sign > 0 else right_width
-            opposite_width  = right_width if avoidance_w_sign > 0 else left_width
-            if committed_width < MIN_PASSAGE_WIDTH and opposite_width >= MIN_PASSAGE_WIDTH:
-                old = avoidance_w_sign
-                avoidance_w_sign = select_direction_by_width(left_width, right_width, heading_deg)
-                if avoidance_w_sign != old and DEBUG_DIR:
-                    print(f"  [DIR_FLIP] opposite passable  ->  "
-                          f"{'LEFT' if avoidance_w_sign > 0 else 'RIGHT'}")
+        return 0.0, pivot_w
 
-    # ── 5. 각속도 계산 ────────────────────────────────────────────────────
-    w_mag = max(min(W_GAIN * horiz_error / threshold, MAX_W), W_MIN_DANGER)
-    w     = avoidance_w_sign * w_mag
-
-    if DEBUG_FRONT:
-        print(f"  [FRONT_CMD] v={v:.2f}  w={w:+.2f}  (horiz_err={horiz_error:.0f}mm)")
-
-    # STOP zone 여부에 따라 측면 보정 모드 분기
-    is_stop = (len(stop_points) > 0)
-    return apply_side_correction(v, w, side_info, is_stop=is_stop)
+    return find_vw_layered(scan_points, heading_deg)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -411,18 +416,18 @@ def find_vw_command(scan_points, heading_deg):
 
 def main():
     global prev_w
-    print("=== RPLIDAR Obstacle Avoidance (Side Correction: Additive A) ===")
-    print(f"  BoundingBox : horiz {ROBOT_HALF_WIDTH + SAFETY_MARGIN}mm x fwd {FORWARD_RANGE}mm")
-    print(f"  SideCorr    : D=[{SIDE_D_MIN}~{SIDE_D_MAX}]mm  bottom {SIDE_PERCENTILE}% percentile")
-    print(f"  SideCorr    : add_gain={SIDE_W_ADD_GAIN} (additive mode, max +/-{SIDE_W_ADD_GAIN} rad/s)")
-    print(f"  SideCorr    : v_reduce={SIDE_V_REDUCE}  (STOP zone: w_side disabled)")
-    print(f"  MinPassage  : {MIN_PASSAGE_WIDTH}mm")
-    print(f"  ProximityRef: horiz < {PROXIMITY_HORIZ}mm (ref stabilization)")
-    print(f"  NoiseFilter : ignore dist < {LIDAR_MIN_VALID}mm")
-    print(f"  DepthJump   : +/-{DEPTH_JUMP_THRES}mm (bidirectional)")
-    print(f"  FrontDead   : +/-{STOP_FRONT_DEADBAND}deg (stop zone noise suppression)")
-    print(f"  Debug flags : SIDE={DEBUG_SIDE} BLEND={DEBUG_BLEND} FRONT={DEBUG_FRONT} "
-          f"GAP={DEBUG_GAP} DIR={DEBUG_DIR}")
+    print("=== RPLIDAR Obstacle Avoidance (Layered Bounding Box) ===")
+    print(f"  Layers      : 6 layers (60~780mm), bottom {LAYER_PERCENTILE}% per layer")
+    print(f"  L1-L2       : dynamic weight max(base, h_err/h_th), affects v")
+    print(f"  L3-L4       : fixed weight 0.2/0.1, affects v")
+    print(f"  L5-L6       : fixed weight 0.05/0.02, no v effect")
+    print(f"  STOP zone   : fwd {STOP_FWD_MIN}-{STOP_FWD_MAX}mm, horiz<{STOP_HORIZ_TH}mm")
+    print(f"  STOP escape : +/-{STOP_ESCAPE_SCAN_HALF}deg scan, "
+          f"min_gap={STOP_ESCAPE_MIN_GAP}mm, sector={STOP_SECTOR_SIZE}deg")
+    print(f"  Scoring     : alpha={SCORE_ALPHA} beta={SCORE_BETA}")
+    print(f"  Direction   : avoidance_w_sign (option A: lock first, reset after 3 clear)")
+    print(f"  Debug flags : LAYERS={DEBUG_LAYERS} STOP={DEBUG_STOP} "
+          f"DIR={DEBUG_DIR} FINAL={DEBUG_FINAL}")
     print("=" * 70)
 
     lidar   = serial.Serial(LIDAR_PORT,   BAUDRATE_LIDAR,   timeout=1)
@@ -449,13 +454,14 @@ def main():
             s_flag = raw[0] & 0x01
 
             if s_flag == 1 and scan_points:
-                front_points = [
+                # ±135°까지 통과 (STOP escape에서 사용)
+                wide_points = [
                     (a, d) for a, d in scan_points
-                    if is_in_front(a) and d > 0
+                    if is_in_wide_scan(a) and d > 0
                 ]
                 now = time.time()
                 if now - last_send >= SEND_INTERVAL:
-                    v, w = find_vw_command(front_points, arduino_heading_deg)
+                    v, w = find_vw_command(wide_points, arduino_heading_deg)
                     w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
                     prev_w = w
                     cmd = f"{v:.2f} {w:.2f}\n"
