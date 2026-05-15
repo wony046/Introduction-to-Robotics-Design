@@ -38,8 +38,8 @@ PREDICT_TIME  = 0.6
 
 W_HEADING     = 1.5
 W_CLEARANCE   = 2.5
-W_VELOCITY    = 0.7
-W_SMOOTHNESS  = 1.5
+W_VELOCITY    = 1.2
+W_SMOOTHNESS  = 0.8
 W_DEADZONE    = 0.10
 
 # ── 4. RECOVERY ─────────────────────────────────────────────────────────────
@@ -395,10 +395,18 @@ def main():
                                     narrow, goal_angle_rad
                                 )
 
-                                if v <= 0.01:
+                                if v <= 0.01 and abs(w) < 0.1:
                                     state.spin_count += 1
                                 else:
                                     state.spin_count = 0
+
+                                if state.spin_count >= SPIN_LOCK_COUNT:
+                                    side_clear = max(prox['front_left'], prox['front_right'])
+                                    if side_clear > RECOVERY_CLEAR_MM:
+                                        sign = pick_recovery_direction(prox, goal_angle_rad)
+                                        v, w = 0.0, MAX_W * 0.6 * sign
+                                        state.spin_count = 0
+                                        safe_count = 1
 
                                 needs_recovery = (
                                     state.spin_count >= SPIN_LOCK_COUNT
