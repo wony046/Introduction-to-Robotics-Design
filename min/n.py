@@ -24,7 +24,8 @@ BAUDRATE_ARDUINO = 115200
 
 # ── 2. 안전 ─────────────────────────────────────────────────────────────────
 SAFETY_DIST_MM         = 130.0
-ROBOT_RADIUS_MM        = 150.0
+ROBOT_RADIUS_MM        = 150.0   # 물리적 안전 반경 (정지/회전 시 사용)
+DWA_RADIUS_MM          = 100.0   # DWA 궤적 계획 반경 (전진 시 사용)
 EMERGENCY_THRESHOLD_MM = 140.0
 RECOVERY_CLEAR_MM      = 220.0
 LIDAR_NOISE_MM         = 80.0
@@ -210,7 +211,7 @@ def calculate_clearance(v, w, ox, oy):
     if len(ox) == 0:
         return 99999.0
 
-    if abs(v) < 1e-3 and abs(w) < 1e-3:
+    if abs(v) < 1e-3:  # 정지 또는 제자리 회전 — 물리적 반경으로 검사
         nearest = float(np.min(np.hypot(ox, oy)))
         return nearest if nearest >= ROBOT_RADIUS_MM else -1.0
 
@@ -226,7 +227,8 @@ def calculate_clearance(v, w, ox, oy):
     dy = oy[np.newaxis, :] - robot_y[:, np.newaxis]
     dists_sq = dx * dx + dy * dy
 
-    if np.any(dists_sq < ROBOT_RADIUS_MM ** 2):
+    # 전진 궤적은 DWA 계획 반경(작은 값) 사용 → 통과 가능 공간에서 경로 탐색 허용
+    if np.any(dists_sq < DWA_RADIUS_MM ** 2):
         return -1.0
     return float(math.sqrt(float(np.min(dists_sq))))
 
