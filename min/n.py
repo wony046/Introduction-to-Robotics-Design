@@ -74,6 +74,7 @@ class DriveState:
     rec_initial_sign: int            = 1
     stuck_count:      int            = 0
     spin_count:       int            = 0
+    rec_w:            float          = 0.0   # 수학적으로 계산된 리커버리 회전속도 (부호 포함)
 
 
 def normalize_angle_deg(angle):
@@ -292,11 +293,31 @@ def pick_recovery_direction(prox, goal_angle_rad=0.0):
     return 1 if left_room >= right_room else -1
 
 
-def recovery_step(attempt, initial_sign, stuck=0):
-    sign = initial_sign if (attempt % 2 == 0) else -initial_sign
-    if stuck >= 1:
-        return 0.0, MAX_W * sign
-    return 0.0, MAX_W * REC_TURN_W_RATIO * sign
+def calc_recovery_w(scan_points, sign, stuck=0):
+    """전방 장애물 각도 분포에서 리커버리 회전 속도(w, 부호 포함)를 수학적으로 계산.
+
+    원리: 회전 방향의 반대쪽(막힌 쪽) 장애물이 차지하는 최대 각도(obstacle_limit)를
+    구하고, 그 각도+여유를 REC_CYCLE 시간 안에 회전하는 w = angle / time 적용.
+
+    sign=+1 → 좌회전: 우측(양수 각도) 장애물이 막힌 범위 파악
+    sign=-1 → 우회전: 좌측(음수 각도) 장애물이 막힌 범위 파악
+    """
+    obstacle_limit_deg = 0.0
+    for a, d in scan_points:
+        na = normalize_angle_deg(a)
+        if d >= RECOVERY_CLEAR_MM:
+            continue
+        if sign > 0 and 0 < na <= 90:
+            obstacle_limit_deg = max(obstacle_limit_deg, na)
+        elif sign < 0 and -90 <= na < 0:
+            obstacle_limit_deg = max(obstacle_limit_deg, abs(na))
+
+    # 장애물 끝 각도 + 여유 20° → 최소 45° 보장
+    target_rad = math.radians(max(obstacle_limit_deg + 20.0, 45.0))
+    cycle = REC_STUCK_CYCLE if stuck >= 1 else REC_CYCLE
+    w_needed = target_rad / cycle           # 필요 각속도 = 각도 / 시간
+    w_max = MAX_W if stuck >= 1 else MAX_W * REC_TURN_W_RATIO
+    return float(np.clip(w_needed, 0.4, w_max)) * sign
 
 
 def main():
@@ -386,7 +407,7 @@ def main():
                                     narrow, goal_angle_rad
                                 )
 
-                                if v <= 0.01 and abs(w) < 0.1:
+                                if v <= 0.01 and abs(w) < 0.3:
                                     state.spin_count += 1
                                 else:
                                     state.spin_count = 0
@@ -401,8 +422,7 @@ def main():
 
                                 needs_recovery = (
                                     state.spin_count >= SPIN_LOCK_COUNT
-                                    or prox['front'] < EMERGENCY_THRESHOLD_MM
-                                    or (safe_count == 0 and front_min < EMERGENCY_THRESHOLD_MM)
+                                    or safe_count == 0
                                 )
                                 if needs_recovery:
                                     reason = ("SPIN" if state.spin_count >= SPIN_LOCK_COUNT
@@ -415,14 +435,14 @@ def main():
                                     state.spin_count       = 0
                                     state.rec_initial_sign = pick_recovery_direction(
                                         prox, goal_angle_rad)
-                                    v, w = 0.0, MAX_W * REC_TURN_W_RATIO * state.rec_initial_sign
+                                    state.rec_w = calc_recovery_w(
+                                        scan_points, state.rec_initial_sign)
+                                    v, w = 0.0, state.rec_w
                                     safe_count = -1
 
                             else:
                                 elapsed = now - state.rec_start_time
-                                v, w = recovery_step(state.rec_attempt,
-                                                     state.rec_initial_sign,
-                                                     state.stuck_count)
+                                v, w = 0.0, state.rec_w
                                 safe_count = -1
 
                                 cycle = REC_STUCK_CYCLE if state.stuck_count >= 1 else REC_CYCLE
@@ -444,6 +464,9 @@ def main():
                                             state.rec_attempt      = 0
                                             state.rec_initial_sign = pick_recovery_direction(
                                                 prox, goal_angle_rad)
+                                            state.rec_w = calc_recovery_w(
+                                                scan_points, state.rec_initial_sign,
+                                                state.stuck_count)
                                             print(f"  [STUCK] {state.stuck_count}", flush=True)
 
                             cmd = f"{v:.2f} {w:.2f}\n"
