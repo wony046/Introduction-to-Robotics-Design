@@ -38,9 +38,10 @@ DT            = 0.10
 PREDICT_TIME  = 0.6
 
 W_HEADING     = 1.5
-W_CLEARANCE   = 2.5
-W_VELOCITY    = 1.2
-W_SMOOTHNESS  = 0.8
+W_CLEARANCE   = 2.0
+W_VELOCITY    = 1.0
+W_SMOOTHNESS  = 0.5
+W_SPACE       = 1.5   # 궤적 최종 방향의 열린 공간 우선 점수
 W_DEADZONE    = 0.10
 
 # ── 4. RECOVERY ─────────────────────────────────────────────────────────────
@@ -232,6 +233,27 @@ def calculate_clearance(v, w, ox, oy):
     return float(math.sqrt(float(np.min(dists_sq))))
 
 
+def open_space_score(scan_points, w, cone_deg=30.0, max_dist=4000.0):
+    """궤적 최종 방향의 열린 공간 점수 (0~1).
+
+    w로 PREDICT_TIME 이동 후 로봇이 향하는 방향(라이다 CW 각도계 기준) ±cone_deg
+    내의 라이다 거리 평균을 max_dist로 정규화한다.
+    거리가 멀수록(열린 공간) 점수가 높아진다.
+
+    변환: DWA +w = 좌회전(CCW) → 라이다 기준 음수(-) 방향
+          DWA -w = 우회전(CW)  → 라이다 기준 양수(+) 방향
+    """
+    final_deg = math.degrees(-w * PREDICT_TIME)
+    total, count = 0.0, 0
+    for a, d in scan_points:
+        na = normalize_angle_deg(a)
+        if abs(normalize_angle_deg(na - final_deg)) <= cone_deg:
+            total += d
+            count += 1
+    avg = (total / count) if count > 0 else max_dist
+    return min(avg / max_dist, 1.0)
+
+
 def run_dwa(scan_points, prev_v, prev_w, narrow_mode, goal_angle_rad=0.0):
     # t=0 즉시 충돌 검사 (정면 ±30° 한정)
     for a_deg, d in scan_points:
@@ -248,6 +270,9 @@ def run_dwa(scan_points, prev_v, prev_w, narrow_mode, goal_angle_rad=0.0):
     else:
         v_candidates = [0.0, v_max * 0.33, v_max * 0.66, v_max]
         w_candidates = [-1.2, -0.8, -0.5, -0.25, -0.1, 0.0, 0.1, 0.25, 0.5, 0.8, 1.2]
+
+    # 각 w별 열린 공간 점수를 미리 1회 계산 (v 루프 안에서 반복하지 않도록)
+    space_scores = {w: open_space_score(scan_points, w) for w in w_candidates}
 
     best_v, best_w = 0.0, 0.0
     best_score = -float('inf')
@@ -266,11 +291,13 @@ def run_dwa(scan_points, prev_v, prev_w, narrow_mode, goal_angle_rad=0.0):
             clearance_score  = min(clearance / 1000.0, 1.0)
             velocity_score   = v / max(v_max, 1e-3)
             smoothness_score = -abs(w - prev_w) / (2.0 * MAX_W)
+            space_score      = space_scores[w]
 
             score = (W_HEADING    * heading_score
                    + W_CLEARANCE  * clearance_score
                    + W_VELOCITY   * velocity_score
-                   + W_SMOOTHNESS * smoothness_score)
+                   + W_SMOOTHNESS * smoothness_score
+                   + W_SPACE      * space_score)
 
             if score > best_score:
                 best_score = score
