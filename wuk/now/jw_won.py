@@ -96,11 +96,8 @@ DEBUG_FINAL  = True    # 최종 v, w
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
-avoidance_w_sign      = 0.0   # STOP zone 피봇 방향 메모리
 prev_w                = 0.0
 stop_cycle_count      = 0     # 연속 STOP 사이클 카운터
-stop_locked_target = 0.0 # 정지로직 수정
-stop_locked_gap = 0.0 # 정지로직 수정
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -397,30 +394,16 @@ def find_vw_layered(scan_points, heading_deg):
 
 def find_vw_command(scan_points, heading_deg):
     """STOP zone 우선 검사 → 활성 시 STOP escape, 아니면 계층형 처리."""
-    global avoidance_w_sign, stop_cycle_count, stop_locked_target, stop_locked_gap
+    global stop_cycle_count
 
     if detect_stop_zone(scan_points) and stop_cycle_count < STOP_MAX_CYCLES:
-        
-        # 첫 진입(cycle 0)일 때만 탈출 방향을 계산하여 고정합니다.
-        if stop_cycle_count == 0:
-            target, gap_dist = find_stop_escape_direction(scan_points)
-            stop_locked_target = target
-            stop_locked_gap = gap_dist
-            
-            # 피봇턴 방향 결정
-            if abs(target) < 5:
-                pivot_w = -MAX_W  # 정면이 가장 빈 경우 default 우회전
-            else:
-                pivot_w = -math.copysign(MAX_W, target)
-                
-            # 피봇 방향을 메모리에 유지
-            avoidance_w_sign = math.copysign(1.0, pivot_w)
-        
-        # 2번째 사이클부터는 이미 결정된 avoidance_w_sign 방향을 그대로 사용합니다.
+
+        # 매 사이클 탈출 방향을 새로 계산 (고정 없음)
+        target, gap_dist = find_stop_escape_direction(scan_points)
+        if abs(target) < 5:
+            pivot_w = -MAX_W  # 정면이 가장 빈 경우 default 우회전
         else:
-            pivot_w = avoidance_w_sign * MAX_W
-            target = stop_locked_target
-            gap_dist = stop_locked_gap
+            pivot_w = -math.copysign(MAX_W, target)
 
         stop_cycle_count += 1
 
@@ -435,9 +418,6 @@ def find_vw_command(scan_points, heading_deg):
     if stop_cycle_count > 0:
         if stop_cycle_count >= STOP_MAX_CYCLES and DEBUG_STOP:
             print(f"  [STOP] max cycles reached ({STOP_MAX_CYCLES}) -> force layered mode")
-        
-        # 이전 답변에서 말씀드린 대로, 일반 주행으로 넘어갈 때 방향 고정을 풀어줍니다.
-        avoidance_w_sign = 0.0 
         stop_cycle_count = 0
 
     return find_vw_layered(scan_points, heading_deg)
@@ -458,7 +438,7 @@ def main():
     print(f"  STOP escape : +/-{STOP_ESCAPE_SCAN_HALF}deg scan, "
           f"min_gap={STOP_ESCAPE_MIN_GAP}mm, sector={STOP_SECTOR_SIZE}deg")
     print(f"  Scoring     : alpha={SCORE_ALPHA} beta={SCORE_BETA}")
-    print(f"  Direction   : score-based per cycle (lock only in STOP zone)")
+    print(f"  Direction   : score-based per cycle (no locking anywhere)")
     print(f"  Debug flags : LAYERS={DEBUG_LAYERS} STOP={DEBUG_STOP} "
           f"DIR={DEBUG_DIR} FINAL={DEBUG_FINAL}")
     print("=" * 70)
