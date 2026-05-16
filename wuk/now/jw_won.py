@@ -23,10 +23,10 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
 FORWARD_SPEED    = 0.35
-MIN_SPEED        = 0.07
+MIN_SPEED        = 0.14
 MAX_W            = 1.5
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
-W_SMOOTH         = 0.35
+W_SMOOTH         = 0.45
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 계층형 바운딩 박스 정의 (6개 레이어)
@@ -98,10 +98,11 @@ SEND_INTERVAL  = 0.1
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 측면 반발력 파라미터 (50mm × 240mm 레이어)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SIDE_SAFE_MARGIN  = 50    # mm: 로봇 측면 안전 마진
+SIDE_SAFE_MARGIN  = 140   # mm: 로봇 측면 안전 마진 (side_th = 110+140 = 250mm)
 SIDE_FWD_LEAD     = 50    # mm: 라이다 기준 전방 여유 (진입 예측)
 SIDE_FWD_REAR     = 240   # mm: 라이다 기준 후방 깊이 (로봇 몸체)
 SIDE_REPULSE_GAIN = 0.8   # rad/s: 반발력 최대 w 기여
+SIDE_EXP_K        = 3.0   # 지수 계수: 클수록 근접 시 반발력이 급격히 증가
 
 # ── 디버그 토글 ──────────────────────────────────────────────────────────────
 DEBUG_LAYERS = True    # 각 레이어 처리 결과
@@ -396,7 +397,9 @@ def get_side_repulsion(scan_points):
         if fwd > SIDE_FWD_LEAD or fwd < -SIDE_FWD_REAR: continue
         if horiz >= side_th: continue
 
-        strength = (side_th - horiz) / side_th  # 0~1 선형
+        # 지수함수 반발력: 가까울수록 급격히 증가 (0~1)
+        t = horiz / side_th  # 0(로봇 바로 옆) ~ 1(임계 경계)
+        strength = (math.exp(SIDE_EXP_K * (1.0 - t)) - 1.0) / (math.exp(SIDE_EXP_K) - 1.0)
 
         if angle_norm < 0:
             left_str = max(left_str, strength)
