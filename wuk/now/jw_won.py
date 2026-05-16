@@ -23,8 +23,8 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
 FORWARD_SPEED    = 0.35
-MIN_SPEED        = 0.14
-MAX_W            = 1.5
+MIN_SPEED        = 0.07
+MAX_W            = 2.0
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
 W_SMOOTH         = 0.45
 
@@ -63,7 +63,7 @@ LAYER_PERCENTILE = 5    # %: 하위 N% dist 평균으로 레이어 대표점 계
 
 STOP_FWD_MIN  = 100
 STOP_FWD_MAX  = 180   # 50mm → 80mm 구간으로 확장 (히스테리시스 효과)
-STOP_HORIZ_TH = 110
+STOP_HORIZ_TH = 120
 
 # STOP 탈출: ±135° 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
 STOP_ESCAPE_SCAN_HALF = 90
@@ -383,7 +383,8 @@ def get_side_repulsion(scan_points):
       delta_w > 0 → 오른쪽 장애물 → 왼쪽 보정
       delta_w < 0 → 왼쪽 장애물  → 오른쪽 보정
     """
-    side_th = ROBOT_HALF_WIDTH + SIDE_SAFE_MARGIN  # 110 + 50 = 160mm
+    side_inner = ROBOT_HALF_WIDTH               # 감지 시작: 로봇 끝 (110mm)
+    side_outer = ROBOT_HALF_WIDTH + SIDE_SAFE_MARGIN  # 감지 끝: 110 + 140 = 250mm
 
     left_str  = 0.0
     right_str = 0.0
@@ -395,10 +396,11 @@ def get_side_repulsion(scan_points):
         horiz, fwd = decompose(angle_norm, dist)
 
         if fwd > SIDE_FWD_LEAD or fwd < -SIDE_FWD_REAR: continue
-        if horiz >= side_th: continue
+        # 로봇 끝(110mm) ~ 감지 경계(250mm) 구간만
+        if horiz < side_inner or horiz >= side_outer: continue
 
-        # 지수함수 반발력: 가까울수록 급격히 증가 (0~1)
-        t = horiz / side_th  # 0(로봇 바로 옆) ~ 1(임계 경계)
+        # 지수함수 반발력: 로봇 끝에 가까울수록 급격히 증가 (0~1)
+        t = (horiz - side_inner) / SIDE_SAFE_MARGIN  # 0(로봇 끝) ~ 1(감지 경계)
         strength = (math.exp(SIDE_EXP_K * (1.0 - t)) - 1.0) / (math.exp(SIDE_EXP_K) - 1.0)
 
         if angle_norm < 0:
@@ -409,7 +411,8 @@ def get_side_repulsion(scan_points):
     delta_w = (right_str - left_str) * SIDE_REPULSE_GAIN
 
     if DEBUG_SIDE and (left_str > 0 or right_str > 0):
-        print(f"  [SIDE] L={left_str:.2f} R={right_str:.2f} dw={delta_w:+.3f}")
+        print(f"  [SIDE] L={left_str:.2f} R={right_str:.2f} dw={delta_w:+.3f} "
+              f"(zone {side_inner}~{side_outer}mm)")
 
     return delta_w, left_str, right_str
 
