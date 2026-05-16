@@ -1,6 +1,7 @@
 import serial
 import time
 import math
+import json
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 포트 & 라이다 설정
@@ -182,10 +183,12 @@ def find_stop_escape_direction(scan_points):
     sector_avg = {c: sum(d_list) / len(d_list) for c, d_list in sectors.items()}
 
     # STOP_ESCAPE_MIN_GAP 이상 통과 가능한 섹터만 후보로 사용
+    sector_gaps = {}
     valid = {}
     for c, avg_dist in sector_avg.items():
         gap_l = get_gap_width(scan_points, c, avg_dist, is_left=True)
         gap_r = get_gap_width(scan_points, c, avg_dist, is_left=False)
+        sector_gaps[c] = (gap_l, gap_r)
         if gap_l + gap_r >= STOP_ESCAPE_MIN_GAP:
             valid[c] = avg_dist
 
@@ -198,7 +201,19 @@ def find_stop_escape_direction(scan_points):
         return dist * factor
 
     best = max(candidates.keys(), key=lambda c: forward_score(c, candidates[c]))
-    return float(best), candidates[best]
+
+    sector_info = {
+        c: {
+            'avg_dist': sector_avg[c],
+            'gap_l': sector_gaps[c][0],
+            'gap_r': sector_gaps[c][1],
+            'passage': sector_gaps[c][0] + sector_gaps[c][1],
+            'score': forward_score(c, sector_avg[c]),
+            'valid': c in valid,
+        }
+        for c in sector_avg
+    }
+    return float(best), candidates[best], sector_info
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -403,13 +418,25 @@ def find_vw_command(scan_points, heading_deg):
 
         if stop_cycle_count == 0:
             # 첫 진입: 탈출 방향 계산 후 세션 내 고정
-            target, gap_dist = find_stop_escape_direction(scan_points)
+            target, gap_dist, sector_info = find_stop_escape_direction(scan_points)
             stop_locked_target = target
             stop_locked_gap = gap_dist
             if abs(target) < 5:
                 stop_pivot_w = -MAX_W  # 정면이 가장 빈 경우 default 우회전
             else:
                 stop_pivot_w = -math.copysign(MAX_W, target)
+            # STOP 이벤트 저장 (viz.py로 시각화 가능)
+            _fname = f'stop_event_{int(time.time())}.json'
+            with open(_fname, 'w') as _f:
+                json.dump({
+                    'heading': heading_deg,
+                    'target': target,
+                    'gap_dist': gap_dist,
+                    'sector_info': {str(k): v for k, v in sector_info.items()},
+                    'scan': [[a, d] for a, d in scan_points if d > 0],
+                }, _f)
+            if DEBUG_STOP:
+                print(f"  [STOP] event saved → {_fname}")
         else:
             # 이후 사이클: 고정된 방향 유지
             target = stop_locked_target
