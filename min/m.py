@@ -47,18 +47,18 @@ MIN_PASSAGE_WIDTH = 240  # mm
 
 # ── 위험구역 ──────────────────────────────────────────────────────────────────
 DETECTION_RANGE  = 1500
-FORWARD_RANGE    = 800
+FORWARD_RANGE    = 550
 
 # ── 속도 ──────────────────────────────────────────────────────────────────────
 FORWARD_SPEED    = 0.35
 MIN_SPEED        = 0.07
 SLOW_START_DIST  = 400
 STOP_FWD_RANGE   = 180
-W_GAIN           = 1.2
-MAX_W            = 1.5
+W_GAIN           = 0.7
+MAX_W            = 1.0
 W_MIN_DANGER     = 0.45
 W_MIN_MOVING     = 0.10
-W_SMOOTH         = 0.6
+W_SMOOTH         = 0.75
 
 # ── 측면 감지 ─────────────────────────────────────────────────────────────────
 SIDE_HORIZ_LIMIT  = 90
