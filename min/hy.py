@@ -56,7 +56,7 @@ DETECTION_RANGE = 1500  # mm: 최대 신뢰 거리
 ROBOT_HALF_WIDTH = 110   # mm
 
 FORWARD_SPEED    = 0.45  # 반응 여유 확보를 위해 소폭 감속
-MIN_SPEED        = 0.07
+MIN_SPEED        = 0.15
 MAX_W            = 1.5
 W_MIN_DANGER     = 0.5
 W_SMOOTH         = 0.5   # 코드1(0.75) vs 코드2(0.35) 중간 - 반응성 + 진동 억제
