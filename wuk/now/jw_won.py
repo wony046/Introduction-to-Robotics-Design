@@ -63,13 +63,15 @@ LAYER_PERCENTILE = 5    # %: 하위 N% dist 평균으로 레이어 대표점 계
 
 STOP_FWD_MIN  = 100
 STOP_FWD_MAX  = 180   # 50mm → 80mm 구간으로 확장 (히스테리시스 효과)
-STOP_HORIZ_TH = 120
+STOP_HORIZ_TH = 105
 
 # STOP 탈출: ±135° 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
 STOP_ESCAPE_SCAN_HALF = 90
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
 STOP_SECTOR_SIZE      = 10                          # deg: 갭 검색 sector 크기
 STOP_MAX_CYCLES       = 16                          # 연속 STOP 사이클 상한 (초과 시 강제 탈출)
+STOP_PIVOT_MAX_W      = 1.0   # rad/s: STOP 피봇 최대 속도 (MAX_W보다 낮게)
+STOP_PIVOT_K          = 0.05  # rad/s/deg: 헤딩 오차 비례 계수 (오차 20° → 1.0 rad/s)
 
 # FGM (Follow the Gap Method) — STOP escape 전용
 FGM_MIN_ANG_DEG      = 5     # deg: 이 이상 각도 공백이면 갭으로 인식
@@ -566,12 +568,18 @@ def find_vw_command(scan_points, heading_deg):
         pivot_w = stop_pivot_w
         stop_cycle_count += 1
 
+        # 헤딩 오차 비례 피봇 속도 (가까울수록 감속, 오버슈트 방지)
+        pivot_sign = math.copysign(1.0, pivot_w)
+        err_now = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
+        dyn_w = pivot_sign * min(STOP_PIVOT_MAX_W, STOP_PIVOT_K * err_now)
+        dyn_w = math.copysign(max(abs(dyn_w), W_MIN_DANGER), pivot_sign)
+
         if DEBUG_STOP:
             print(f"  [STOP] zone detected (cycle {stop_cycle_count}/{STOP_MAX_CYCLES}) "
                   f"-> escape target={target:+.0f}° "
-                  f"(width={gap_width:.0f}mm) pivot w={pivot_w:+.2f}")
+                  f"(width={gap_width:.0f}mm) err={err_now:.1f}° pivot w={dyn_w:+.2f}")
 
-        return 0.0, pivot_w
+        return 0.0, dyn_w
 
     # STOP 존을 성공적으로 벗어났거나 강제 탈출 시 초기화
     if stop_cycle_count > 0:
