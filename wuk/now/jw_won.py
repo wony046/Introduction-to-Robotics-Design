@@ -68,7 +68,7 @@ STOP_HORIZ_TH = 110
 STOP_ESCAPE_SCAN_HALF = 135
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
 STOP_SECTOR_SIZE      = 10                          # deg: 갭 검색 sector 크기
-STOP_MAX_CYCLES       = 8                           # 연속 STOP 사이클 상한 (초과 시 강제 탈출)
+STOP_MAX_CYCLES       = 16                          # 연속 STOP 사이클 상한 (초과 시 강제 탈출)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 방향 점수제 (gap + layer 통합)
@@ -98,6 +98,9 @@ DEBUG_FINAL  = True    # 최종 v, w
 arduino_heading_deg   = 0.0
 prev_w                = 0.0
 stop_cycle_count      = 0     # 연속 STOP 사이클 카운터
+stop_pivot_w          = 0.0   # STOP 세션 내 고정 피봇 방향
+stop_locked_target    = 0.0
+stop_locked_gap       = 0.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -394,17 +397,25 @@ def find_vw_layered(scan_points, heading_deg):
 
 def find_vw_command(scan_points, heading_deg):
     """STOP zone 우선 검사 → 활성 시 STOP escape, 아니면 계층형 처리."""
-    global stop_cycle_count
+    global stop_cycle_count, stop_pivot_w, stop_locked_target, stop_locked_gap
 
     if detect_stop_zone(scan_points) and stop_cycle_count < STOP_MAX_CYCLES:
 
-        # 매 사이클 탈출 방향을 새로 계산 (고정 없음)
-        target, gap_dist = find_stop_escape_direction(scan_points)
-        if abs(target) < 5:
-            pivot_w = -MAX_W  # 정면이 가장 빈 경우 default 우회전
+        if stop_cycle_count == 0:
+            # 첫 진입: 탈출 방향 계산 후 세션 내 고정
+            target, gap_dist = find_stop_escape_direction(scan_points)
+            stop_locked_target = target
+            stop_locked_gap = gap_dist
+            if abs(target) < 5:
+                stop_pivot_w = -MAX_W  # 정면이 가장 빈 경우 default 우회전
+            else:
+                stop_pivot_w = -math.copysign(MAX_W, target)
         else:
-            pivot_w = -math.copysign(MAX_W, target)
+            # 이후 사이클: 고정된 방향 유지
+            target = stop_locked_target
+            gap_dist = stop_locked_gap
 
+        pivot_w = stop_pivot_w
         stop_cycle_count += 1
 
         if DEBUG_STOP:
@@ -419,6 +430,7 @@ def find_vw_command(scan_points, heading_deg):
         if stop_cycle_count >= STOP_MAX_CYCLES and DEBUG_STOP:
             print(f"  [STOP] max cycles reached ({STOP_MAX_CYCLES}) -> force layered mode")
         stop_cycle_count = 0
+        stop_pivot_w = 0.0
 
     return find_vw_layered(scan_points, heading_deg)
 
