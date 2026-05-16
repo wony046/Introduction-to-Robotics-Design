@@ -96,8 +96,7 @@ DEBUG_FINAL  = True    # 최종 v, w
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
-avoidance_w_sign      = 0.0   # 방향 메모리 (옵션 A: 한 번 정하면 유지)
-no_active_count       = 0
+avoidance_w_sign      = 0.0   # STOP zone 피봇 방향 메모리
 prev_w                = 0.0
 stop_cycle_count      = 0     # 연속 STOP 사이클 카운터
 stop_locked_target = 0.0 # 정지로직 수정
@@ -315,12 +314,10 @@ def find_vw_layered(scan_points, heading_deg):
     """
     1. 6개 레이어 병렬 처리
     2. gap 너비 계산 (가장 가까운 레이어의 대표점 기준)
-    3. 좌우 점수 통합 → 방향 결정 (avoidance_w_sign 적용)
+    3. 좌우 점수 통합 → 방향 결정 (매 사이클 score로 재결정)
     4. v: affects_v 레이어 v_proposal의 가중 평균
     5. w: 모든 활성 레이어 urgency의 가중 합 × direction
     """
-    global avoidance_w_sign, no_active_count
-
     # 1. 레이어 처리
     layer_results = []
     for layer in LAYERS:
@@ -337,15 +334,10 @@ def find_vw_layered(scan_points, heading_deg):
                   f"pL={r['push_left']:.0f} pR={r['push_right']:.0f}")
 
     # 활성 레이어 없으면 직진
-    NO_ACTIVE_RESET = 3
     if not layer_results:
-        no_active_count += 1
-        if no_active_count >= NO_ACTIVE_RESET:
-            avoidance_w_sign = 0.0
         if DEBUG_FINAL:
             print(f"  [FINAL] no active layers -> v={FORWARD_SPEED:.2f} w=0.00")
         return FORWARD_SPEED, 0.0
-    no_active_count = 0
 
     # 2. gap 너비 계산 (가장 가까운 레이어의 대표점 기준)
     closest = min(layer_results, key=lambda r: r['rep_horiz'])
@@ -373,12 +365,10 @@ def find_vw_layered(scan_points, heading_deg):
               f"(gap αL={SCORE_ALPHA*gap_L:.0f}/αR={SCORE_ALPHA*gap_R:.0f}  "
               f"push βL={SCORE_BETA*sum_pL:.0f}/βR={SCORE_BETA*sum_pR:.0f})")
 
-    # 4. 방향 결정 (avoidance_w_sign 옵션 A: 한 번 결정 후 고수)
-    if avoidance_w_sign == 0.0:
-        avoidance_w_sign = 1.0 if score_L >= score_R else -1.0
-        if DEBUG_DIR:
-            print(f"  [DIR_LOCK] {'LEFT' if avoidance_w_sign > 0 else 'RIGHT'}")
-    direction = avoidance_w_sign
+    # 4. 방향 결정 (매 사이클 score로 재결정, 잠금 없음)
+    direction = 1.0 if score_L >= score_R else -1.0
+    if DEBUG_DIR:
+        print(f"  [DIR] {'LEFT' if direction > 0 else 'RIGHT'}")
 
     # 5. v 계산: affects_v 레이어 v_proposal의 가중 평균
     v_layers = [r for r in layer_results if r['v_proposal'] is not None]
@@ -468,7 +458,7 @@ def main():
     print(f"  STOP escape : +/-{STOP_ESCAPE_SCAN_HALF}deg scan, "
           f"min_gap={STOP_ESCAPE_MIN_GAP}mm, sector={STOP_SECTOR_SIZE}deg")
     print(f"  Scoring     : alpha={SCORE_ALPHA} beta={SCORE_BETA}")
-    print(f"  Direction   : avoidance_w_sign (option A: lock first, reset after 3 clear)")
+    print(f"  Direction   : score-based per cycle (lock only in STOP zone)")
     print(f"  Debug flags : LAYERS={DEBUG_LAYERS} STOP={DEBUG_STOP} "
           f"DIR={DEBUG_DIR} FINAL={DEBUG_FINAL}")
     print("=" * 70)
