@@ -182,14 +182,13 @@ def detect_stop_zone(scan_points):
 
 def find_all_gaps(scan_points):
     """
-    FGM: ±SCAN_WIDE_HALF° 범위 스캔에서 depth jump / 각도 공백을 기준으로
+    FGM: 360° 전체 스캔에서 depth jump / 각도 공백을 기준으로
     모든 갭(장애물 경계 쌍)을 추출.
     반환: list of dict {width, center_angle, edge_a, edge_b, depth}
     """
     pts = sorted(
         [(a, d) for a, d in scan_points
-         if LIDAR_MIN_VALID < d < FGM_MAX_RANGE_MM
-         and abs(a) <= SCAN_WIDE_HALF],
+         if LIDAR_MIN_VALID < d < FGM_MAX_RANGE_MM],
         key=lambda p: p[0]
     )
     if len(pts) < 2:
@@ -230,14 +229,14 @@ def choose_escape_gap(gaps, prefer_angle=0.0):
     """
     통과 가능한 갭(폭 >= STOP_ESCAPE_MIN_GAP, 깊이 >= FGM_MIN_DEPTH_MM) 중
     prefer_angle에 가장 가까운 갭 선택.
-    유효 갭 없으면 폭 최대 갭으로 fallback.
+    통과 가능한 갭이 없으면 None 반환 (fallback 제거 — 불통과 갭 진입 방지).
     """
     passable = [g for g in gaps
                 if g['width'] >= STOP_ESCAPE_MIN_GAP
                 and g['depth'] >= FGM_MIN_DEPTH_MM]
     if passable:
         return min(passable, key=lambda g: abs(g['center_angle'] - prefer_angle))
-    return max(gaps, key=lambda g: g['width']) if gaps else None
+    return None
 
 
 def find_stop_escape_direction(scan_points):
@@ -640,14 +639,11 @@ def main():
             s_flag = raw[0] & 0x01
 
             if s_flag == 1 and scan_points:
-                # ±135°까지 통과 (STOP escape에서 사용)
-                wide_points = [
-                    (a, d) for a, d in scan_points
-                    if is_in_wide_scan(a) and d > 0
-                ]
+                # 360° 전체 포인트 전달 (FGM 후방 갭 탐색 포함)
+                all_points = [(a, d) for a, d in scan_points if d > 0]
                 now = time.time()
                 if now - last_send >= SEND_INTERVAL:
-                    v, w = find_vw_command(wide_points, arduino_heading_deg)
+                    v, w = find_vw_command(all_points, arduino_heading_deg)
                     w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
                     prev_w = w
                     cmd = f"{v:.2f} {w:.2f}\n"
