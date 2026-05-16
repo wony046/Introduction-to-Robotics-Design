@@ -51,7 +51,8 @@ W_SMOOTH         = 0.6
 
 # ── 측면 감지 (수직/수평 거리 기반) ──────────────────────────────────────────
 SIDE_HORIZ_LIMIT  = 140  # mm: 측면 수평거리 임계값
-SIDE_FWD_DEADZONE = 130  # mm: 이 수직거리 이내는 정면으로 간주 → 측면 판정 제외
+SIDE_FWD_DEADZONE = 180  # mm: 이 수직거리 이내는 정면으로 간주 → 측면 판정 제외
+                          #     STOP_FWD_RANGE(180)와 일치: stop zone 장애물은 side detection 제외
 
 # ── 근접 후보 (방법 A) ────────────────────────────────────────────────────────
 PROXIMITY_HORIZ = 170    # mm: danger zone(140mm) 밖이어도 이 이내면 ref 후보 포함
@@ -68,6 +69,7 @@ SEND_INTERVAL    = 0.1
 DEPTH_JUMP_THRES = 120   # mm: 이 이상 거리 변화 시 다른 물체로 간주 (양방향)
 LIDAR_WATCHDOG_TIMEOUT = 0.5  # s: 이 시간 이상 새 스캔 없으면 비상 정지
 NO_DANGER_RESET        = 10   # 회피 방향 메모리 유지 사이클 수 (10 × 100ms = 1s)
+STOP_FWD_HYSTERESIS    = 30   # mm: stop zone 탈출 여유 (진입:180mm, 탈출:210mm)
 
 # ── Stop zone 정면 노이즈 억제 ────────────────────────────────────────────────
 STOP_FRONT_DEADBAND = 15  # deg: 이 각도 이내 정면 장애물은 기존 방향 유지
@@ -77,6 +79,7 @@ arduino_heading_deg = 0.0
 arduino_buf         = ""    # Arduino 시리얼 비블로킹 수신 버퍼
 avoidance_w_sign    = 0.0   # danger zone 방향 메모리
 stop_zone_w_sign    = 0.0   # stop zone 전용 방향 메모리 (danger zone과 독립)
+in_stop_zone        = False  # stop zone 히스테리시스 상태
 no_danger_count     = 0
 prev_w              = 0.0
 
@@ -287,7 +290,7 @@ def find_vw_command(scan_points, heading_deg):
         ref_angle/ref_dist → get_gap_width 기준점 (proximity 포함)
         n_horiz / horiz_error → w 크기 계산 (danger zone만, 엄격 유지)
     """
-    global avoidance_w_sign, stop_zone_w_sign, no_danger_count
+    global avoidance_w_sign, stop_zone_w_sign, in_stop_zone, no_danger_count
 
     threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN
 
@@ -318,11 +321,11 @@ def find_vw_command(scan_points, heading_deg):
             proximity_points.append((angle_norm, dist, horiz, fwd))
 
     # ── 3. 선속도 결정 ────────────────────────────────────────────────────────
-    stop_points = [p for p in danger_points
-                   if p[3] <= STOP_FWD_RANGE and p[2] < ROBOT_HALF_WIDTH]
-    
-    # [수정 1] 정면 장애물 기준을 '로봇 폭(110) + 여유(10) 이내'로 엄격하게 좁혀 감속(기어감) 방지
-    frontal     = [p for p in danger_points if p[2] <= ROBOT_HALF_WIDTH + 10]
+    # 히스테리시스: 진입 180mm / 탈출 210mm → 경계 깜빡임 방지
+    exit_fwd    = STOP_FWD_RANGE + (STOP_FWD_HYSTERESIS if in_stop_zone else 0)
+    stop_points = [p for p in danger_points if p[3] <= exit_fwd]
+    in_stop_zone = bool(stop_points)
+    frontal     = [p for p in danger_points if p[3] >= p[2]]
     n_fwd_ref   = min((p[3] for p in frontal), default=SLOW_START_DIST + 1)
 
     # horiz_error: danger zone 기준 (w 크기 계산에 사용)
@@ -331,6 +334,7 @@ def find_vw_command(scan_points, heading_deg):
     horiz_error                 = threshold - n_horiz
 
     # ref: danger + proximity 합산 후 horiz 최소 (get_gap_width 기준점)
+    # proximity 장애물이 더 가까우면 그쪽이 ref가 되어 gap 계산 안정화
     ref_candidates              = danger_points + proximity_points
     horiz_ref_stable            = min(ref_candidates, key=lambda p: p[2])
     ref_angle, ref_dist, _, _   = horiz_ref_stable
@@ -354,30 +358,47 @@ def find_vw_command(scan_points, heading_deg):
         return v, 0.0
 
     # ── 4. 회전 방향 결정 ────────────────────────────────────────────────────
+    # gap 너비는 stop/danger 공통으로 미리 계산 (stop zone 하이브리드에 재사용)
+    left_width  = get_gap_width(scan_points, ref_angle, ref_dist, is_left=True)
+    right_width = get_gap_width(scan_points, ref_angle, ref_dist, is_left=False)
+
     if stop_points:
-        # ── Stop zone ──────────────────────────────────────────────────────
+        # ── Stop zone: 하이브리드 방향 결정 ────────────────────────────────
+        # gap 비대칭 명확 → gap 분석 우선 / 양쪽 비슷 → 각도 부호 (더 신뢰)
         stop_angle = min(stop_points, key=lambda p: p[2])[0]
 
         if abs(stop_angle) < STOP_FRONT_DEADBAND and stop_zone_w_sign != 0.0:
+            # 정면 노이즈: 기존 방향 유지
             avoidance_w_sign = stop_zone_w_sign
             print(f"  [정지구역] 정면 노이즈(각도:{stop_angle:.1f}°) → "
                   f"기존 방향 유지({'왼쪽' if avoidance_w_sign > 0 else '오른쪽'})")
         else:
-            # [수정 2 - 치명적 버그 해결] 왼쪽(>=0)에 있으면 오른쪽(-1.0)으로 피해야 함!
-            avoidance_w_sign = -1.0 if stop_angle >= 0 else 1.0
+            left_ok  = left_width  >= MIN_PASSAGE_WIDTH
+            right_ok = right_width >= MIN_PASSAGE_WIDTH
+
+            if left_ok != right_ok:
+                # 한쪽만 통과 가능 → gap 분석 우선 (각도 부호보다 신뢰)
+                avoidance_w_sign = 1.0 if left_ok else -1.0
+                print(f"  [정지구역] gap비대칭(L:{left_width:.0f} R:{right_width:.0f}mm)"
+                      f" → {'왼쪽' if avoidance_w_sign > 0 else '오른쪽'} gap우선")
+            else:
+                # 양쪽 모두 통과 or 양쪽 모두 좁음
+                # → 각도 부호 사용 (좁은 통로에서 gap 추정 불신뢰 방지)
+                avoidance_w_sign = 1.0 if stop_angle >= 0 else -1.0
+                print(f"  [정지구역] 각도:{stop_angle:.1f}°"
+                      f"(L:{left_width:.0f} R:{right_width:.0f}mm)"
+                      f" → {'왼쪽' if avoidance_w_sign > 0 else '오른쪽'} 각도우선")
+
             stop_zone_w_sign = avoidance_w_sign
-            print(f"  [정지구역] 각도:{stop_angle:.1f}° → "
-                  f"{'왼쪽' if avoidance_w_sign > 0 else '오른쪽'} 즉결")
 
     else:
-        # ── Danger zone (기존 코드와 동일) ──────────────────────────────────────
+        # ── Danger zone ────────────────────────────────────────────────────
         stop_zone_w_sign = 0.0
 
+        # 측면 감지 활성 (danger zone에서만 사용)
         left_side_blocked  = side_horiz_blocked(scan_points, is_left=True)
         right_side_blocked = side_horiz_blocked(scan_points, is_left=False)
-
-        left_width  = get_gap_width(scan_points, ref_angle, ref_dist, is_left=True)
-        right_width = get_gap_width(scan_points, ref_angle, ref_dist, is_left=False)
+        # left_width / right_width 는 단계 4 진입 전에 이미 계산됨 (stop/danger 공유)
 
         if avoidance_w_sign == 0.0:
             avoidance_w_sign = select_direction_by_width(
@@ -391,10 +412,13 @@ def find_vw_command(scan_points, heading_deg):
             committed_blocked = (avoidance_w_sign > 0 and left_side_blocked) or \
                                 (avoidance_w_sign < 0 and right_side_blocked)
 
-            need_reselect = committed_blocked or (
+            need_reselect = (committed_blocked and opposite_width >= MIN_PASSAGE_WIDTH) or (
                 committed_width < MIN_PASSAGE_WIDTH
                 and opposite_width >= MIN_PASSAGE_WIDTH
             )
+            # committed_blocked 단독 조건 제거:
+            # side_blocked가 깜빡일 때마다 방향이 바뀌는 진동 방지
+            # 반대쪽이 실제로 통과 가능(>=MIN_PASSAGE_WIDTH)할 때만 방향 전환 허용
             if need_reselect:
                 old = avoidance_w_sign
                 avoidance_w_sign = select_direction_by_width(
@@ -408,16 +432,10 @@ def find_vw_command(scan_points, heading_deg):
                           f"{'왼쪽' if avoidance_w_sign > 0 else '오른쪽'}")
 
     # ── 5. 각속도 계산 ────────────────────────────────────────────────────────
+    # horiz_error는 danger zone 기준으로 계산 (proximity 장애물 영향 없음)
     w_min = W_MIN_DANGER if v == 0.0 else W_MIN_MOVING
     w_mag = max(min(W_GAIN * horiz_error / threshold, MAX_W), w_min)
     w     = avoidance_w_sign * w_mag
-
-    # [수정 3 - 관통 모드(Passing Zone) 추가]
-    # 정면 범퍼(110mm 이내)에는 장애물이 없지만, 대각선/측면(110~140mm 사이)에 스칠 때
-    min_strict_fwd = min((p[3] for p in danger_points if p[2] < ROBOT_HALF_WIDTH), default=FORWARD_RANGE)
-    if min_strict_fwd > STOP_FWD_RANGE and ROBOT_HALF_WIDTH <= n_horiz < threshold:
-        w = 0.0
-        print(f"  [관통모드] 대각선/측면 스치기 진행 중 → 조향 잠금 (w=0)")
 
     print(f"  [명령] v:{v:.2f}  w:{w:.2f}  (수평오차:{horiz_error:.0f}mm)")
     return v, w
