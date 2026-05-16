@@ -427,10 +427,14 @@ def find_vw_command(scan_points, heading_deg):
 
         return 0.0, pivot_w
 
-    if stop_cycle_count >= STOP_MAX_CYCLES and DEBUG_STOP:
-        print(f"  [STOP] max cycles reached ({STOP_MAX_CYCLES}) -> force layered mode")
-    stop_cycle_count = 0
-    return find_vw_layered(scan_points, heading_deg)
+    if stop_cycle_count > 0: # STOP 존을 방금 막 벗어나거나 최대 사이클을 넘겼을 때 #제미나이 수정
+        if stop_cycle_count >= STOP_MAX_CYCLES and DEBUG_STOP: #제미나이 수정
+            print(f"  [STOP] max cycles reached ({STOP_MAX_CYCLES}) -> force layered mode") #제미나이 수정
+        # STOP 상태에서 일반 상태로 전환될 때 방향 고정 초기화 #제미나이 수정
+        avoidance_w_sign = 0.0 #제미나이 수정
+        stop_cycle_count = 0 #제미나이 수정
+        
+    return find_vw_layered(scan_points, heading_deg) #제미나이 수정
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
