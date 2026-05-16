@@ -72,7 +72,9 @@ NO_DANGER_RESET        = 10   # 회피 방향 메모리 유지 사이클 수 (10
 STOP_FWD_HYSTERESIS    = 30   # mm: stop zone 탈출 여유 (진입:180mm, 탈출:210mm)
 
 # ── Stop zone 정면 노이즈 억제 ────────────────────────────────────────────────
-STOP_FRONT_DEADBAND = 15  # deg: 이 각도 이내 정면 장애물은 기존 방향 유지
+STOP_FRONT_DEADBAND     = 15   # deg: 이 각도 이내 정면 장애물은 기존 방향 유지
+RESELECT_CONFIRM_CYCLES = 3    # 사이클: 방향 전환 전 연속 확인 (3 × 100ms = 0.3s)
+STOP_ZONE_GAP_ASYMMETRY = 100  # mm: stop zone에서 gap 비대칭 판단 최소 차이
 
 # ── 전역 상태 ─────────────────────────────────────────────────────────────────
 arduino_heading_deg = 0.0
@@ -82,6 +84,7 @@ stop_zone_w_sign    = 0.0   # stop zone 전용 방향 메모리 (danger zone과 
 in_stop_zone        = False  # stop zone 히스테리시스 상태
 no_danger_count     = 0
 prev_w              = 0.0
+reselect_count      = 0     # need_reselect 연속 확인 카운터
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -290,7 +293,7 @@ def find_vw_command(scan_points, heading_deg):
         ref_angle/ref_dist → get_gap_width 기준점 (proximity 포함)
         n_horiz / horiz_error → w 크기 계산 (danger zone만, 엄격 유지)
     """
-    global avoidance_w_sign, stop_zone_w_sign, in_stop_zone, no_danger_count
+    global avoidance_w_sign, stop_zone_w_sign, in_stop_zone, no_danger_count, reselect_count
 
     threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN
 
@@ -364,7 +367,11 @@ def find_vw_command(scan_points, heading_deg):
 
     if stop_points:
         # ── Stop zone: 하이브리드 방향 결정 ────────────────────────────────
-        # gap 비대칭 명확 → gap 분석 우선 / 양쪽 비슷 → 각도 부호 (더 신뢰)
+        # [Fix] 첫 진입 시 danger zone 방향 승계 → deadband 즉시 활성화
+        #        stop_zone_w_sign=0인 채로 노이즈 각도 기반 방향을 선택하는 문제 해결
+        if stop_zone_w_sign == 0.0 and avoidance_w_sign != 0.0:
+            stop_zone_w_sign = avoidance_w_sign
+
         stop_angle = min(stop_points, key=lambda p: p[2])[0]
 
         if abs(stop_angle) < STOP_FRONT_DEADBAND and stop_zone_w_sign != 0.0:
@@ -375,15 +382,22 @@ def find_vw_command(scan_points, heading_deg):
         else:
             left_ok  = left_width  >= MIN_PASSAGE_WIDTH
             right_ok = right_width >= MIN_PASSAGE_WIDTH
+            # [Fix] 차이가 STOP_ZONE_GAP_ASYMMETRY 이상일 때만 gap 비대칭으로 판단
+            #        미세 비대칭(ref_angle 이동 노이즈)에 의한 방향 전환 방지
+            gap_asymmetric = abs(left_width - right_width) >= STOP_ZONE_GAP_ASYMMETRY
 
-            if left_ok != right_ok:
-                # 한쪽만 통과 가능 → gap 분석 우선 (각도 부호보다 신뢰)
+            if left_ok != right_ok and gap_asymmetric:
+                # 명확한 gap 비대칭 → gap 분석 우선
                 avoidance_w_sign = 1.0 if left_ok else -1.0
                 print(f"  [정지구역] gap비대칭(L:{left_width:.0f} R:{right_width:.0f}mm)"
                       f" → {'왼쪽' if avoidance_w_sign > 0 else '오른쪽'} gap우선")
+            elif stop_zone_w_sign != 0.0:
+                # gap 불명확 or 비대칭 미달 → 기존 방향 유지 (danger zone 방향 포함)
+                avoidance_w_sign = stop_zone_w_sign
+                print(f"  [정지구역] gap불명확(L:{left_width:.0f} R:{right_width:.0f}mm)"
+                      f" → {'왼쪽' if avoidance_w_sign > 0 else '오른쪽'} 기존방향유지")
             else:
-                # 양쪽 모두 통과 or 양쪽 모두 좁음
-                # → 각도 부호 사용 (좁은 통로에서 gap 추정 불신뢰 방지)
+                # 최초 진입이고 gap도 불명확 → 각도 부호 사용
                 avoidance_w_sign = 1.0 if stop_angle >= 0 else -1.0
                 print(f"  [정지구역] 각도:{stop_angle:.1f}°"
                       f"(L:{left_width:.0f} R:{right_width:.0f}mm)"
@@ -401,6 +415,7 @@ def find_vw_command(scan_points, heading_deg):
         # left_width / right_width 는 단계 4 진입 전에 이미 계산됨 (stop/danger 공유)
 
         if avoidance_w_sign == 0.0:
+            reselect_count = 0
             avoidance_w_sign = select_direction_by_width(
                 left_width, right_width, heading_deg,
                 left_side_blocked, right_side_blocked
@@ -416,10 +431,15 @@ def find_vw_command(scan_points, heading_deg):
                 committed_width < MIN_PASSAGE_WIDTH
                 and opposite_width >= MIN_PASSAGE_WIDTH
             )
-            # committed_blocked 단독 조건 제거:
-            # side_blocked가 깜빡일 때마다 방향이 바뀌는 진동 방지
-            # 반대쪽이 실제로 통과 가능(>=MIN_PASSAGE_WIDTH)할 때만 방향 전환 허용
+            # [Fix] 연속 RESELECT_CONFIRM_CYCLES 사이클 동안 조건 유지 시에만 방향 전환
+            #        ref_angle 이동으로 gap 평가가 일시적으로 뒤집히는 오작동 방지
             if need_reselect:
+                reselect_count += 1
+            else:
+                reselect_count = 0
+
+            if need_reselect and reselect_count >= RESELECT_CONFIRM_CYCLES:
+                reselect_count = 0
                 old = avoidance_w_sign
                 avoidance_w_sign = select_direction_by_width(
                     left_width, right_width, heading_deg,
@@ -428,7 +448,7 @@ def find_vw_command(scan_points, heading_deg):
                 if avoidance_w_sign != old:
                     reason = "측면물리차단" if committed_blocked \
                              else "반대쪽 통과 가능"
-                    print(f"  [방향전환] {reason} → "
+                    print(f"  [방향전환] {reason}({RESELECT_CONFIRM_CYCLES}사이클 확인) → "
                           f"{'왼쪽' if avoidance_w_sign > 0 else '오른쪽'}")
 
     # ── 5. 각속도 계산 ────────────────────────────────────────────────────────
