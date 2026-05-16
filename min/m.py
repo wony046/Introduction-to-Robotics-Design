@@ -55,7 +55,7 @@ MIN_SPEED        = 0.07
 SLOW_START_DIST  = 400
 STOP_FWD_RANGE   = 180
 W_GAIN           = 0.7
-MAX_W            = 1.0
+MAX_W            = 0.65
 W_MIN_DANGER     = 0.45
 W_MIN_MOVING     = 0.10
 W_SMOOTH         = 0.75
@@ -612,10 +612,13 @@ def main():
                         now = time.time()
                         if now - last_send >= SEND_INTERVAL:
                             v, w = find_vw_command(front_points, arduino_heading_deg)
-                            if w * prev_w < 0:
+                            if w == 0.0:
                                 prev_w = 0.0
-                            w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
-                            prev_w = w
+                            else:
+                                if w * prev_w < 0:
+                                    prev_w = 0.0
+                                w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
+                                prev_w = w
                             prev_v = v
                             cmd = f"{v:.2f} {w:.2f}\n"
                             arduino.write(cmd.encode())
