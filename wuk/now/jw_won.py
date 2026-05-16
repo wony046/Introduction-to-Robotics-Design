@@ -71,6 +71,11 @@ STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
 STOP_SECTOR_SIZE      = 10                          # deg: 갭 검색 sector 크기
 STOP_MAX_CYCLES       = 16                          # 연속 STOP 사이클 상한 (초과 시 강제 탈출)
 
+# FGM (Follow the Gap Method) — STOP escape 전용
+FGM_MIN_ANG_DEG      = 5     # deg: 이 이상 각도 공백이면 갭으로 인식
+FGM_MIN_DEPTH_MM     = 200   # mm: 갭 너머 최소 깊이 (얕은 함몰부 제외)
+HEADING_CONVERGE_DEG = 15    # deg: 목표 헤딩에 이 이내면 피봇 종료
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 방향 점수제 (gap + layer 통합)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -100,8 +105,9 @@ arduino_heading_deg   = 0.0
 prev_w                = 0.0
 stop_cycle_count      = 0     # 연속 STOP 사이클 카운터
 stop_pivot_w          = 0.0   # STOP 세션 내 고정 피봇 방향
-stop_locked_target    = 0.0
-stop_locked_gap       = 0.0
+stop_locked_target         = 0.0
+stop_locked_gap            = 0.0
+stop_locked_global_heading = 0.0   # STOP 첫 진입 시 계산한 전역 목표 헤딩
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -161,60 +167,87 @@ def detect_stop_zone(scan_points):
     return False
 
 
+def find_all_gaps(scan_points):
+    """
+    FGM: ±SCAN_WIDE_HALF° 범위 스캔에서 depth jump / 각도 공백을 기준으로
+    모든 갭(장애물 경계 쌍)을 추출.
+    반환: list of dict {width, center_angle, edge_a, edge_b, depth}
+    """
+    pts = sorted(
+        [(a, d) for a, d in scan_points
+         if LIDAR_MIN_VALID < d < DETECTION_RANGE
+         and abs(a) <= SCAN_WIDE_HALF],
+        key=lambda p: p[0]
+    )
+    if len(pts) < 2:
+        return []
+
+    gaps = []
+    for i in range(len(pts) - 1):
+        a1, d1 = pts[i]
+        a2, d2 = pts[i + 1]
+        ang_diff = a2 - a1  # 항상 양수 (오름차순 정렬)
+
+        is_depth_jump  = abs(d2 - d1) > DEPTH_JUMP_THRES
+        is_angular_hole = ang_diff >= FGM_MIN_ANG_DEG
+
+        if not (is_depth_jump or is_angular_hole):
+            continue
+
+        width = cosine_dist(d1, d2, ang_diff)
+
+        # 갭 중심: 두 엣지점의 Cartesian 중점 → 각도 변환 (각도 평균은 wrap 위험)
+        x1 = d1 * math.sin(math.radians(a1))
+        y1 = d1 * math.cos(math.radians(a1))
+        x2 = d2 * math.sin(math.radians(a2))
+        y2 = d2 * math.cos(math.radians(a2))
+        center_angle = math.degrees(math.atan2((x1 + x2) / 2, (y1 + y2) / 2))
+
+        gaps.append({
+            'width':        width,
+            'center_angle': center_angle,
+            'edge_a':       (a1, d1),
+            'edge_b':       (a2, d2),
+            'depth':        max(d1, d2),
+        })
+    return gaps
+
+
+def choose_escape_gap(gaps, prefer_angle=0.0):
+    """
+    통과 가능한 갭(폭 >= STOP_ESCAPE_MIN_GAP, 깊이 >= FGM_MIN_DEPTH_MM) 중
+    prefer_angle에 가장 가까운 갭 선택.
+    유효 갭 없으면 폭 최대 갭으로 fallback.
+    """
+    passable = [g for g in gaps
+                if g['width'] >= STOP_ESCAPE_MIN_GAP
+                and g['depth'] >= FGM_MIN_DEPTH_MM]
+    if passable:
+        return min(passable, key=lambda g: abs(g['center_angle'] - prefer_angle))
+    return max(gaps, key=lambda g: g['width']) if gaps else None
+
+
 def find_stop_escape_direction(scan_points):
-    """
-    ±135° 범위를 STOP_SECTOR_SIZE(10°) sector로 나누어
-    각 sector의 평균 거리를 계산, 가장 빈 방향(angle deg) 반환.
+    """FGM 기반 STOP 탈출 방향 결정. 반환: (target_angle, gap_width, gap_info_list)"""
+    gaps   = find_all_gaps(scan_points)
+    chosen = choose_escape_gap(gaps, prefer_angle=0.0)
 
-    Returns:
-      (target_angle_deg, gap_distance_mm)
-    """
-    sectors = {}  # sector_center → list of distances
+    if chosen is None:
+        return 0.0, 0.0, []
 
-    for angle_norm, dist in scan_points:
-        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
-        if abs(angle_norm) > STOP_ESCAPE_SCAN_HALF: continue
-        center = round(angle_norm / STOP_SECTOR_SIZE) * STOP_SECTOR_SIZE
-        sectors.setdefault(center, []).append(dist)
-
-    if not sectors:
-        return 0.0, 0.0
-
-    sector_avg = {c: sum(d_list) / len(d_list) for c, d_list in sectors.items()}
-
-    # STOP_ESCAPE_MIN_GAP 이상 통과 가능한 섹터만 후보로 사용
-    sector_gaps = {}
-    valid = {}
-    for c, avg_dist in sector_avg.items():
-        gap_l = get_gap_width(scan_points, c, avg_dist, is_left=True)
-        gap_r = get_gap_width(scan_points, c, avg_dist, is_left=False)
-        sector_gaps[c] = (gap_l, gap_r)
-        if gap_l + gap_r >= STOP_ESCAPE_MIN_GAP:
-            valid[c] = avg_dist
-
-    candidates = valid if valid else sector_avg  # 유효 갭 없으면 fallback
-
-    # 통과 폭 기반 스코어링: 실제 벽 간격(gap_l+gap_r) 우선, 전방 방향 차선 보정
-    def passage_score(c):
-        gap_l, gap_r = sector_gaps[c]
-        passage = gap_l + gap_r
-        forward_factor = (1.0 + math.cos(math.radians(c))) / 2.0
-        return passage * forward_factor
-
-    best = max(candidates.keys(), key=passage_score)
-
-    sector_info = {
-        c: {
-            'avg_dist': sector_avg[c],
-            'gap_l': sector_gaps[c][0],
-            'gap_r': sector_gaps[c][1],
-            'passage': sector_gaps[c][0] + sector_gaps[c][1],
-            'score': passage_score(c),
-            'valid': c in valid,
+    gap_info = [
+        {
+            'width':        g['width'],
+            'center_angle': g['center_angle'],
+            'edge_a':       list(g['edge_a']),
+            'edge_b':       list(g['edge_b']),
+            'depth':        g['depth'],
+            'passable':     g['width'] >= STOP_ESCAPE_MIN_GAP and g['depth'] >= FGM_MIN_DEPTH_MM,
+            'chosen':       g is chosen,
         }
-        for c in sector_avg
-    }
-    return float(best), candidates[best], sector_info
+        for g in gaps
+    ]
+    return float(chosen['center_angle']), float(chosen['width']), gap_info
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -413,15 +446,31 @@ def find_vw_layered(scan_points, heading_deg):
 
 def find_vw_command(scan_points, heading_deg):
     """STOP zone 우선 검사 → 활성 시 STOP escape, 아니면 계층형 처리."""
-    global stop_cycle_count, stop_pivot_w, stop_locked_target, stop_locked_gap
+    global stop_cycle_count, stop_pivot_w, stop_locked_target, stop_locked_gap, \
+           stop_locked_global_heading
+
+    # ── 피봇 중 목표 헤딩 도달 확인 (STOP zone 감지 여부와 무관하게 우선 처리) ──
+    if stop_cycle_count > 0:
+        heading_err = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
+        if heading_err < HEADING_CONVERGE_DEG:
+            if DEBUG_STOP:
+                print(f"  [STOP] heading converged "
+                      f"(target={stop_locked_global_heading:.1f}° err={heading_err:.1f}°) "
+                      f"-> layered")
+            stop_cycle_count = 0
+            stop_pivot_w     = 0.0
+            return find_vw_layered(scan_points, heading_deg)
 
     if detect_stop_zone(scan_points) and stop_cycle_count < STOP_MAX_CYCLES:
 
         if stop_cycle_count == 0:
-            # 첫 진입: 탈출 방향 계산 후 세션 내 고정
-            target, gap_dist, sector_info = find_stop_escape_direction(scan_points)
+            # 첫 진입: FGM으로 탈출 방향 계산 후 세션 내 고정
+            target, gap_width, gap_info = find_stop_escape_direction(scan_points)
             stop_locked_target = target
-            stop_locked_gap = gap_dist
+            stop_locked_gap    = gap_width
+            # 전역 목표 헤딩 계산: 로봇이 target 방향을 정면으로 보려면
+            # CW(+angle)=heading 감소, CCW(-angle)=heading 증가 → 목표 = H - target
+            stop_locked_global_heading = ((heading_deg - target) + 180) % 360 - 180
             if abs(target) < 5:
                 stop_pivot_w = -MAX_W  # 정면이 가장 빈 경우 default 우회전
             else:
@@ -430,18 +479,18 @@ def find_vw_command(scan_points, heading_deg):
             _fname = f'stop_event_{int(time.time())}.json'
             with open(_fname, 'w') as _f:
                 json.dump({
-                    'heading': heading_deg,
-                    'target': target,
-                    'gap_dist': gap_dist,
-                    'sector_info': {str(k): v for k, v in sector_info.items()},
-                    'scan': [[a, d] for a, d in scan_points if d > 0],
+                    'heading':  heading_deg,
+                    'target':   target,
+                    'gap_dist': gap_width,
+                    'gap_info': gap_info,
+                    'scan':     [[a, d] for a, d in scan_points if d > 0],
                 }, _f)
             if DEBUG_STOP:
-                print(f"  [STOP] event saved → {_fname}")
+                print(f"  [STOP] event saved → {_fname}  "
+                      f"global_target={stop_locked_global_heading:.1f}°")
         else:
-            # 이후 사이클: 고정된 방향 유지
-            target = stop_locked_target
-            gap_dist = stop_locked_gap
+            target    = stop_locked_target
+            gap_width = stop_locked_gap
 
         pivot_w = stop_pivot_w
         stop_cycle_count += 1
@@ -449,7 +498,7 @@ def find_vw_command(scan_points, heading_deg):
         if DEBUG_STOP:
             print(f"  [STOP] zone detected (cycle {stop_cycle_count}/{STOP_MAX_CYCLES}) "
                   f"-> escape target={target:+.0f}° "
-                  f"(gap_dist={gap_dist:.0f}mm) pivot w={pivot_w:+.2f}")
+                  f"(width={gap_width:.0f}mm) pivot w={pivot_w:+.2f}")
 
         return 0.0, pivot_w
 
@@ -458,7 +507,7 @@ def find_vw_command(scan_points, heading_deg):
         if stop_cycle_count >= STOP_MAX_CYCLES and DEBUG_STOP:
             print(f"  [STOP] max cycles reached ({STOP_MAX_CYCLES}) -> force layered mode")
         stop_cycle_count = 0
-        stop_pivot_w = 0.0
+        stop_pivot_w     = 0.0
 
     return find_vw_layered(scan_points, heading_deg)
 
