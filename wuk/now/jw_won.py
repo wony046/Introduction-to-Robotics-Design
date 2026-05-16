@@ -76,7 +76,7 @@ STOP_PIVOT_K          = 0.05  # rad/s/deg: 헤딩 오차 비례 계수 (오차 2
 # FGM (Follow the Gap Method) — STOP escape 전용
 FGM_MIN_ANG_DEG      = 5     # deg: 이 이상 각도 공백이면 갭으로 인식
 FGM_MIN_DEPTH_MM     = 200   # mm: 갭 너머 최소 깊이 (얕은 함몰부 제외)
-FGM_MAX_RANGE_MM     = 500   # mm: FGM 갭 탐색 최대 거리 (이 이상 포인트 무시)
+FGM_MAX_RANGE_MM     = 800   # mm: FGM 갭 탐색 최대 거리 (이 이상 포인트 무시)
 HEADING_CONVERGE_DEG = 15    # deg: 목표 헤딩에 이 이내면 피봇 종료
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
