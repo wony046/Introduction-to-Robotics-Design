@@ -55,7 +55,7 @@ DETECTION_RANGE = 1500  # mm: 최대 신뢰 거리
 
 ROBOT_HALF_WIDTH = 110   # mm
 
-FORWARD_SPEED    = 0.30  # 반응 여유 확보를 위해 소폭 감속
+FORWARD_SPEED    = 0.45  # 반응 여유 확보를 위해 소폭 감속
 MIN_SPEED        = 0.07
 MAX_W            = 1.5
 W_MIN_DANGER     = 0.5
