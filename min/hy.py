@@ -55,14 +55,14 @@ DETECTION_RANGE = 1500  # mm: 최대 신뢰 거리
 
 ROBOT_HALF_WIDTH = 110   # mm
 
-FORWARD_SPEED    = 0.32  # 코드1(0.30)과 코드2(0.35)의 중간
+FORWARD_SPEED    = 0.30  # 반응 여유 확보를 위해 소폭 감속
 MIN_SPEED        = 0.07
 MAX_W            = 1.5
 W_MIN_DANGER     = 0.5
 W_SMOOTH         = 0.5   # 코드1(0.75) vs 코드2(0.35) 중간 - 반응성 + 진동 억제
 
 # 벽 무시 (1.1m 경기장 특화) - 코드1에서 가져옴
-WALL_IGNORE_HORIZ = 450  # mm: 이 이상은 벽으로 간주, 회피 계산에서 제외
+WALL_IGNORE_HORIZ = 500  # mm: 벽(550mm)에 더 가깝게 설정해 근처 장애물 누락 방지
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 6 레이어 정의 (코드2 그대로)
@@ -91,7 +91,7 @@ LAYER_PERCENTILE = 5
 
 STOP_FWD_MIN  = 100
 STOP_FWD_MAX  = 180
-STOP_HORIZ_TH = 110
+STOP_HORIZ_TH = 150  # 로봇 반폭(110mm)보다 40mm 여유 → 비상정지 구역 확대
 
 STOP_ESCAPE_SCAN_HALF = 90
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
@@ -519,7 +519,14 @@ def find_vw_command(scan_points, heading_deg):
             stop_locked_gap    = gap_width
             stop_locked_global_heading = ((heading_deg - target) + 180) % 360 - 180
             if abs(target) < 5:
-                stop_pivot_w = -MAX_W   # 정면이 빈 경우 default 우회전
+                # 양쪽 공간을 직접 비교해 더 열린 쪽으로 피봇
+                left_dists  = [d for a, d in scan_points
+                               if -80 <= a < -10 and LIDAR_MIN_VALID < d < DETECTION_RANGE]
+                right_dists = [d for a, d in scan_points
+                               if  10 < a <= 80  and LIDAR_MIN_VALID < d < DETECTION_RANGE]
+                left_mean  = sum(left_dists)  / len(left_dists)  if left_dists  else 0
+                right_mean = sum(right_dists) / len(right_dists) if right_dists else 0
+                stop_pivot_w = -MAX_W if right_mean >= left_mean else MAX_W
             else:
                 stop_pivot_w = -math.copysign(MAX_W, target)
             if DEBUG_STOP:
