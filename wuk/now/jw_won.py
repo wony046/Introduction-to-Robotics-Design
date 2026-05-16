@@ -25,7 +25,7 @@ FORWARD_SPEED    = 0.35
 MIN_SPEED        = 0.07
 MAX_W            = 1.5
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
-W_SMOOTH         = 0.6
+W_SMOOTH         = 0.35
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 계층형 바운딩 박스 정의 (6개 레이어)
@@ -35,16 +35,16 @@ W_SMOOTH         = 0.6
 LAYERS = [
     # L1: 가장 가까움, 동적 가중치, 측면까지 넓게 봄
     {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200,
-     'w_gain':1.2, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
+     'w_gain':2.5, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
     # L2: 가까움, 동적 가중치
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':170,
-     'w_gain':1.0, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
+     'w_gain':2.0, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
     # L3: 중간
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140,
-     'w_gain':0.8, 'weight_base':0.2, 'weight_dynamic':False, 'affects_v':True},
+     'w_gain':1.5, 'weight_base':0.2, 'weight_dynamic':False, 'affects_v':True},
     # L4: 중간-원거리
     {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':140,
-     'w_gain':0.6, 'weight_base':0.1, 'weight_dynamic':False, 'affects_v':True},
+     'w_gain':1.0, 'weight_base':0.1, 'weight_dynamic':False, 'affects_v':True},
     # L5: 원거리, 미세 보정만 (v 영향 없음)
     {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':120,
      'w_gain':0.4, 'weight_base':0.05,'weight_dynamic':False, 'affects_v':False},
