@@ -94,7 +94,11 @@ stop_zone_w_sign    = 0.0
 no_danger_count     = 0
 prev_w              = 0.0
 prev_v              = 0.0
-last_direction_change_time = 0.0   # [신규] 방향 전환 잠금용
+last_direction_change_time = 0.0
+stuck_timer                = 0.0
+stuck_direction            = 0.0
+
+STUCK_TIME = 2.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -321,7 +325,7 @@ def select_direction_by_width(left_width, right_width, heading_deg,
 
 def find_vw_command(scan_points, heading_deg):
     global avoidance_w_sign, stop_zone_w_sign, no_danger_count
-    global last_direction_change_time
+    global last_direction_change_time, stuck_timer, stuck_direction
 
     threshold = ROBOT_HALF_WIDTH + SAFETY_MARGIN
     now = time.time()
@@ -493,6 +497,23 @@ def find_vw_command(scan_points, heading_deg):
     if min_strict_fwd > STOP_FWD_RANGE and ROBOT_HALF_WIDTH <= n_horiz < threshold:
         w = 0.0
         print(f"  [관통모드] 대각선/측면 스치기 → 조향 잠금 (w=0)")
+
+    # ── 7. 막힘 감지 ─────────────────────────────────────────────────────────────
+    if v <= MIN_SPEED and avoidance_w_sign != 0.0:
+        if stuck_direction != avoidance_w_sign:
+            stuck_timer     = now
+            stuck_direction = avoidance_w_sign
+        elif now - stuck_timer > STUCK_TIME:
+            avoidance_w_sign       *= -1.0
+            last_direction_change_time = now
+            stuck_timer             = now
+            stuck_direction         = avoidance_w_sign
+            w = avoidance_w_sign * w_mag
+            print(f"  [막힘감지] {STUCK_TIME:.0f}s 저속 지속 → "
+                  f"{'좌회전' if avoidance_w_sign > 0 else '우회전'} 강제 전환")
+    else:
+        stuck_timer     = now
+        stuck_direction = avoidance_w_sign
 
     print(f"  [명령] v:{v:.2f}  w:{w:.2f}  (수평오차:{horiz_error:.0f}mm)")
     return v, w
