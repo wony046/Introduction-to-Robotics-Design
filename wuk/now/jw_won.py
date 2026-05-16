@@ -36,13 +36,13 @@ W_SMOOTH         = 0.45
 LAYERS = [
     # L1: 가장 가까움, 동적 가중치, 측면까지 넓게 봄
     {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200,
-     'w_gain':2.5, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
+     'w_gain':2.8, 'weight_base':0.5, 'weight_dynamic':True,  'affects_v':True},
     # L2: 가까움, 동적 가중치
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':170,
-     'w_gain':2.0, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
+     'w_gain':2.5, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
     # L3: 중간
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140,
-     'w_gain':1.5, 'weight_base':0.2, 'weight_dynamic':False, 'affects_v':True},
+     'w_gain':1.8, 'weight_base':0.2, 'weight_dynamic':False, 'affects_v':True},
     # L4: 중간-원거리
     {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':140,
      'w_gain':1.0, 'weight_base':0.1, 'weight_dynamic':False, 'affects_v':True},
@@ -98,7 +98,7 @@ SEND_INTERVAL  = 0.1
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 측면 반발력 파라미터 (50mm × 240mm 레이어)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SIDE_SAFE_MARGIN  = 140   # mm: 로봇 측면 안전 마진 (side_th = 110+140 = 250mm)
+SIDE_SAFE_MARGIN  = 190   # mm: 로봇 측면 안전 마진 (side_th = 110+190 = 300mm)
 SIDE_FWD_LEAD     = 50    # mm: 라이다 기준 전방 여유 (진입 예측)
 SIDE_FWD_REAR     = 240   # mm: 라이다 기준 후방 깊이 (로봇 몸체)
 SIDE_REPULSE_GAIN = 0.8   # rad/s: 반발력 최대 w 기여
@@ -536,11 +536,16 @@ def find_vw_command(scan_points, heading_deg):
             stop_locked_gap    = gap_width
             # 전역 목표 헤딩 계산: 로봇이 target 방향을 정면으로 보려면
             # CW(+angle)=heading 감소, CCW(-angle)=heading 증가 → 목표 = H - target
-            stop_locked_global_heading = ((heading_deg - target) + 180) % 360 - 180
-            if abs(target) < 5:
-                stop_pivot_w = -MAX_W  # 정면이 가장 빈 경우 default 우회전
+            if gap_width == 0:
+                # 갭 없음: 절대 헤딩 0°를 향해 피봇 (STOP존 벗어나면 자동 layered 복귀)
+                stop_locked_global_heading = 0.0
+                stop_pivot_w = -math.copysign(MAX_W, heading_deg) if abs(heading_deg) > 1 else -MAX_W
             else:
-                stop_pivot_w = -math.copysign(MAX_W, target)
+                stop_locked_global_heading = ((heading_deg - target) + 180) % 360 - 180
+                if abs(target) < 5:
+                    stop_pivot_w = -MAX_W  # 정면이 가장 빈 경우 default 우회전
+                else:
+                    stop_pivot_w = -math.copysign(MAX_W, target)
             # STOP 이벤트 저장 (viz.py로 시각화 가능)
             _fname = f'stop_event_{int(time.time())}.json'
             with open(_fname, 'w') as _f:
@@ -601,6 +606,11 @@ def main():
     lidar   = serial.Serial(LIDAR_PORT,   BAUDRATE_LIDAR,   timeout=1)
     arduino = serial.Serial(ARDUINO_PORT, BAUDRATE_ARDUINO, timeout=1)
     time.sleep(2)
+
+    # 아두이노 헤딩 0으로 초기화 (정지 상태에서 실행할 것)
+    arduino.write(b"R\n")
+    time.sleep(0.1)
+    print("[INIT] Arduino heading reset sent")
 
     lidar.write(bytes([0xA5, 0x40]))
     time.sleep(1)
