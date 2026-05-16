@@ -95,11 +95,20 @@ DEPTH_JUMP_THRES  = 120    # mm: 이상이면 다른 물체로 인식
 SCAN_WIDE_HALF = 135   # 메인에서 받는 스캔 범위 (STOP escape용)
 SEND_INTERVAL  = 0.1
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 측면 반발력 파라미터 (50mm × 240mm 레이어)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+SIDE_SAFE_MARGIN  = 50    # mm: 로봇 측면 안전 마진
+SIDE_FWD_LEAD     = 50    # mm: 라이다 기준 전방 여유 (진입 예측)
+SIDE_FWD_REAR     = 240   # mm: 라이다 기준 후방 깊이 (로봇 몸체)
+SIDE_REPULSE_GAIN = 0.8   # rad/s: 반발력 최대 w 기여
+
 # ── 디버그 토글 ──────────────────────────────────────────────────────────────
 DEBUG_LAYERS = True    # 각 레이어 처리 결과
 DEBUG_STOP   = True    # STOP zone 감지 & 탈출
 DEBUG_DIR    = True    # 점수 계산 & 방향 결정
 DEBUG_FINAL  = True    # 최종 v, w
+DEBUG_SIDE   = True    # 측면 반발력
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
@@ -357,6 +366,52 @@ def get_gap_width(scan_points, ref_angle, ref_dist, is_left):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 측면 반발력 (50mm × 240mm 레이어)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def get_side_repulsion(scan_points):
+    """
+    로봇 좌우 옆면 감지 레이어 (50mm × 240mm) 기반 반발력.
+
+    감지 구간:
+      horiz: 0 ~ ROBOT_HALF_WIDTH + SIDE_SAFE_MARGIN
+      fwd:   -SIDE_FWD_REAR(-240mm) ~ +SIDE_FWD_LEAD(+50mm)
+             라이다 뒤쪽(로봇 몸체)이 주 감지 영역
+
+    반환: (delta_w, left_str, right_str)
+      delta_w > 0 → 오른쪽 장애물 → 왼쪽 보정
+      delta_w < 0 → 왼쪽 장애물  → 오른쪽 보정
+    """
+    side_th = ROBOT_HALF_WIDTH + SIDE_SAFE_MARGIN  # 110 + 50 = 160mm
+
+    left_str  = 0.0
+    right_str = 0.0
+
+    for angle_norm, dist in scan_points:
+        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
+        if not is_in_wide_scan(angle_norm): continue
+
+        horiz, fwd = decompose(angle_norm, dist)
+
+        if fwd > SIDE_FWD_LEAD or fwd < -SIDE_FWD_REAR: continue
+        if horiz >= side_th: continue
+
+        strength = (side_th - horiz) / side_th  # 0~1 선형
+
+        if angle_norm < 0:
+            left_str = max(left_str, strength)
+        else:
+            right_str = max(right_str, strength)
+
+    delta_w = (right_str - left_str) * SIDE_REPULSE_GAIN
+
+    if DEBUG_SIDE and (left_str > 0 or right_str > 0):
+        print(f"  [SIDE] L={left_str:.2f} R={right_str:.2f} dw={delta_w:+.3f}")
+
+    return delta_w, left_str, right_str
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 계층형 v/w 산출 (메인 로직)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -434,6 +489,10 @@ def find_vw_layered(scan_points, heading_deg):
     w_mag = max(min(w_mag, MAX_W), W_MIN_DANGER)
 
     w = direction * w_mag
+
+    # 측면 반발력 합산
+    side_dw, _, _ = get_side_repulsion(scan_points)
+    w = max(min(w + side_dw, MAX_W), -MAX_W)
 
     if DEBUG_FINAL:
         print(f"  [FINAL] v={v:.2f} w={w:+.2f} dir={'L' if direction > 0 else 'R'}")
