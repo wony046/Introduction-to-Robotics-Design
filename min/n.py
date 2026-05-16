@@ -1,131 +1,241 @@
 """
-DWA Pro v5 - 개선 버전
-변경 사항:
-  1. 전역 상태 → DriveState dataclass 캡슐화
-  2. calculate_clearance numpy 벡터화 (10~50배 성능 향상)
-  3. analyze_proximity 각도 겹침 주석 명확화
-  4. stuck_count 상한(REC_MAX_STUCK) 추가
-  5. start_lidar 예외 처리 추가
-  6. print 출력 스로틀링 (10Hz → 2Hz)
+RPLIDAR C1 장애물 회피 - 하이브리드 (코드2 알고리즘 + 코드1 안전 인프라)
+
+[설계 결정]
+  STOP zone   : 코드2식 - 정지 후 FGM 피봇 (정확한 갭 정렬)
+  방향 결정    : 코드2식 - 매 사이클 점수로 재결정 (commit 없음)
+  레이어 감지  : 코드2식 - 6단계 풀버전 (선제적 회피)
+
+[코드1에서 흡수한 안전 인프라]
+  1. try/except/finally 메인루프 - 어떤 예외든 Arduino에 정지 신호
+  2. Keepalive 0.3s - 패킷 손실 / 회전 중 명령 유지
+  3. 라이다 재동기화 - 파싱 실패 100회 시 자동 복구
+  4. find_lidar_sync - 시작 시 안전한 동기화
+  5. 라이다 watchdog - 0.5s 스캔 없으면 비상정지
+  6. decompose_signed 좌표 통일 - y > 0 = 좌측
+  7. Print 스로틀링 - 상태 2Hz, 이벤트 즉시
+  8. start_lidar 안전 처리 - try/except + descriptor 출력
+  9. 진단 로그 - 패킷 0개 감지
+
+[PDF 환경 맞춤 조정]
+  - 경기장 폭 1.1m → 벽 무시 영역(WALL_IGNORE_HORIZ=450) 추가
+  - 60초 제한 → STOP_MAX_CYCLES 축소 (16→10)로 정지시간 단축
+  - 충돌 1회=1점 → SAFETY_MARGIN 강화
+  - 5개 랜덤 배치 → 매사이클 점수 재결정 유지
+  - W_SMOOTH=0.5 (코드1 0.75 vs 코드2 0.35의 중간) - 반응성 + 진동억제 균형
+
+[제거한 것]
+  - 코드2의 JSON 파일 저장 (디스크 I/O 지연 위험)
+  - 코드2의 readline() blocking 호출 → 코드1의 non-blocking 버퍼링
+
+포트: 라이다 /dev/ttyUSB0 / 아두이노 /dev/ttyAMA3
 """
 
+import serial
 import time
 import math
-import numpy as np
-import serial
-from dataclasses import dataclass
-from typing import Optional
+import traceback
 
-# ── 1. 하드웨어 ─────────────────────────────────────────────────────────────
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 포트 & 라이다 설정
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
 LIDAR_PORT       = "/dev/ttyUSB0"
 ARDUINO_PORT     = "/dev/ttyAMA3"
 BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 115200
 
-# ── 2. 안전 ─────────────────────────────────────────────────────────────────
-SAFETY_DIST_MM         = 130.0
-ROBOT_RADIUS_MM        = 110.0   # 물리적 안전 반경 — 로봇 좌우 22cm → 반경 11cm
-DWA_RADIUS_MM          = 110.0   # DWA 궤적 계획 반경 (물리 반경과 동일)
-EMERGENCY_THRESHOLD_MM = 140.0
-RECOVERY_CLEAR_MM      = 220.0
-LIDAR_NOISE_MM         = 80.0
+LIDAR_OFFSET    = 20    # mm
+LIDAR_MIN_VALID = 100   # mm: 노이즈 무시
+DETECTION_RANGE = 1500  # mm: 최대 신뢰 거리
 
-# ── 3. DWA ──────────────────────────────────────────────────────────────────
-MAX_V         = 0.45
-MAX_V_NARROW  = 0.15
-MAX_W         = 1.50
-DT            = 0.10
-PREDICT_TIME  = 0.6
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 로봇 & 속도
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# 우선순위 가중치 설계:
-#   2순위(거리) 최대 기여 = 10.0,  3순위(회전) 최대 기여 = 1.0
-#   → 거리 점수 0.1 차이가 회전 최대 이득을 초과 → 우선순위 보장
-W_CLEARANCE   = 5.0   # 2순위: 궤적 상 장애물 최소 이격 거리
-W_SPACE       = 5.0   # 2순위: 궤적 최종 방향의 열린 공간 거리
-W_ROTATION    = 1.0   # 3순위: 회전 최소화 (|w| 작을수록 유리)
-W_DEADZONE    = 0.10
+ROBOT_HALF_WIDTH = 110   # mm
 
-# ── 4. RECOVERY ─────────────────────────────────────────────────────────────
-REC_TURN_DUR     = 1.4   # 회전 지속 시간 (초)
-REC_TURN_W_RATIO = 0.7
-REC_CYCLE        = REC_TURN_DUR
-REC_STUCK_CYCLE  = 2.0
-REC_MAX_ATTEMPT  = 2
-REC_MAX_STUCK    = 5   # stuck_count 상한 — 이 이상 증가해도 행동은 같고 로그만 오염
+FORWARD_SPEED    = 0.45
+MIN_SPEED        = 0.15
+MAX_W            = 1.5
+W_MIN_DANGER     = 0.7  # 장애물 감지 시 최소 회전력 강화
+W_SMOOTH         = 0.75  # 반응성 우선 — 장애물 긁힘 방지
 
-KEEPALIVE_INTERVAL = 0.30
-SPIN_LOCK_COUNT    = 12     # ~125ms × 12 = 1.5s
-PRINT_INTERVAL     = 0.5    # 출력 스로틀링 (초)
+# 벽 무시 (1.1m 경기장 특화) - 코드1에서 가져옴
+WALL_IGNORE_HORIZ = 500  # mm: 벽(550mm)에 더 가깝게 설정해 근처 장애물 누락 방지
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 6 레이어 정의 (코드2 그대로)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+LAYERS = [
+    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200,
+     'w_gain':2.5, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
+    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':170,
+     'w_gain':2.0, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
+    {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140,
+     'w_gain':1.5, 'weight_base':0.2, 'weight_dynamic':False, 'affects_v':True},
+    {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':140,
+     'w_gain':1.0, 'weight_base':0.1, 'weight_dynamic':False, 'affects_v':True},
+    {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':120,
+     'w_gain':0.4, 'weight_base':0.05,'weight_dynamic':False, 'affects_v':False},
+    {'name':'L6', 'fwd_min':660, 'fwd_max':780, 'horiz_th':100,
+     'w_gain':0.3, 'weight_base':0.02,'weight_dynamic':False, 'affects_v':False},
+]
+
+LAYER_PERCENTILE = 5
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STOP zone & FGM (코드2 + 미세조정)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+STOP_FWD_MIN  = 100
+STOP_FWD_MAX  = 250  # 비상정지 감지 거리 확대 (속도 증가 보상)
+STOP_HORIZ_TH = 150  # 로봇 반폭(110mm)보다 40mm 여유 → 비상정지 구역 확대
+
+STOP_ESCAPE_SCAN_HALF = 90
+STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 100  # 320mm — 여유폭 확대
+STOP_MAX_CYCLES       = 10   # 코드2(16)→10: 60초 제한 고려하여 정지시간 단축
+
+FGM_MIN_ANG_DEG      = 5
+FGM_MIN_DEPTH_MM     = 400  # 막다른 틈 방지 — 최소 40cm 열린 공간 필요
+FGM_MAX_RANGE_MM     = 500
+HEADING_CONVERGE_DEG = 15
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 방향 점수제
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SCORE_ALPHA       = 5.0
+SCORE_BETA        = 20
+HEADING_WEIGHT_MM = 25.0  # 직진 바이어스 강화 (기존 5.0은 SCORE_BETA 대비 무의미)
+
+MIN_PASSAGE_WIDTH = 320  # 로봇폭(220mm) + 양쪽 50mm 여유
+DEPTH_JUMP_THRES  = 120
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 스캔 & 통신
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+SCAN_WIDE_HALF = 135
+SEND_INTERVAL  = 0.1
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 안전 인프라 파라미터 (코드1)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+KEEPALIVE_INTERVAL     = 0.30
+PRINT_INTERVAL         = 0.5
+RESYNC_THRESHOLD       = 100
+DIAG_INTERVAL          = 2.0
+LIDAR_SYNC_TIMEOUT     = 3.0
+LIDAR_WATCHDOG_TIMEOUT = 0.5
+
+# ── 디버그 토글 ──────────────────────────────────────────────────────────────
+DEBUG_LAYERS = False   # 평가 시 노이즈 줄이려면 False
+DEBUG_STOP   = True
+DEBUG_DIR    = False
+DEBUG_FINAL  = True
+
+# ── 전역 상태 ────────────────────────────────────────────────────────────────
+arduino_heading_deg        = 0.0
+arduino_buf                = ""   # 코드1 비차단 버퍼
+prev_w                     = 0.0
+prev_v                     = 0.0
+stop_cycle_count           = 0
+stop_pivot_w               = 0.0
+stop_locked_target         = 0.0
+stop_locked_gap            = 0.0
+stop_locked_global_heading = 0.0
+_last_direction            = 0.0  # 방향 히스테리시스용
 
 
-class RobotState:
-    DRIVE    = 1
-    RECOVERY = 2
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 유틸리티
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def normalize_angle(angle):
+    return angle - 360 if angle > 180 else angle
+
+def is_in_front_90(a):
+    return -90 <= a <= 90
+
+def is_in_wide_scan(a):
+    return -SCAN_WIDE_HALF <= a <= SCAN_WIDE_HALF
 
 
-@dataclass
-class DriveState:
-    """주행 관련 가변 상태를 한 곳에 모아 전역 변수 제거."""
-    current_state:    int            = RobotState.DRIVE
-    arduino_heading:  float          = 0.0
-    goal_heading:     Optional[float] = None
-    prev_v:           float          = 0.0
-    prev_w:           float          = 0.0
-    rec_start_time:   float          = 0.0
-    rec_attempt:      int            = 0
-    rec_initial_sign: int            = 1
-    stuck_count:      int            = 0
-    spin_count:       int            = 0
-    rec_w:            float          = 0.0   # 수학적으로 계산된 리커버리 회전속도 (부호 포함)
+def decompose_signed(angle_norm_deg, distance_mm):
+    """코드1의 부호 있는 분해.
+    y > 0 = 좌측 (장애물 왼쪽 → 우회전 -w 필요)
+    y < 0 = 우측 (장애물 오른쪽 → 좌회전 +w 필요)
+    """
+    rad = math.radians(angle_norm_deg)
+    x =  distance_mm * math.cos(rad)
+    y = -distance_mm * math.sin(rad)
+    return x, y
 
 
-def normalize_angle_deg(angle):
-    while angle > 180:   angle -= 360
-    while angle <= -180: angle += 360
-    return angle
-
-def normalize_angle_rad(angle):
-    return math.atan2(math.sin(angle), math.cos(angle))
+def decompose(angle_deg, dist):
+    """코드2 호환: (horiz, fwd) 반환."""
+    x, y = decompose_signed(angle_deg, dist)
+    return abs(y), x
 
 
-def is_valid_first_byte(b):
-    return (b & 0x01) != ((b >> 1) & 0x01)
-
-def is_valid_second_byte(b):
-    return (b & 0x01) == 1
+def cosine_dist(d1, d2, angle_diff_deg):
+    theta = math.radians(abs(angle_diff_deg))
+    return math.sqrt(d1**2 + d2**2 - 2 * d1 * d2 * math.cos(theta))
 
 
-def parse_packet(raw):
-    if len(raw) < 5: return None
-    if not is_valid_first_byte(raw[0]): return None
-    if not is_valid_second_byte(raw[1]): return None
-    s_flag      = raw[0] & 0x01
-    quality     = (raw[0] >> 2) & 0x3F
-    angle_q6    = ((raw[2] << 7) | (raw[1] >> 1)) & 0x7FFF
-    angle_deg   = angle_q6 / 64.0
-    distance_q2 = (raw[4] << 8) | raw[3]
-    distance_mm = distance_q2 / 4.0
-    return angle_deg, distance_mm, s_flag, quality
+def parse_packet(data):
+    if len(data) != 5: return None
+    s_flag     = data[0] & 0x01
+    s_inv_flag = (data[0] & 0x02) >> 1
+    if s_inv_flag != (1 - s_flag): return None
+    if (data[1] & 0x01) != 1: return None
+    angle_q6    = (data[1] >> 1) | (data[2] << 7)
+    distance_q2 = data[3] | (data[4] << 8)
+    return (angle_q6 / 64.0), (distance_q2 / 4.0)
 
+
+def read_arduino(arduino):
+    """코드1의 비차단 버퍼링 - readline() 블로킹 회피."""
+    global arduino_heading_deg, arduino_buf
+    if arduino.in_waiting <= 0:
+        return
+    try:
+        arduino_buf += arduino.read(arduino.in_waiting).decode('utf-8', errors='ignore')
+        while '\n' in arduino_buf:
+            line, arduino_buf = arduino_buf.split('\n', 1)
+            line = line.strip()
+            if line.startswith('H:'):
+                arduino_heading_deg = float(line[2:])
+    except Exception:
+        pass
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 라이다 안전한 시작 & 재동기화 (코드1)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def find_lidar_sync(lidar, verbose=True):
-    if verbose: print("[라이다] 동기화...", flush=True)
-    deadline = time.time() + 3.0
+    if verbose:
+        print("[라이다] 동기화 시도...", flush=True)
+    deadline = time.time() + LIDAR_SYNC_TIMEOUT
     while time.time() < deadline:
         b = lidar.read(1)
         if len(b) == 0: continue
-        if not is_valid_first_byte(b[0]): continue
+        if (b[0] & 0x01) == ((b[0] >> 1) & 0x01): continue
         b2 = lidar.read(1)
         if len(b2) == 0: continue
-        if not is_valid_second_byte(b2[0]): continue
+        if (b2[0] & 0x01) != 1: continue
         rest = lidar.read(3)
         if len(rest) != 3: continue
         result = parse_packet(b + b2 + rest)
         if result is None: continue
-        angle, distance, _, _ = result
+        angle, distance = result
         if 0 <= angle <= 360 and 0 <= distance <= 10000:
             if verbose:
-                print(f"[라이다] OK (각도={angle:.1f}°, 거리={distance:.0f}mm)",
+                print(f"[라이다] 동기화 OK (각도={angle:.1f}°, 거리={distance:.0f}mm)",
                       flush=True)
             return True
     if verbose:
@@ -134,415 +244,511 @@ def find_lidar_sync(lidar, verbose=True):
 
 
 def start_lidar(lidar):
-    print("[라이다] 시작...", flush=True)
+    print("[라이다] 시작 중...", flush=True)
     try:
-        lidar.write(bytes([0xA5, 0x25]))
+        lidar.write(bytes([0xA5, 0x25]))   # 먼저 STOP
         time.sleep(0.1)
         try:
-            lidar.dtr = False       # 일부 어댑터에서 지원 안 할 수 있음
+            lidar.dtr = False
         except AttributeError:
             pass
         time.sleep(0.5)
         lidar.reset_input_buffer()
-        lidar.write(bytes([0xA5, 0x20]))
+        lidar.write(bytes([0xA5, 0x20]))   # SCAN
         time.sleep(0.5)
         descriptor = lidar.read(7)
         print(f"[라이다] descriptor: {descriptor.hex()}", flush=True)
+        return True
     except serial.SerialException as e:
         print(f"[라이다] ✗ 시작 실패: {e}", flush=True)
         return False
-    return True
+    except Exception as e:
+        print(f"[라이다] ✗ 예외: {e}", flush=True)
+        return False
 
 
-def read_arduino(arduino, state: DriveState):
-    if arduino.in_waiting > 0:
-        try:
-            line = arduino.readline().decode('utf-8', errors='ignore').strip()
-            if line.startswith("H:"):
-                state.arduino_heading = float(line.split(":")[1])
-        except Exception:
-            pass
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# STOP zone 감지 & FGM 탈출 (코드2)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def detect_stop_zone(scan_points):
+    for angle_norm, dist in scan_points:
+        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
+        if not is_in_front_90(angle_norm): continue
+        horiz, fwd = decompose(angle_norm, dist)
+        if STOP_FWD_MIN <= fwd <= STOP_FWD_MAX and horiz < STOP_HORIZ_TH:
+            return True
+    return False
 
 
-def analyze_proximity(scan_points):
-    """라이다 0°=정면, +가 우측(CW), -가 좌측(CCW).
+def find_all_gaps(scan_points):
+    pts = sorted(
+        [(a, d) for a, d in scan_points
+         if LIDAR_MIN_VALID < d < FGM_MAX_RANGE_MM
+         and abs(a) <= SCAN_WIDE_HALF],
+        key=lambda p: p[0]
+    )
+    if len(pts) < 2:
+        return []
 
-    front와 front_left/front_right는 ±10°~25° 구간이 의도적으로 겹침.
-    경계 장애물을 인접 두 섹터 모두에서 포착해 보수적 안전 거리를 유지한다.
-    """
-    p = {'front': 99999, 'front_left': 99999, 'front_right': 99999,
-         'left':  99999, 'right':       99999, 'back': 99999}
-    for a, d in scan_points:
-        na = normalize_angle_deg(a)
-        if -25 <= na <= 25:
-            p['front'] = min(p['front'], d)
-        if  10 <= na <= 70:
-            p['front_right'] = min(p['front_right'], d)
-        if -70 <= na <= -10:
-            p['front_left']  = min(p['front_left'],  d)
-        if  70 <  na <= 130:
-            p['right'] = min(p['right'], d)
-        if -130 <= na < -70:
-            p['left']  = min(p['left'],  d)
-        if na > 150 or na < -150:
-            p['back'] = min(p['back'], d)
-    return p
+    gaps = []
+    for i in range(len(pts) - 1):
+        a1, d1 = pts[i]
+        a2, d2 = pts[i + 1]
+        ang_diff = a2 - a1
 
+        is_depth_jump   = abs(d2 - d1) > DEPTH_JUMP_THRES
+        is_angular_hole = ang_diff >= FGM_MIN_ANG_DEG
 
-def _scan_to_cartesian(scan_points):
-    """scan_points → numpy 장애물 좌표 (ox, oy).
-
-    라이다 CW 각도 규약(+가 우측)을 로봇 좌표계(x=정면, y=좌측)로 변환.
-    run_dwa 안에서 후보별로 반복 호출되지 않도록 DWA 진입 전 1회만 실행.
-    """
-    if not scan_points:
-        return np.empty(0), np.empty(0)
-    angles_rad = np.radians([a for a, _ in scan_points])
-    dists      = np.array([d for _, d in scan_points])
-    ox =  dists * np.cos(angles_rad)
-    oy = -dists * np.sin(angles_rad)   # CW → 표준 y축 반전
-    return ox, oy
-
-
-def calculate_clearance(v, w, ox, oy):
-    """numpy 벡터화: 궤적 전 스텝 × 전 장애물 거리를 한 번에 계산.
-
-    반환값: 최소 이격 거리(mm), 충돌 예측 시 -1.0
-    """
-    if len(ox) == 0:
-        return 99999.0
-
-    if abs(v) < 1e-3:  # 정지 또는 제자리 회전 — 물리적 반경으로 검사
-        nearest = float(np.min(np.hypot(ox, oy)))
-        return nearest if nearest >= ROBOT_RADIUS_MM else -1.0
-
-    steps = int(PREDICT_TIME / DT)
-    j = np.arange(steps)
-    thetas = j * w * DT                                     # 각 스텝의 헤딩
-
-    robot_x = np.cumsum(v * np.cos(thetas) * DT * 1000.0)  # (steps,) mm
-    robot_y = np.cumsum(v * np.sin(thetas) * DT * 1000.0)
-
-    # (steps, N) 거리² 행렬 — sqrt는 비교 후 최솟값에 한 번만
-    dx = ox[np.newaxis, :] - robot_x[:, np.newaxis]
-    dy = oy[np.newaxis, :] - robot_y[:, np.newaxis]
-    dists_sq = dx * dx + dy * dy
-
-    # 전진 궤적은 DWA 계획 반경(작은 값) 사용 → 통과 가능 공간에서 경로 탐색 허용
-    if np.any(dists_sq < DWA_RADIUS_MM ** 2):
-        return -1.0
-    return float(math.sqrt(float(np.min(dists_sq))))
-
-
-def open_space_score(scan_points, w, cone_deg=30.0, max_dist=4000.0):
-    """궤적 최종 방향의 열린 공간 점수 (0~1).
-
-    w로 PREDICT_TIME 이동 후 로봇이 향하는 방향(라이다 CW 각도계 기준) ±cone_deg
-    내의 라이다 거리 평균을 max_dist로 정규화한다.
-    거리가 멀수록(열린 공간) 점수가 높아진다.
-
-    변환: DWA +w = 좌회전(CCW) → 라이다 기준 음수(-) 방향
-          DWA -w = 우회전(CW)  → 라이다 기준 양수(+) 방향
-    """
-    final_deg = math.degrees(-w * PREDICT_TIME)
-    total, count = 0.0, 0
-    for a, d in scan_points:
-        na = normalize_angle_deg(a)
-        if abs(normalize_angle_deg(na - final_deg)) <= cone_deg:
-            total += d
-            count += 1
-    avg = (total / count) if count > 0 else max_dist
-    return min(avg / max_dist, 1.0)
-
-
-def run_dwa(scan_points, narrow_mode):
-    # t=0 즉시 충돌 검사 (정면 ±30° 한정)
-    for a_deg, d in scan_points:
-        na = normalize_angle_deg(a_deg)
-        if abs(na) < 30 and d < ROBOT_RADIUS_MM:
-            return 0.0, 0.0, 0
-
-    ox, oy = _scan_to_cartesian(scan_points)   # 좌표 변환 1회
-    v_max = MAX_V_NARROW if narrow_mode else MAX_V
-
-    if narrow_mode:
-        v_candidates = [0.0, v_max * 0.5, v_max]
-        w_candidates = [-1.2, -0.6, -0.3, -0.15, -0.05, 0.0, 0.05, 0.15, 0.3, 0.6, 1.2]
-    else:
-        v_candidates = [0.0, v_max * 0.33, v_max * 0.66, v_max]
-        w_candidates = [-1.2, -0.8, -0.5, -0.25, -0.1, 0.0, 0.1, 0.25, 0.5, 0.8, 1.2]
-
-    # 각 w별 열린 공간 점수를 미리 1회 계산 (v 루프 안에서 반복하지 않도록)
-    space_scores = {w: open_space_score(scan_points, w) for w in w_candidates}
-
-    best_v, best_w = 0.0, 0.0
-    best_score = -float('inf')
-    safe_count = 0
-
-    for v in v_candidates:
-        for w in w_candidates:
-            if abs(w) > MAX_W: continue
-            clearance = calculate_clearance(v, w, ox, oy)
-            if clearance < 0: continue
-            safe_count += 1
-
-            # 1순위: 지나갈 수 있는가 → clearance < 0이면 위에서 continue 처리됨
-            # 2순위: 로봇으로부터 먼가 (궤적 이격 거리 + 전방 열린 공간)
-            # 3순위: 회전 최소화
-            clearance_score = min(clearance / 1000.0, 1.0)
-            space_score     = space_scores[w]
-            rotation_score  = 1.0 - abs(w) / MAX_W
-
-            score = (W_CLEARANCE * clearance_score
-                   + W_SPACE     * space_score
-                   + W_ROTATION  * rotation_score
-                   + 0.05 * (v / max(v_max, 1e-3)))   # 정지 방지 미소 편향
-
-            if score > best_score:
-                best_score = score
-                best_v, best_w = v, w
-
-    deadzone = 0.04 if narrow_mode else W_DEADZONE
-    if abs(best_w) < deadzone:
-        best_w = 0.0
-
-    return best_v, best_w, safe_count
-
-
-def pick_recovery_direction(prox, goal_angle_rad=0.0):
-    left_room  = prox['front_left']  + prox['left']
-    right_room = prox['front_right'] + prox['right']
-    if goal_angle_rad > 0.2:
-        left_room  *= 1.4
-    elif goal_angle_rad < -0.2:
-        right_room *= 1.4
-    return 1 if left_room >= right_room else -1
-
-
-def calc_recovery_w(scan_points, sign, stuck=0):
-    """전방 장애물 각도 분포에서 리커버리 회전 속도(w, 부호 포함)를 수학적으로 계산.
-
-    원리: 회전 방향의 반대쪽(막힌 쪽) 장애물이 차지하는 최대 각도(obstacle_limit)를
-    구하고, 그 각도+여유를 REC_CYCLE 시간 안에 회전하는 w = angle / time 적용.
-
-    sign=+1 → 좌회전: 우측(양수 각도) 장애물이 막힌 범위 파악
-    sign=-1 → 우회전: 좌측(음수 각도) 장애물이 막힌 범위 파악
-    """
-    obstacle_limit_deg = 0.0
-    for a, d in scan_points:
-        na = normalize_angle_deg(a)
-        if d >= RECOVERY_CLEAR_MM:
+        if not (is_depth_jump or is_angular_hole):
             continue
-        if sign > 0 and 0 < na <= 90:
-            obstacle_limit_deg = max(obstacle_limit_deg, na)
-        elif sign < 0 and -90 <= na < 0:
-            obstacle_limit_deg = max(obstacle_limit_deg, abs(na))
 
-    # 장애물 끝 각도 + 여유 20° → 최소 45° 보장
-    target_rad = math.radians(max(obstacle_limit_deg + 20.0, 45.0))
-    cycle = REC_STUCK_CYCLE if stuck >= 1 else REC_CYCLE
-    w_needed = target_rad / cycle           # 필요 각속도 = 각도 / 시간
-    w_max = MAX_W if stuck >= 1 else MAX_W * REC_TURN_W_RATIO
-    return float(np.clip(w_needed, 0.4, w_max)) * sign
+        width = cosine_dist(d1, d2, ang_diff)
 
+        x1 = d1 * math.sin(math.radians(a1))
+        y1 = d1 * math.cos(math.radians(a1))
+        x2 = d2 * math.sin(math.radians(a2))
+        y2 = d2 * math.cos(math.radians(a2))
+        center_angle = math.degrees(math.atan2((x1 + x2) / 2, (y1 + y2) / 2))
+
+        gaps.append({
+            'width':        width,
+            'center_angle': center_angle,
+            'edge_a':       (a1, d1),
+            'edge_b':       (a2, d2),
+            'depth':        max(d1, d2),
+        })
+    return gaps
+
+
+def choose_escape_gap(gaps, prefer_angle=0.0):
+    passable = [g for g in gaps
+                if g['width'] >= STOP_ESCAPE_MIN_GAP
+                and g['depth'] >= FGM_MIN_DEPTH_MM]
+    if passable:
+        return min(passable, key=lambda g: abs(g['center_angle'] - prefer_angle))
+    return max(gaps, key=lambda g: g['width']) if gaps else None
+
+
+def find_stop_escape_direction(scan_points):
+    gaps   = find_all_gaps(scan_points)
+    chosen = choose_escape_gap(gaps, prefer_angle=0.0)
+    if chosen is None:
+        return 0.0, 0.0
+    return float(chosen['center_angle']), float(chosen['width'])
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 레이어 처리 (코드2 + 벽 무시 추가)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def process_layer(scan_points, layer):
+    pts = []
+    for angle_norm, dist in scan_points:
+        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
+        if not is_in_front_90(angle_norm): continue
+        horiz, fwd = decompose(angle_norm, dist)
+
+        # 벽 무시 (1.1m 경기장 특화)
+        if horiz > WALL_IGNORE_HORIZ:
+            continue
+
+        if layer['fwd_min'] <= fwd < layer['fwd_max'] and horiz < layer['horiz_th']:
+            pts.append({
+                'angle': angle_norm, 'dist': dist,
+                'horiz': horiz, 'fwd': fwd,
+                'horiz_error': layer['horiz_th'] - horiz,
+            })
+
+    if not pts:
+        return None
+
+    n_take = max(1, int(len(pts) * LAYER_PERCENTILE / 100))
+    rep = sorted(pts, key=lambda p: p['dist'])[:n_take]
+
+    rep_angle = sum(p['angle'] for p in rep) / len(rep)
+    rep_horiz = sum(p['horiz'] for p in rep) / len(rep)
+    rep_fwd   = sum(p['fwd']   for p in rep) / len(rep)
+    rep_h_err = layer['horiz_th'] - rep_horiz
+
+    if layer['weight_dynamic']:
+        weight = max(layer['weight_base'],
+                     min(1.0, rep_h_err / layer['horiz_th']))
+    else:
+        weight = layer['weight_base']
+
+    urgency = layer['w_gain'] * rep_h_err / layer['horiz_th']
+
+    if layer['affects_v']:
+        progress = (rep_fwd - layer['fwd_min']) / (layer['fwd_max'] - layer['fwd_min'])
+        progress = max(0.0, min(1.0, progress))
+        v_proposal = MIN_SPEED + (FORWARD_SPEED - MIN_SPEED) * progress
+    else:
+        v_proposal = None
+
+    push_left  = sum(p['horiz_error'] for p in rep if p['angle'] < 0)
+    push_right = sum(p['horiz_error'] for p in rep if p['angle'] > 0)
+
+    return {
+        'name': layer['name'],
+        'weight': weight, 'urgency': urgency, 'v_proposal': v_proposal,
+        'rep_angle': rep_angle, 'rep_horiz': rep_horiz, 'rep_fwd': rep_fwd,
+        'push_left': push_left, 'push_right': push_right,
+        'n_points': len(pts),
+    }
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Gap 너비 (코사인 법칙)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def get_gap_width(scan_points, ref_angle, ref_dist, is_left):
+    front = [(a, d) for a, d in scan_points if is_in_front_90(a)]
+
+    if is_left:
+        search = sorted([p for p in front if p[0] < ref_angle],
+                        key=lambda x: x[0], reverse=True)
+    else:
+        search = sorted([p for p in front if p[0] > ref_angle],
+                        key=lambda x: x[0])
+
+    if not search:
+        return 0.0
+
+    edge_p = (ref_angle, ref_dist)
+    for i, p in enumerate(search):
+        if abs(p[1] - edge_p[1]) > DEPTH_JUMP_THRES:
+            wall = search[i:]
+            if wall:
+                return min(cosine_dist(edge_p[1], wp[1], abs(edge_p[0] - wp[0]))
+                           for wp in wall)
+        edge_p = p
+
+    rem_angle = abs((-90 - edge_p[0]) if is_left else (90 - edge_p[0]))
+    if rem_angle > 15:
+        return cosine_dist(edge_p[1], edge_p[1], rem_angle)
+    return 0.0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 계층형 v/w 산출 (코드2 메인 로직)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def find_vw_layered(scan_points, heading_deg):
+    layer_results = []
+    for layer in LAYERS:
+        r = process_layer(scan_points, layer)
+        if r is not None:
+            layer_results.append(r)
+
+    if DEBUG_LAYERS:
+        for r in layer_results:
+            v_str = f" v={r['v_proposal']:.2f}" if r['v_proposal'] is not None else ""
+            print(f"  [{r['name']}] n={r['n_points']:3d} "
+                  f"rep:h={r['rep_horiz']:.0f} a={r['rep_angle']:+.1f}° "
+                  f"f={r['rep_fwd']:.0f}  w={r['weight']:.2f} u={r['urgency']:.2f}{v_str}  "
+                  f"pL={r['push_left']:.0f} pR={r['push_right']:.0f}")
+
+    if not layer_results:
+        return FORWARD_SPEED, 0.0
+
+    closest = min(layer_results, key=lambda r: r['rep_horiz'])
+    ref_angle = closest['rep_angle']
+    ref_dist  = math.sqrt(closest['rep_horiz']**2 + closest['rep_fwd']**2)
+
+    gap_L = get_gap_width(scan_points, ref_angle, ref_dist, is_left=True)
+    gap_R = get_gap_width(scan_points, ref_angle, ref_dist, is_left=False)
+
+    sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
+    sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
+
+    score_L = (SCORE_ALPHA * gap_L
+               + SCORE_BETA  * sum_pR
+               + max(0.0, -heading_deg) * HEADING_WEIGHT_MM)
+    score_R = (SCORE_ALPHA * gap_R
+               + SCORE_BETA  * sum_pL
+               + max(0.0,  heading_deg) * HEADING_WEIGHT_MM)
+
+    # MIN_PASSAGE_WIDTH 실제 적용 — 통과 불가 방향 점수 제거
+    if gap_L < MIN_PASSAGE_WIDTH and gap_R >= MIN_PASSAGE_WIDTH:
+        score_L = 0.0
+    elif gap_R < MIN_PASSAGE_WIDTH and gap_L >= MIN_PASSAGE_WIDTH:
+        score_R = 0.0
+
+    if DEBUG_DIR:
+        print(f"  [GAP] L={gap_L:.0f} R={gap_R:.0f}  ref={ref_angle:+.1f}°/{ref_dist:.0f}")
+        print(f"  [SCORE] L={score_L:.0f}  R={score_R:.0f}")
+
+    # 방향 히스테리시스 — 40% 이상 우세해야 방향 전환
+    global _last_direction
+    raw_dir = 1.0 if score_L >= score_R else -1.0
+    if _last_direction != 0.0 and raw_dir != _last_direction:
+        lead  = max(score_L, score_R)
+        trail = min(score_L, score_R)
+        if lead < trail * 1.4:
+            raw_dir = _last_direction  # 우세하지 않으면 현재 방향 유지
+    _last_direction = raw_dir
+    direction = raw_dir
+
+    v_layers = [r for r in layer_results if r['v_proposal'] is not None]
+    if v_layers:
+        total_w = sum(r['weight'] for r in v_layers)
+        v = sum(r['weight'] * r['v_proposal'] for r in v_layers) / total_w
+    else:
+        v = FORWARD_SPEED
+
+    total_w_all = sum(r['weight'] for r in layer_results)
+    w_mag = sum(r['weight'] * r['urgency'] for r in layer_results) / total_w_all
+    w_mag = max(min(w_mag, MAX_W), W_MIN_DANGER)
+    w = direction * w_mag
+
+    if DEBUG_FINAL:
+        print(f"  [FINAL] v={v:.2f} w={w:+.2f} dir={'L' if direction > 0 else 'R'}")
+
+    return v, w
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 메인 진입점 (STOP 우선)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def find_vw_command(scan_points, heading_deg):
+    global stop_cycle_count, stop_pivot_w, stop_locked_target, stop_locked_gap, \
+           stop_locked_global_heading
+
+    # 피봇 중 목표 헤딩 도달 시 layered로 복귀
+    if stop_cycle_count > 0:
+        heading_err = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
+        if heading_err < HEADING_CONVERGE_DEG:
+            if DEBUG_STOP:
+                print(f"  [STOP] heading converged "
+                      f"(target={stop_locked_global_heading:.1f}° err={heading_err:.1f}°) "
+                      f"-> layered")
+            stop_cycle_count = 0
+            stop_pivot_w     = 0.0
+            return find_vw_layered(scan_points, heading_deg)
+
+    if detect_stop_zone(scan_points) and stop_cycle_count < STOP_MAX_CYCLES:
+        if stop_cycle_count == 0:
+            target, gap_width = find_stop_escape_direction(scan_points)
+            stop_locked_target = target
+            stop_locked_gap    = gap_width
+            stop_locked_global_heading = ((heading_deg - target) + 180) % 360 - 180
+            if abs(target) < 5:
+                # 양쪽 공간을 직접 비교해 더 열린 쪽으로 피봇
+                left_dists  = [d for a, d in scan_points
+                               if -80 <= a < -10 and LIDAR_MIN_VALID < d < DETECTION_RANGE]
+                right_dists = [d for a, d in scan_points
+                               if  10 < a <= 80  and LIDAR_MIN_VALID < d < DETECTION_RANGE]
+                left_mean  = sum(left_dists)  / len(left_dists)  if left_dists  else 0
+                right_mean = sum(right_dists) / len(right_dists) if right_dists else 0
+                stop_pivot_w = -MAX_W if right_mean >= left_mean else MAX_W
+            else:
+                stop_pivot_w = -math.copysign(MAX_W, target)
+            if DEBUG_STOP:
+                print(f"  [STOP] entry target={target:+.1f}° gap={gap_width:.0f}mm "
+                      f"global_target_h={stop_locked_global_heading:.1f}°")
+        else:
+            target    = stop_locked_target
+            gap_width = stop_locked_gap
+
+        pivot_w = stop_pivot_w
+        stop_cycle_count += 1
+
+        if DEBUG_STOP:
+            print(f"  [STOP] zone (cycle {stop_cycle_count}/{STOP_MAX_CYCLES}) "
+                  f"target={target:+.0f}° pivot w={pivot_w:+.2f}")
+
+        return 0.0, pivot_w
+
+    if stop_cycle_count > 0:
+        if stop_cycle_count >= STOP_MAX_CYCLES and DEBUG_STOP:
+            print(f"  [STOP] max cycles ({STOP_MAX_CYCLES}) -> force layered")
+        stop_cycle_count = 0
+        stop_pivot_w     = 0.0
+
+    return find_vw_layered(scan_points, heading_deg)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 메인 루프 (코드1 안전 인프라)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def main():
-    state = DriveState()
+    global prev_w, prev_v
 
-    print("="*60, flush=True)
-    print("DWA Pro v5 (개선 버전)", flush=True)
-    print("="*60, flush=True)
+    print("=" * 70)
+    print("RPLIDAR 장애물 회피 - 하이브리드")
+    print("=" * 70)
+    print(f"  알고리즘    : 6-layer + FGM STOP escape + 매사이클 점수")
+    print(f"  안전 인프라 : try/finally, Keepalive {KEEPALIVE_INTERVAL}s, "
+          f"재동기화 {RESYNC_THRESHOLD}회")
+    print(f"  레이어      : 6단계 (60~780mm), 하위 {LAYER_PERCENTILE}% 평균")
+    print(f"  STOP zone   : fwd {STOP_FWD_MIN}-{STOP_FWD_MAX}mm, "
+          f"horiz<{STOP_HORIZ_TH}mm, max_cycles={STOP_MAX_CYCLES}")
+    print(f"  벽 무시     : 수평 {WALL_IGNORE_HORIZ}mm 초과")
+    print(f"  전진속도    : {FORWARD_SPEED}, W_SMOOTH={W_SMOOTH}")
+    print("=" * 70)
 
+    lidar   = None
+    arduino = None
     try:
         lidar = serial.Serial(LIDAR_PORT, BAUDRATE_LIDAR, timeout=1)
         time.sleep(0.5)
     except Exception as e:
-        print(f"✗ 라이다: {e}", flush=True); return
+        print(f"[치명] 라이다 포트 열기 실패: {e}")
+        return
 
     try:
         arduino = serial.Serial(ARDUINO_PORT, BAUDRATE_ARDUINO, timeout=0.1)
         time.sleep(0.5)
     except Exception as e:
-        print(f"✗ 아두이노: {e}", flush=True); lidar.close(); return
+        print(f"[치명] 아두이노 포트 열기 실패: {e}")
+        if lidar: lidar.close()
+        return
 
     arduino.write(b"0.00 0.00\n")
     time.sleep(0.3)
 
     if not start_lidar(lidar):
         arduino.write(b"0.00 0.00\n")
-        lidar.close(); arduino.close(); return
+        lidar.close()
+        arduino.close()
+        return
 
     if not find_lidar_sync(lidar):
         arduino.write(b"0.00 0.00\n")
         try: lidar.write(bytes([0xA5, 0x25]))
-        except: pass
-        lidar.close(); arduino.close(); return
+        except Exception: pass
+        lidar.close()
+        arduino.close()
+        return
 
     print("\n주행 시작!\n", flush=True)
 
     scan_points     = []
+    last_send       = time.time()
+    last_scan_time  = time.time()
     last_cmd_time   = time.time()
     last_print_time = 0.0
-    dwa_count       = 0
-    packet_count    = 0
-    invalid_count   = 0
     last_diag_time  = time.time()
+    last_cmd_str    = ""
+    invalid_count   = 0
+    packet_count    = 0
 
     try:
         while True:
-            read_arduino(arduino, state)
-
+            read_arduino(arduino)
             raw = lidar.read(5)
-            if len(raw) == 5:
-                pkt = parse_packet(raw)
-                if pkt is None:
+            now = time.time()
+
+            # 라이다 watchdog
+            if now - last_scan_time > LIDAR_WATCHDOG_TIMEOUT:
+                arduino.write(b"0.00 0.00\n")
+                last_cmd_time = now
+                print(f"[경고] 라이다 스캔 없음 ({LIDAR_WATCHDOG_TIMEOUT}s) → 비상정지",
+                      flush=True)
+                last_scan_time = now
+
+            if len(raw) < 5:
+                invalid_count += 1
+            else:
+                result = parse_packet(raw)
+                if result is None:
                     invalid_count += 1
-                    if invalid_count > 100:
+                    if invalid_count >= RESYNC_THRESHOLD:
+                        print(f"[라이다] 파싱실패 {invalid_count}회 → 재동기화",
+                              flush=True)
                         lidar.reset_input_buffer()
-                        find_lidar_sync(lidar, verbose=False)
+                        if find_lidar_sync(lidar, verbose=False):
+                            print("[라이다] 재동기화 성공", flush=True)
                         invalid_count = 0
+                        scan_points = []
                 else:
+                    invalid_count = 0
                     packet_count += 1
-                    angle_raw, distance, s_flag, quality = pkt
-                    now = time.time()
+                    angle_raw, distance = result
+                    s_flag = raw[0] & 0x01
 
-                    if distance > LIDAR_NOISE_MM and quality > 0:
-                        scan_points.append((angle_raw, distance))
+                    if s_flag == 1 and scan_points:
+                        last_scan_time = time.time()
+                        wide_points = [
+                            (a, d) for a, d in scan_points
+                            if is_in_wide_scan(a) and d > 0
+                        ]
+                        now = time.time()
+                        if now - last_send >= SEND_INTERVAL:
+                            v, w = find_vw_command(wide_points, arduino_heading_deg)
 
-                    if s_flag == 1:
-                        if len(scan_points) > 30:
-                            dwa_count += 1
-                            prox = analyze_proximity(scan_points)
-                            front_min = min(prox['front'],
-                                            prox['front_left'],
-                                            prox['front_right'])
-
-                            if state.goal_heading is None:
-                                state.goal_heading = state.arduino_heading
-                                print(f"  [목표] {state.goal_heading:.1f}°", flush=True)
-
-                            goal_angle_rad = math.radians(
-                                normalize_angle_deg(state.goal_heading - state.arduino_heading)
-                            )
-
-                            if state.current_state == RobotState.DRIVE:
-                                side_min = min(prox['left'], prox['right'])
-                                narrow = front_min < 350.0 or side_min < 140.0
-                                v, w, safe_count = run_dwa(scan_points, narrow)
-
-                                if v <= 0.01 and abs(w) < 0.3:
-                                    state.spin_count += 1
-                                else:
-                                    state.spin_count = 0
-
-                                if state.spin_count >= SPIN_LOCK_COUNT:
-                                    side_clear = max(prox['front_left'], prox['front_right'])
-                                    if side_clear > RECOVERY_CLEAR_MM:
-                                        sign = pick_recovery_direction(prox, goal_angle_rad)
-                                        v, w = 0.0, MAX_W * 0.6 * sign
-                                        state.spin_count = 0
-                                        safe_count = 1
-
-                                needs_recovery = (
-                                    state.spin_count >= SPIN_LOCK_COUNT
-                                    or safe_count == 0
-                                )
-                                if needs_recovery:
-                                    reason = ("SPIN" if state.spin_count >= SPIN_LOCK_COUNT
-                                              else f"F={prox['front']:.0f}")
-                                    print(f"  [RECOVERY] {reason} safe={safe_count}", flush=True)
-                                    state.current_state    = RobotState.RECOVERY
-                                    state.rec_start_time   = now
-                                    state.rec_attempt      = 0
-                                    state.stuck_count      = 0
-                                    state.spin_count       = 0
-                                    state.rec_initial_sign = pick_recovery_direction(
-                                        prox, goal_angle_rad)
-                                    state.rec_w = calc_recovery_w(
-                                        scan_points, state.rec_initial_sign)
-                                    v, w = 0.0, state.rec_w
-                                    safe_count = -1
-
+                            # W_SMOOTH (방향 전환 시 prev_w 리셋으로 즉시 반응)
+                            if w == 0.0:
+                                prev_w = 0.0
                             else:
-                                elapsed = now - state.rec_start_time
-                                v, w = 0.0, state.rec_w
-                                safe_count = -1
-
-                                cycle = REC_STUCK_CYCLE if state.stuck_count >= 1 else REC_CYCLE
-                                if elapsed >= cycle:
-                                    if prox['front'] > RECOVERY_CLEAR_MM:
-                                        print(f"  [탈출] front={prox['front']:.0f}", flush=True)
-                                        state.current_state = RobotState.DRIVE
-                                        state.stuck_count   = 0
-                                        state.spin_count    = 0
-                                        state.prev_v = 0.0
-                                        state.prev_w = 0.0
-                                    else:
-                                        state.rec_attempt += 1
-                                        state.rec_start_time = now
-                                        if state.rec_attempt >= REC_MAX_ATTEMPT:
-                                            state.stuck_count = min(
-                                                state.stuck_count + 1, REC_MAX_STUCK
-                                            )
-                                            state.rec_attempt      = 0
-                                            state.rec_initial_sign = pick_recovery_direction(
-                                                prox, goal_angle_rad)
-                                            state.rec_w = calc_recovery_w(
-                                                scan_points, state.rec_initial_sign,
-                                                state.stuck_count)
-                                            print(f"  [STUCK] {state.stuck_count}", flush=True)
+                                if w * prev_w < 0:
+                                    prev_w = 0.0   # 방향 전환 즉시 반영
+                                w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
+                                prev_w = w
+                            prev_v = v
 
                             cmd = f"{v:.2f} {w:.2f}\n"
-                            arduino.write(cmd.encode('utf-8'))
+                            arduino.write(cmd.encode())
                             last_cmd_time = now
-                            state.prev_v  = v
-                            state.prev_w  = w
 
-                            if now - last_print_time >= PRINT_INTERVAL:
-                                st_tag = "D" if state.current_state == RobotState.DRIVE else "R"
-                                print(f"[{dwa_count:4d}] {st_tag} "
-                                      f"v={v:+.2f} w={w:+.2f} "
-                                      f"hdg={state.arduino_heading:+5.0f}° "
-                                      f"goal={math.degrees(goal_angle_rad):+5.0f}° "
-                                      f"F={prox['front']:.0f} "
-                                      f"FL={prox['front_left']:.0f} "
-                                      f"FR={prox['front_right']:.0f} "
-                                      f"safe={safe_count}",
-                                      flush=True)
-                                last_print_time = now
-
+                            if cmd != last_cmd_str:
+                                if now - last_print_time >= PRINT_INTERVAL:
+                                    print(f"[전송] v={v:.2f}  w={w:+.2f}  "
+                                          f"헤딩={arduino_heading_deg:.1f}°",
+                                          flush=True)
+                                    last_print_time = now
+                                last_cmd_str = cmd
+                            last_send = now
                         scan_points = []
-            else:
-                invalid_count += 1
 
+                    scan_points.append((
+                        normalize_angle(angle_raw),
+                        distance + LIDAR_OFFSET if distance > 0 else 0
+                    ))
+
+            # Keepalive - 패킷 손실 시 마지막 명령 재전송
             now = time.time()
-            if now - last_diag_time >= 2.0:
-                if packet_count == 0:
-                    print("[진단] 패킷 0!", flush=True)
-                packet_count  = 0
-                invalid_count = 0
-                last_diag_time = now
-
             if now - last_cmd_time > KEEPALIVE_INTERVAL:
-                cmd = f"{state.prev_v:.2f} {state.prev_w:.2f}\n"
-                arduino.write(cmd.encode('utf-8'))
+                cmd = f"{prev_v:.2f} {prev_w:.2f}\n"
+                arduino.write(cmd.encode())
                 last_cmd_time = now
 
+            # 진단
+            if now - last_diag_time >= DIAG_INTERVAL:
+                if packet_count == 0:
+                    print("[진단] 패킷 0 — 라이다 연결 의심", flush=True)
+                packet_count = 0
+                last_diag_time = now
+
     except KeyboardInterrupt:
-        print("\n중단", flush=True)
+        print("\n[종료] Ctrl-C 수신", flush=True)
+    except serial.SerialException as e:
+        print(f"\n[치명] 시리얼 예외: {e}", flush=True)
+        traceback.print_exc()
     except Exception as e:
-        print(f"[에러] {e}", flush=True)
-        import traceback
+        print(f"\n[치명] 예상치 못한 예외: {e}", flush=True)
         traceback.print_exc()
     finally:
-        try:
-            arduino.write(b"0.00 0.00\n")
-            time.sleep(0.1)
-            lidar.write(bytes([0xA5, 0x25]))
-        except: pass
-        lidar.close()
-        arduino.close()
-        print("✓ 종료", flush=True)
+        print("[정리] 정지 신호 전송 및 포트 닫기", flush=True)
+        if arduino is not None:
+            try:
+                arduino.write(b"0.00 0.00\n")
+                time.sleep(0.1)
+                arduino.write(b"0.00 0.00\n")
+            except Exception: pass
+            try: arduino.close()
+            except Exception: pass
+        if lidar is not None:
+            try:
+                lidar.write(bytes([0xA5, 0x25]))
+                time.sleep(0.1)
+            except Exception: pass
+            try: lidar.close()
+            except Exception: pass
+        print("[종료] 완료", flush=True)
 
 
 if __name__ == "__main__":
