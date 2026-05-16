@@ -194,13 +194,14 @@ def find_stop_escape_direction(scan_points):
 
     candidates = valid if valid else sector_avg  # 유효 갭 없으면 fallback
 
-    # 전방 선호 보정: 전방(0°)에 가까울수록 가산점 (90°에서 factor=0.5, 135°에서 0.15)
-    # → 옆/뒤 방향이 거리는 멀어도 전방 방향이 우선되어 불필요한 U턴 방지
-    def forward_score(c, dist):
-        factor = (1.0 + math.cos(math.radians(c))) / 2.0  # 0°=1.0, 90°=0.5, 180°=0.0
-        return dist * factor
+    # 통과 폭 기반 스코어링: 실제 벽 간격(gap_l+gap_r) 우선, 전방 방향 차선 보정
+    def passage_score(c):
+        gap_l, gap_r = sector_gaps[c]
+        passage = gap_l + gap_r
+        forward_factor = (1.0 + math.cos(math.radians(c))) / 2.0
+        return passage * forward_factor
 
-    best = max(candidates.keys(), key=lambda c: forward_score(c, candidates[c]))
+    best = max(candidates.keys(), key=passage_score)
 
     sector_info = {
         c: {
@@ -208,7 +209,7 @@ def find_stop_escape_direction(scan_points):
             'gap_l': sector_gaps[c][0],
             'gap_r': sector_gaps[c][1],
             'passage': sector_gaps[c][0] + sector_gaps[c][1],
-            'score': forward_score(c, sector_avg[c]),
+            'score': passage_score(c),
             'valid': c in valid,
         }
         for c in sector_avg
