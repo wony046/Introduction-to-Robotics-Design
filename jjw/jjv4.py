@@ -67,7 +67,7 @@ LAYER_PERCENTILE = 5    # %: 하위 N% dist 평균으로 레이어 대표점 계
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 STOP_FWD_MIN  = 100
-STOP_FWD_MAX  = 175
+STOP_FWD_MAX  = 185
 STOP_HORIZ_TH = 105
 
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
