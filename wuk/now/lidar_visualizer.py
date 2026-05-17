@@ -77,7 +77,7 @@ SCAN_WIDE_HALF    = 135
 SIDE_LAYER_ANG_START = 15   # deg
 SIDE_LAYER_ANG_END   = 75   # deg
 SIDE_LAYER_DIST_MAX  = 600  # mm
-SIDE_W_BOOST_GAIN    = 0.5  # rad/s: 측방 레이어 w 크기 기여 계수
+SIDE_W_MAG_GAIN      = 1.0  # 측방 push 기반 w_mag: obstacle_push × MAX_W × gain
 
 # ── path prediction / strength bar display ────────────────────────────────────
 PREDICT_SEC = 1.5    # s: how far ahead to draw the predicted path
@@ -325,9 +325,9 @@ def _get_side_layer_push(scan_norm):
 def _compute_vw(scan_norm):
     """
     Port of find_vw_layered.
-    Returns (v, w_base, w_with_boost):
-      w_base       = direction * w_mag  (정면 레이어만, 회색 경로)
-      w_with_boost = w_base + side_w_delta  (측방 레이어 크기 보정 포함, 초록 경로 기준)
+    Returns (v, w_base, w_with_side):
+      w_base      = direction * forward_urgency  (정면 레이어만, 회색 경로)
+      w_with_side = direction * w_mag            (측방 push 기반 크기 교체 후, 초록 경로 기준)
     heading_deg assumed 0 (no IMU in visualizer).
     """
     layer_results = [r for r in (_process_layer(scan_norm, L) for L in LAYERS)
@@ -354,15 +354,17 @@ def _compute_vw(scan_norm):
                + SCORE_BETA  * sum_pL
                + SCORE_SIDE  * side_left_push)
 
-    direction   = 1.0 if score_L >= score_R else -1.0
-    total_w_all = sum(r['weight'] for r in layer_results)
-    w_mag       = sum(r['weight'] * r['urgency'] for r in layer_results) / total_w_all
-    w_mag       = max(min(w_mag, MAX_W), W_MIN_DANGER)
-    w_base      = direction * w_mag
+    direction       = 1.0 if score_L >= score_R else -1.0
+    total_w_all     = sum(r['weight'] for r in layer_results)
+    forward_urgency = sum(r['weight'] * r['urgency'] for r in layer_results) / total_w_all
+    forward_urgency = max(min(forward_urgency, MAX_W), W_MIN_DANGER)
+    w_base          = direction * forward_urgency
 
-    # 측방 레이어 거리 기반 w 크기 보정 (부호 있는 net delta)
-    side_w_delta  = (side_right_push - side_left_push) * SIDE_W_BOOST_GAIN
-    w_with_boost  = w_base + side_w_delta
+    # 방향과 일치하는 측방 push: 있으면 primary, 없으면 forward_urgency fallback
+    obstacle_push = side_right_push if direction > 0 else side_left_push
+    w_mag         = max(forward_urgency, obstacle_push * MAX_W * SIDE_W_MAG_GAIN)
+    w_mag         = max(min(w_mag, MAX_W), W_MIN_DANGER)
+    w_with_side   = direction * w_mag
 
     v_layers = [r for r in layer_results if r['v_proposal'] is not None]
     if v_layers:
@@ -371,7 +373,7 @@ def _compute_vw(scan_norm):
     else:
         v = FORWARD_SPEED
 
-    return v, w_base, w_with_boost
+    return v, w_base, w_with_side
 
 def _exp_strength(horizs_in_zone):
     """Exponential repulsion: 1.0 at robot edge (110 mm), 0.0 at outer boundary (300 mm)."""
@@ -462,16 +464,15 @@ def update(_frame):
     side_left_push, side_right_push = _get_side_layer_push(scan_norm)
 
     # ── v / w from layers ─────────────────────────────────────────────────────
-    v, w_base, w_with_boost = _compute_vw(scan_norm)
-    side_w_delta = w_with_boost - w_base
-    w_total      = float(np.clip(w_with_boost + side_dw, -MAX_W, MAX_W))
+    v, w_base, w_with_side = _compute_vw(scan_norm)
+    w_total = float(np.clip(w_with_side + side_dw, -MAX_W, MAX_W))
 
     # ── predicted paths ───────────────────────────────────────────────────────
-    # 회색 점선: 정면 레이어만 (w_base)
+    # 회색 점선: 정면 레이어 urgency만 (w_base)
     bx, by = _predict_path(v, w_base)
     path_base_line.set_data(bx, by)
 
-    # 초록 실선: 전체 보정 후 (측방 boost + 측면 반발력)
+    # 초록 실선: 측방 push 크기 교체 + 측면 반발력 합산 후
     gx, gy = _predict_path(v, w_total)
     path_line.set_data(gx, gy)
     path_tip.set_data([gx[-1]], [gy[-1]])
@@ -504,8 +505,8 @@ def update(_frame):
     info_text.set_text(
         f'Nearest    : {nd:.0f}mm @ {na:+.1f}deg\n'
         f'v          : {v:.3f} m/s\n'
-        f'w_base     : {w_base:+.3f} rad/s  (gray path, fwd layers)\n'
-        f'side boost : {side_w_delta:+.3f} rad/s  L={side_left_push:.2f} R={side_right_push:.2f}\n'
+        f'w_base     : {w_base:+.3f} rad/s  (gray, fwd urgency only)\n'
+        f'w_side     : {w_with_side:+.3f} rad/s  (green base, obs_push applied)\n'
         f'side rep dw: {side_dw:+.3f} rad/s  L={left_str:.2f} R={right_str:.2f}\n'
         f'w_total    : {w_total:+.3f} rad/s  [{dir_str}]  (green path)'
     )
