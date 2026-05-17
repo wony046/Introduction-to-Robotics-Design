@@ -40,18 +40,18 @@ LAYERS = [
     # L2: 가까움, 동적 가중치
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':170,
      'w_gain':2.5, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
-    # L3: 중간
+    # L3: 중간 (weight: 진입 0.4 → 끝 0.2 선형 보간)
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140,
-     'w_gain':1.8, 'weight_base':0.2, 'weight_dynamic':False, 'affects_v':True},
-    # L4: 중간-원거리
+     'w_gain':1.8, 'weight_base':0.2, 'weight_start':0.4, 'weight_dynamic':False, 'affects_v':True},
+    # L4: 중간-원거리 (weight: 진입 0.2 → 끝 0.1)
     {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':140,
-     'w_gain':1.0, 'weight_base':0.1, 'weight_dynamic':False, 'affects_v':True},
-    # L5: 원거리, 미세 보정만 (v 영향 없음)
+     'w_gain':1.0, 'weight_base':0.1, 'weight_start':0.2, 'weight_dynamic':False, 'affects_v':True},
+    # L5: 원거리 (weight: 진입 0.1 → 끝 0.05)
     {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':120,
-     'w_gain':0.4, 'weight_base':0.05,'weight_dynamic':False, 'affects_v':False},
-    # L6: 최원거리, 미세 보정만
+     'w_gain':0.4, 'weight_base':0.05,'weight_start':0.1, 'weight_dynamic':False, 'affects_v':False},
+    # L6: 최원거리 (weight: 진입 0.05 → 끝 0.02)
     {'name':'L6', 'fwd_min':660, 'fwd_max':780, 'horiz_th':100,
-     'w_gain':0.3, 'weight_base':0.02,'weight_dynamic':False, 'affects_v':False},
+     'w_gain':0.3, 'weight_base':0.02,'weight_start':0.05,'weight_dynamic':False, 'affects_v':False},
 ]
 
 LAYER_PERCENTILE = 5    # %: 하위 N% dist 평균으로 레이어 대표점 계산
@@ -59,13 +59,13 @@ LAYER_PERCENTILE = 5    # %: 하위 N% dist 평균으로 레이어 대표점 계
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # STOP zone (계층형과 완전 별도)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STOP rectangle: 전방 100~150mm 사이, horiz < 110mm (220mm 폭)
+# STOP rectangle: 전방 100~180mm 사이, horiz < 105mm (210mm 폭)
 
 STOP_FWD_MIN  = 100
 STOP_FWD_MAX  = 180   # 50mm → 80mm 구간으로 확장 (히스테리시스 효과)
 STOP_HORIZ_TH = 105
 
-# STOP 탈출: ±135° 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
+# STOP 탈출: 360° 전체 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
 STOP_ESCAPE_SCAN_HALF = 90
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
 STOP_SECTOR_SIZE      = 10                          # deg: 갭 검색 sector 크기
@@ -94,7 +94,7 @@ DEPTH_JUMP_THRES  = 120    # mm: 이상이면 다른 물체로 인식
 # 스캔 범위 & 통신
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SCAN_WIDE_HALF = 135   # 메인에서 받는 스캔 범위 (STOP escape용)
+SCAN_WIDE_HALF = 135   # 측면 반발력 감지 범위 (is_in_wide_scan 사용)
 SEND_INTERVAL  = 0.1
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -308,7 +308,10 @@ def process_layer(scan_points, layer):
         weight = max(layer['weight_base'],
                      min(1.0, rep_h_err / layer['horiz_th']))
     else:
-        weight = layer['weight_base']
+        # L3~L6: fwd 위치에 따라 weight_start → weight_base 선형 보간
+        progress = (rep_fwd - layer['fwd_min']) / (layer['fwd_max'] - layer['fwd_min'])
+        progress = max(0.0, min(1.0, progress))
+        weight = layer['weight_start'] + (layer['weight_base'] - layer['weight_start']) * progress
 
     # urgency (w 크기 기여)
     urgency = layer['w_gain'] * rep_h_err / layer['horiz_th']
@@ -373,10 +376,10 @@ def get_gap_width(scan_points, ref_angle, ref_dist, is_left):
 
 def get_side_repulsion(scan_points):
     """
-    로봇 좌우 옆면 감지 레이어 (50mm × 240mm) 기반 반발력.
+    로봇 좌우 옆면 감지 레이어 기반 반발력.
 
     감지 구간:
-      horiz: 0 ~ ROBOT_HALF_WIDTH + SIDE_SAFE_MARGIN
+      horiz: ROBOT_HALF_WIDTH(110mm) ~ ROBOT_HALF_WIDTH + SIDE_SAFE_MARGIN(300mm)
       fwd:   -SIDE_FWD_REAR(-240mm) ~ +SIDE_FWD_LEAD(+50mm)
              라이다 뒤쪽(로봇 몸체)이 주 감지 영역
 
@@ -385,7 +388,7 @@ def get_side_repulsion(scan_points):
       delta_w < 0 → 왼쪽 장애물  → 오른쪽 보정
     """
     side_inner = ROBOT_HALF_WIDTH               # 감지 시작: 로봇 끝 (110mm)
-    side_outer = ROBOT_HALF_WIDTH + SIDE_SAFE_MARGIN  # 감지 끝: 110 + 140 = 250mm
+    side_outer = ROBOT_HALF_WIDTH + SIDE_SAFE_MARGIN  # 감지 끝: 110 + 190 = 300mm
 
     left_str  = 0.0
     right_str = 0.0
@@ -397,7 +400,7 @@ def get_side_repulsion(scan_points):
         horiz, fwd = decompose(angle_norm, dist)
 
         if fwd > SIDE_FWD_LEAD or fwd < -SIDE_FWD_REAR: continue
-        # 로봇 끝(110mm) ~ 감지 경계(250mm) 구간만
+        # 로봇 끝(110mm) ~ 감지 경계(300mm) 구간만
         if horiz < side_inner or horiz >= side_outer: continue
 
         # 지수함수 반발력: 로봇 끝에 가까울수록 급격히 증가 (0~1)
@@ -599,10 +602,10 @@ def main():
     print("=== RPLIDAR Obstacle Avoidance (Layered Bounding Box) ===")
     print(f"  Layers      : 6 layers (60~780mm), bottom {LAYER_PERCENTILE}% per layer")
     print(f"  L1-L2       : dynamic weight max(base, h_err/h_th), affects v")
-    print(f"  L3-L4       : fixed weight 0.2/0.1, affects v")
-    print(f"  L5-L6       : fixed weight 0.05/0.02, no v effect")
+    print(f"  L3-L4       : interp weight (L3: 0.4→0.2, L4: 0.2→0.1), affects v")
+    print(f"  L5-L6       : interp weight (L5: 0.1→0.05, L6: 0.05→0.02), no v effect")
     print(f"  STOP zone   : fwd {STOP_FWD_MIN}-{STOP_FWD_MAX}mm, horiz<{STOP_HORIZ_TH}mm")
-    print(f"  STOP escape : +/-{STOP_ESCAPE_SCAN_HALF}deg scan, "
+    print(f"  STOP escape : 360deg scan, "
           f"min_gap={STOP_ESCAPE_MIN_GAP}mm, sector={STOP_SECTOR_SIZE}deg")
     print(f"  Scoring     : alpha={SCORE_ALPHA} beta={SCORE_BETA}")
     print(f"  Direction   : score-based per cycle (no locking anywhere)")
