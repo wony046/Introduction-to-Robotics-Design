@@ -23,7 +23,7 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
 FORWARD_SPEED    = 0.45
-MIN_SPEED        = 0.15
+MIN_SPEED        = 0.10
 MAX_W            = 2.0
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
 W_SMOOTH         = 0.6
@@ -36,11 +36,11 @@ W_SMOOTH         = 0.6
 LAYERS = [
     # L1: 가장 가까움, 동적 가중치, weight_cap=5.0, v_max=0.30
     {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':120,
-     'w_gain':2.8, 'weight_base':0.8, 'weight_cap':5.0, 'weight_dynamic':True,
+     'w_gain':2.8, 'weight_base':0.8, 'weight_cap':8.0, 'weight_dynamic':True,
      'v_max':0.30, 'affects_v':True},
     # L2: 가까움, 동적 가중치, weight_cap=3.0, v_max=0.38
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':120,
-     'w_gain':2.5, 'weight_base':0.6, 'weight_cap':3.0, 'weight_dynamic':True,
+     'w_gain':2.5, 'weight_base':0.6, 'weight_cap':5.0, 'weight_dynamic':True,
      'v_max':0.38, 'affects_v':True},
     # L3: 중간 (weight: 진입 0.4 → 끝 0.2 선형 보간)
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':120,
