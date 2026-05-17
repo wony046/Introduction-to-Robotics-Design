@@ -197,6 +197,10 @@ def find_all_gaps(scan_points):
     """
     FGM: 360° 전체 스캔에서 depth jump / 각도 공백을 기준으로
     모든 갭(장애물 경계 쌍)을 추출.
+
+    너비 계산: 에지 간 코사인 거리 대신,
+    각 에지에서 반대편 클러스터의 최근접 점까지 Euclidean 거리로 측정.
+    → 실제 통과 가능 폭을 물리적으로 정확히 반영.
     반환: list of dict {width, center_angle, edge_a, edge_b, depth}
     """
     pts = sorted(
@@ -207,26 +211,62 @@ def find_all_gaps(scan_points):
     if len(pts) < 2:
         return []
 
-    gaps = []
+    def to_xy(a, d):
+        r = math.radians(a)
+        return d * math.sin(r), d * math.cos(r)
+
+    # 갭 경계 인덱스 탐색
+    gap_indices = []
     for i in range(len(pts) - 1):
         a1, d1 = pts[i]
         a2, d2 = pts[i + 1]
-        ang_diff = a2 - a1  # 항상 양수 (오름차순 정렬)
-
+        ang_diff = a2 - a1
         is_depth_jump   = abs(d2 - d1) > DEPTH_JUMP_THRES
         is_angular_hole = ang_diff >= FGM_MIN_ANG_DEG
         is_ratio_jump   = (d2 / d1 > FGM_RATIO_THRES) or (d1 / d2 > FGM_RATIO_THRES)
+        if is_depth_jump or is_angular_hole or is_ratio_jump:
+            gap_indices.append(i)
 
-        if not (is_depth_jump or is_angular_hole or is_ratio_jump):
-            continue
+    if not gap_indices:
+        return []
 
-        width = cosine_dist(d1, d2, ang_diff)
+    # 클러스터 레이블링: 갭 경계마다 새 클러스터 번호 부여
+    gap_set = set(gap_indices)
+    cluster_ids = []
+    cid = 0
+    for i in range(len(pts)):
+        cluster_ids.append(cid)
+        if i in gap_set:
+            cid += 1
 
-        # 갭 중심: 두 엣지점의 Cartesian 중점 → 각도 변환 (각도 평균은 wrap 위험)
-        x1 = d1 * math.sin(math.radians(a1))
-        y1 = d1 * math.cos(math.radians(a1))
-        x2 = d2 * math.sin(math.radians(a2))
-        y2 = d2 * math.cos(math.radians(a2))
+    # 클러스터별 Cartesian 점 목록
+    n_clusters = cluster_ids[-1] + 1
+    clusters_xy = [[] for _ in range(n_clusters)]
+    for i, (a, d) in enumerate(pts):
+        clusters_xy[cluster_ids[i]].append(to_xy(a, d))
+
+    def nearest_dist(px, py, cluster_xy):
+        return min(math.sqrt((px - ox)**2 + (py - oy)**2) for ox, oy in cluster_xy)
+
+    gaps = []
+    for i in gap_indices:
+        a1, d1 = pts[i]
+        a2, d2 = pts[i + 1]
+        x1, y1 = to_xy(a1, d1)
+        x2, y2 = to_xy(a2, d2)
+
+        cid_L = cluster_ids[i]
+        cid_R = cluster_ids[i + 1]
+
+        # 왼쪽 에지 → 오른쪽 클러스터 최근접 거리
+        d_LR = nearest_dist(x1, y1, clusters_xy[cid_R])
+        # 오른쪽 에지 → 왼쪽 클러스터 최근접 거리
+        d_RL = nearest_dist(x2, y2, clusters_xy[cid_L])
+
+        # 실제 통과 가능 폭: 두 방향 최단 거리 중 더 좁은 쪽
+        width = min(d_LR, d_RL)
+
+        # 갭 중심: 두 에지의 Cartesian 중점 → atan2 (각도 평균은 wrap 위험)
         center_angle = math.degrees(math.atan2((x1 + x2) / 2, (y1 + y2) / 2))
 
         gaps.append({
