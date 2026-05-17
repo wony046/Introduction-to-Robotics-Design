@@ -62,7 +62,7 @@ LAYER_PERCENTILE = 5    # %: 하위 N% dist 평균으로 레이어 대표점 계
 # STOP rectangle: 전방 100~180mm 사이, horiz < 105mm (210mm 폭)
 
 STOP_FWD_MIN  = 100
-STOP_FWD_MAX  = 180   # 50mm → 80mm 구간으로 확장 (히스테리시스 효과)
+STOP_FWD_MAX  = 160
 STOP_HORIZ_TH = 105
 
 # STOP 탈출: 360° 전체 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
@@ -101,7 +101,7 @@ SEND_INTERVAL  = 0.1
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SIDE_SAFE_MARGIN  = 190   # mm: 로봇 측면 안전 마진 (side_th = 110+190 = 300mm)
 SIDE_FWD_LEAD     = 50    # mm: 라이다 기준 전방 여유 (진입 예측)
-SIDE_FWD_REAR     = 240   # mm: 라이다 기준 후방 깊이 (로봇 몸체)
+SIDE_FWD_REAR     = 80    # mm: 라이다 기준 후방 깊이 (로봇 몸체)
 SIDE_REPULSE_GAIN = 0.8   # rad/s: 반발력 최대 w 기여
 SIDE_EXP_K        = 3.0   # 지수 계수: 클수록 근접 시 반발력이 급격히 증가
 
