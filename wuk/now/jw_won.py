@@ -71,7 +71,9 @@ STOP_HORIZ_TH = 105
 # STOP 탈출: 360° 전체 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
 STOP_MAX_CYCLES       = 30                          # 연속 STOP 사이클 상한 (초과 시 강제 탈출)
-STOP_PIVOT_MAX_W      = 1.0   # rad/s: STOP 피봇 일정 회전 속도
+STOP_PIVOT_MAX_W      = 1.0   # rad/s: 피봇 최대 회전 속도 (목표에서 멀 때)
+STOP_PIVOT_MIN_W      = 0.3   # rad/s: 피봇 최소 회전 속도 (목표 근처)
+STOP_PIVOT_SLOW_DEG   = 30    # deg: 이 이내부터 선형 감속 시작
 
 # FGM (Follow the Gap Method) — STOP escape 전용
 FGM_MIN_ANG_DEG      = 3     # deg: 이 이상 각도 공백이면 갭으로 인식
@@ -998,9 +1000,11 @@ def find_vw_command(scan_points, heading_deg):
             _stop_reset()
             return find_vw_layered(scan_points, heading_deg)
 
-        dyn_w = math.copysign(STOP_PIVOT_MAX_W, stop_pivot_w)
+        err   = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
+        scale = min(1.0, err / STOP_PIVOT_SLOW_DEG)
+        speed = STOP_PIVOT_MIN_W + (STOP_PIVOT_MAX_W - STOP_PIVOT_MIN_W) * scale
+        dyn_w = math.copysign(speed, stop_pivot_w)
         if DEBUG_STOP:
-            err = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
             print(f"  [STOP] pivoting (cycle {stop_cycle_count}/{STOP_MAX_CYCLES}) "
                   f"target={stop_locked_target:+.0f}° "
                   f"(width={stop_locked_gap:.0f}mm) err={err:.1f}° w={dyn_w:+.2f}")
