@@ -159,6 +159,16 @@ def cosine_dist(d1, d2, angle_diff_deg):
     theta = math.radians(abs(angle_diff_deg))
     return math.sqrt(d1**2 + d2**2 - 2 * d1 * d2 * math.cos(theta))
 
+def point_to_segment_dist(px, py, ax, ay, bx, by):
+    """점 P에서 선분 AB까지의 최단 거리.
+    수직 교점이 선분 안에 있으면 수직거리, 바깥이면 가까운 끝점 거리."""
+    dx, dy = bx - ax, by - ay
+    seg_sq = dx*dx + dy*dy
+    if seg_sq == 0:
+        return math.sqrt((px - ax)**2 + (py - ay)**2)
+    t = max(0.0, min(1.0, ((px - ax)*dx + (py - ay)*dy) / seg_sq))
+    return math.sqrt((px - ax - t*dx)**2 + (py - ay - t*dy)**2)
+
 def parse_packet(data):
     if len(data) != 5: return None
     s_flag     = data[0] & 0x01
@@ -245,8 +255,18 @@ def find_all_gaps(scan_points):
     for i, (a, d) in enumerate(pts):
         clusters_xy[cluster_ids[i]].append(to_xy(a, d))
 
-    def nearest_dist(px, py, cluster_xy):
-        return min(math.sqrt((px - ox)**2 + (py - oy)**2) for ox, oy in cluster_xy)
+    def nearest_to_segments(px, py, cluster_xy):
+        """점 P에서 클러스터 선분들(인접 포인트 쌍) 중 최단 거리.
+        클러스터가 1점이면 점-점 거리로 fallback."""
+        if len(cluster_xy) == 1:
+            ox, oy = cluster_xy[0]
+            return math.sqrt((px - ox)**2 + (py - oy)**2)
+        return min(
+            point_to_segment_dist(px, py,
+                                  cluster_xy[j][0], cluster_xy[j][1],
+                                  cluster_xy[j+1][0], cluster_xy[j+1][1])
+            for j in range(len(cluster_xy) - 1)
+        )
 
     gaps = []
     for i in gap_indices:
@@ -258,10 +278,10 @@ def find_all_gaps(scan_points):
         cid_L = cluster_ids[i]
         cid_R = cluster_ids[i + 1]
 
-        # 왼쪽 에지 → 오른쪽 클러스터 최근접 거리
-        d_LR = nearest_dist(x1, y1, clusters_xy[cid_R])
-        # 오른쪽 에지 → 왼쪽 클러스터 최근접 거리
-        d_RL = nearest_dist(x2, y2, clusters_xy[cid_L])
+        # 왼쪽 에지 → 오른쪽 클러스터 선분 최근접 거리
+        d_LR = nearest_to_segments(x1, y1, clusters_xy[cid_R])
+        # 오른쪽 에지 → 왼쪽 클러스터 선분 최근접 거리
+        d_RL = nearest_to_segments(x2, y2, clusters_xy[cid_L])
 
         # 실제 통과 가능 폭: 두 방향 최단 거리 중 더 좁은 쪽
         width = min(d_LR, d_RL)
