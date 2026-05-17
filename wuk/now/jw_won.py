@@ -12,7 +12,7 @@ ARDUINO_PORT     = "/dev/ttyAMA3"
 BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 115200
 
-LIDAR_OFFSET    = 20    # mm: 라이다 측정값 보정
+LIDAR_OFFSET    = 0     # mm: 라이다 측정값 보정
 LIDAR_MIN_VALID = 100   # mm: 이 미만 무시 (노이즈)
 DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 
@@ -36,10 +36,10 @@ W_SMOOTH         = 0.45
 LAYERS = [
     # L1: 가장 가까움, 동적 가중치, 측면까지 넓게 봄
     {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200,
-     'w_gain':2.8, 'weight_base':0.5, 'weight_dynamic':True,  'affects_v':True},
+     'w_gain':2.8, 'weight_base':0.8, 'weight_dynamic':True,  'affects_v':True},
     # L2: 가까움, 동적 가중치
-    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':170,
-     'w_gain':2.5, 'weight_base':0.4, 'weight_dynamic':True,  'affects_v':True},
+    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':190,
+     'w_gain':2.5, 'weight_base':0.6, 'weight_dynamic':True,  'affects_v':True},
     # L3: 중간 (weight: 진입 0.4 → 끝 0.2 선형 보간)
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140,
      'w_gain':1.8, 'weight_base':0.2, 'weight_start':0.4, 'weight_dynamic':False, 'affects_v':True},
@@ -77,6 +77,7 @@ STOP_PIVOT_K          = 0.05  # rad/s/deg: 헤딩 오차 비례 계수 (오차 2
 FGM_MIN_ANG_DEG      = 5     # deg: 이 이상 각도 공백이면 갭으로 인식
 FGM_MIN_DEPTH_MM     = 200   # mm: 갭 너머 최소 깊이 (얕은 함몰부 제외)
 FGM_MAX_RANGE_MM     = 800   # mm: FGM 갭 탐색 최대 거리 (이 이상 포인트 무시)
+FGM_RATIO_THRES      = 1.5   # 인접 포인트 거리 비율 이상이면 갭 경계로 인식 (벽 끝 완만 전환)
 HEADING_CONVERGE_DEG = 15    # deg: 목표 헤딩에 이 이내면 피봇 종료
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -200,10 +201,11 @@ def find_all_gaps(scan_points):
         a2, d2 = pts[i + 1]
         ang_diff = a2 - a1  # 항상 양수 (오름차순 정렬)
 
-        is_depth_jump  = abs(d2 - d1) > DEPTH_JUMP_THRES
+        is_depth_jump   = abs(d2 - d1) > DEPTH_JUMP_THRES
         is_angular_hole = ang_diff >= FGM_MIN_ANG_DEG
+        is_ratio_jump   = (d2 / d1 > FGM_RATIO_THRES) or (d1 / d2 > FGM_RATIO_THRES)
 
-        if not (is_depth_jump or is_angular_hole):
+        if not (is_depth_jump or is_angular_hole or is_ratio_jump):
             continue
 
         width = cosine_dist(d1, d2, ang_diff)
