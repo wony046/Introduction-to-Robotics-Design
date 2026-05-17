@@ -2,6 +2,7 @@ import serial
 import time
 import math
 import json
+import threading
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 포트 & 라이다 설정
@@ -127,6 +128,11 @@ stop_locked_target         = 0.0
 stop_locked_gap            = 0.0
 stop_locked_global_heading = 0.0
 stop_phase                 = 0     # 0=idle, 2=피봇
+
+# ── 스레드 공유 상태 ─────────────────────────────────────────────────────────
+_scan_lock   = threading.Lock()
+_latest_scan = []            # 라이다 스레드가 완성된 스캔을 여기에 기록
+_shutdown    = threading.Event()  # 종료 신호
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -641,11 +647,73 @@ def find_vw_command(scan_points, heading_deg):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 스레드: 라이다 수신 / 모터 제어
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _dedup_scan(pts):
+    """1° 단위 버킷화, 중복 각도는 가장 가까운 거리만 유지."""
+    angle_map = {}
+    for angle, dist in pts:
+        bucket = round(angle)
+        if bucket not in angle_map or dist < angle_map[bucket]:
+            angle_map[bucket] = dist
+    return list(angle_map.items())
+
+
+def _lidar_reader(lidar):
+    """라이다 수신 전용 스레드.
+    lidar.read(5) 블로킹이 모터 루프에 영향을 주지 않도록 분리.
+    한 바퀴 완성 시 중복 각도 제거 후 _latest_scan에 덮어쓰기 (누적 없음)."""
+    local_pts = []
+    while not _shutdown.is_set():
+        try:
+            raw = lidar.read(5)
+        except Exception:
+            continue
+        result = parse_packet(raw)
+        if result is None:
+            continue
+        angle_raw, distance = result
+        s_flag = raw[0] & 0x01
+        if s_flag == 1 and local_pts:
+            deduped = _dedup_scan(local_pts)   # 락 밖에서 연산
+            with _scan_lock:
+                _latest_scan.clear()
+                _latest_scan.extend(deduped)
+            local_pts = []
+        local_pts.append((
+            normalize_angle(angle_raw),
+            distance + LIDAR_OFFSET if distance > 0 else 0
+        ))
+
+
+def _motor_controller(arduino):
+    """모터 제어 전용 스레드.
+    SEND_INTERVAL마다 독립적으로 명령 송신 — 라이다 지연과 무관."""
+    global prev_w
+    last_cmd_str = ""
+    while not _shutdown.is_set():
+        read_arduino(arduino)
+        with _scan_lock:
+            pts = [(a, d) for a, d in _latest_scan if d > 0]
+        if pts:
+            v, w = find_vw_command(pts, arduino_heading_deg)
+            w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
+            prev_w = w
+            cmd = f"{v:.2f} {w:.2f}\n"
+            arduino.write(cmd.encode())
+            if cmd != last_cmd_str:
+                print(f"[SEND] v={v:.2f}  w={w:+.2f}  "
+                      f"heading={arduino_heading_deg:.1f}deg")
+                last_cmd_str = cmd
+        time.sleep(SEND_INTERVAL)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 메인 루프
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def main():
-    global prev_w
     print("=== RPLIDAR Obstacle Avoidance (Layered Bounding Box) ===")
     print(f"  Layers      : 6 layers (60~780mm), bottom {LAYER_PERCENTILE}% per layer")
     print(f"  L1-L2       : dynamic weight max(base, h_err/h_th), affects v")
@@ -674,45 +742,20 @@ def main():
     lidar.write(bytes([0xA5, 0x20]))
     lidar.read(7)
 
-    scan_points  = []
-    last_send    = time.time()
-    last_cmd_str = ""
+    t_lidar = threading.Thread(target=_lidar_reader,      args=(lidar,),   daemon=True, name="lidar")
+    t_motor = threading.Thread(target=_motor_controller,  args=(arduino,), daemon=True, name="motor")
 
     try:
-        while True:
-            read_arduino(arduino)
-            raw = lidar.read(5)
-            result = parse_packet(raw)
-            if result is None: continue
-
-            angle_raw, distance = result
-            s_flag = raw[0] & 0x01
-
-            if s_flag == 1 and scan_points:
-                # 360° 전체 포인트 전달 (FGM 후방 갭 탐색 포함)
-                all_points = [(a, d) for a, d in scan_points if d > 0]
-                now = time.time()
-                if now - last_send >= SEND_INTERVAL:
-                    v, w = find_vw_command(all_points, arduino_heading_deg)
-                    w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
-                    prev_w = w
-                    cmd = f"{v:.2f} {w:.2f}\n"
-                    arduino.write(cmd.encode())
-                    if cmd != last_cmd_str:
-                        print(f"[SEND] v={v:.2f}  w={w:+.2f}  "
-                              f"heading={arduino_heading_deg:.1f}deg")
-                        last_cmd_str = cmd
-                    last_send = now
-                scan_points = []
-
-            scan_points.append((
-                normalize_angle(angle_raw),
-                distance + LIDAR_OFFSET if distance > 0 else 0
-            ))
-
+        t_lidar.start()
+        t_motor.start()
+        while not _shutdown.is_set():
+            time.sleep(0.5)
     except KeyboardInterrupt:
         print("\nShutting down...")
     finally:
+        _shutdown.set()
+        t_lidar.join(timeout=2.0)
+        t_motor.join(timeout=2.0)
         lidar.write(bytes([0xA5, 0x25]))
         time.sleep(0.1)
         lidar.close()
