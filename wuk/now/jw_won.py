@@ -73,19 +73,17 @@ STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
 STOP_MAX_CYCLES       = 30                          # 연속 STOP 사이클 상한 (초과 시 강제 탈출)
 STOP_PIVOT_MAX_W      = 0.9   # rad/s: 피봇 최대 회전 속도 (목표에서 멀 때)
 STOP_PIVOT_MIN_W      = 0.7   # rad/s: 피봇 최소 회전 속도 (목표 근처)
-STOP_PIVOT_SLOW_DEG   = 30    # deg: 이 이내부터 선형 감속 시작
+STOP_PIVOT_SLOW_DEG   = 15    # deg: 이 이내부터 선형 감속 시작
 
 # FGM (Follow the Gap Method) — STOP escape 전용
 FGM_MIN_ANG_DEG      = 3     # deg: 이 이상 각도 공백이면 갭으로 인식
 FGM_MIN_DEPTH_MM     = 250   # mm: 갭 너머 최소 깊이 (얕은 함몰부 제외)
-FGM_MAX_RANGE_MM     = 800   # mm: FGM 갭 탐색 최대 거리 (이 이상 포인트 무시)
+FGM_MAX_RANGE_MM     = 500   # mm: FGM 갭 탐색 최대 거리 (이 이상 포인트 무시)
 FGM_RATIO_THRES      = 1.2   # 인접 포인트 거리 비율 이상이면 갭 경계로 인식 (벽 끝 완만 전환)
 
 # 전방 갭 탐색 (기본 주행 방향 결정용)
-FRONT_GAP_MIN_DEPTH  = 300    # mm: 전방 갭 최소 깊이 (이 미만 탈락)
-SCORE_GAP_FRONT      = 900.0  # 전방 통과 가능 갭 방향 보너스 계수
-GAP_W_MIN_FOR_BONUS  = 80     # mm: 즉각 경로가 이 미만이면 해당 방향 보너스 무효
-SCORE_GAP_FRONT_CAP  = 2.5    # norm 상한 (보너스 최대 = 900 × 2.5 = 2250)
+FRONT_GAP_MIN_DEPTH  = 300   # mm: 전방 갭 최소 깊이 (이 미만 탈락)
+SCORE_GAP_FRONT      = 900.0 # 전방 통과 가능 갭 방향 보너스 계수
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 방향 점수제 (gap + layer 통합)
@@ -119,7 +117,7 @@ SIDE_EXP_K        = 2.0   # 지수 계수: 클수록 근접 시 반발력이 급
 SIDE_LAYER_ANG_START = 15   # deg: 정면 레이어와 경계
 SIDE_LAYER_ANG_END   = 75   # deg: 측방 레이어 바깥 경계
 SIDE_LAYER_DIST_MAX  = 600  # mm: 측방 감지 최대 거리
-SIDE_W_BOOST_GAIN    = 1.4  # rad/s: 측방 레이어 w 크기 기여 계수 (우측 push → +w, 좌측 push → -w)
+SIDE_W_BOOST_GAIN    = 1.8  # rad/s: 측방 레이어 w 크기 기여 계수 (우측 push → +w, 좌측 push → -w)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # [추가] 가상 장애물 (통과 불가 갭)  ─ 코드 1에서 이식
@@ -844,14 +842,13 @@ def find_vw_layered(scan_points, heading_deg):
     gap_bonus_L = 0.0
     gap_bonus_R = 0.0
     if best_fg is not None:
-        norm  = min((best_fg['width'] / STOP_ESCAPE_MIN_GAP) *
-                    (best_fg['depth'] / FRONT_GAP_MIN_DEPTH),
-                    SCORE_GAP_FRONT_CAP)
+        norm = ((best_fg['width'] / STOP_ESCAPE_MIN_GAP) *
+                (best_fg['depth'] / FRONT_GAP_MIN_DEPTH))
         bonus = SCORE_GAP_FRONT * norm
         if best_fg['center_angle'] < 0:
-            gap_bonus_L = bonus if gap_L >= GAP_W_MIN_FOR_BONUS else 0.0
+            gap_bonus_L = bonus
         else:
-            gap_bonus_R = bonus if gap_R >= GAP_W_MIN_FOR_BONUS else 0.0
+            gap_bonus_R = bonus
 
     if DEBUG_DIR:
         print(f"  [FRONT_GAP] {len(front_gaps)} passable gap(s) found  "
@@ -862,11 +859,7 @@ def find_vw_layered(scan_points, heading_deg):
                   f"d={g['depth']:.0f}mm score={g['score']:.0f}{chosen}")
         if best_fg is not None:
             side = "LEFT" if best_fg['center_angle'] < 0 else "RIGHT"
-            actual_bonus = gap_bonus_L or gap_bonus_R
-            imm_gap = gap_L if best_fg['center_angle'] < 0 else gap_R
-            suppressed = imm_gap < GAP_W_MIN_FOR_BONUS
-            print(f"  [FRONT_GAP] bonus → {side}  +{actual_bonus:.0f}"
-                  f"{'  (suppressed: imm_gap={:.0f}<{})'.format(imm_gap, GAP_W_MIN_FOR_BONUS) if suppressed else ''}")
+            print(f"  [FRONT_GAP] bonus → {side}  +{gap_bonus_L or gap_bonus_R:.0f}")
         else:
             print(f"  [FRONT_GAP] no passable gap → no bonus")
 
