@@ -27,32 +27,46 @@ STOP_FWD_MIN     = 100
 STOP_FWD_MAX     = 180
 STOP_HORIZ_TH    = 105
 
+DETECTION_RANGE  = 1500
+FORWARD_SPEED    = 0.35
+MIN_SPEED        = 0.07
+MAX_W            = 2.0
+W_MIN_DANGER     = 0.5
+LAYER_PERCENTILE = 5
+SCORE_ALPHA      = 5.0
+SCORE_BETA       = 20.0
+DEPTH_JUMP_THRES = 120
+
 LAYERS = [
-    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200, 'color':'#FF4444'},
-    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':200, 'color':'#FF8800'},
-    {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140, 'color':'#DDCC00'},
-    {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':140, 'color':'#88CC00'},
-    {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':120, 'color':'#00BB44'},
-    {'name':'L6', 'fwd_min':660, 'fwd_max':780, 'horiz_th':100, 'color':'#0088CC'},
+    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200, 'color':'#FF4444',
+     'w_gain':2.8, 'weight_base':0.8, 'weight_dynamic':True,  'affects_v':True},
+    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':200, 'color':'#FF8800',
+     'w_gain':2.5, 'weight_base':0.6, 'weight_dynamic':True,  'affects_v':True},
+    {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140, 'color':'#DDCC00',
+     'w_gain':1.8, 'weight_base':0.2, 'weight_start':0.4, 'weight_dynamic':False, 'affects_v':True},
+    {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':140, 'color':'#88CC00',
+     'w_gain':1.0, 'weight_base':0.1, 'weight_start':0.2, 'weight_dynamic':False, 'affects_v':True},
+    {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':120, 'color':'#00BB44',
+     'w_gain':0.4, 'weight_base':0.05, 'weight_start':0.1,  'weight_dynamic':False, 'affects_v':False},
+    {'name':'L6', 'fwd_min':660, 'fwd_max':780, 'horiz_th':100, 'color':'#0088CC',
+     'w_gain':0.3, 'weight_base':0.02, 'weight_start':0.05, 'weight_dynamic':False, 'affects_v':False},
 ]
 
 # ── side repulsion parameters (jw_won.py: get_side_repulsion) ─────────────────
 # Detection zone: horiz 110~300 mm,  fwd -240~+50 mm
-SIDE_INNER        = ROBOT_HALF_WIDTH               # 110 mm: robot edge
-SIDE_SAFE_MARGIN  = 190                            # mm  →  outer = 300 mm
+SIDE_INNER        = ROBOT_HALF_WIDTH
+SIDE_SAFE_MARGIN  = 190
 SIDE_OUTER        = SIDE_INNER + SIDE_SAFE_MARGIN  # 300 mm
-SIDE_FWD_LEAD     = 50                             # mm: forward margin
-SIDE_FWD_REAR     = 240                            # mm: rear depth
-SIDE_REPULSE_GAIN = 0.8                            # rad/s max contribution
+SIDE_FWD_LEAD     = 50
+SIDE_FWD_REAR     = 240
+SIDE_REPULSE_GAIN = 0.8
 SIDE_EXP_K        = 3.0
-SCAN_WIDE_HALF    = 135                            # deg: ±135 lateral range
+SCAN_WIDE_HALF    = 135
 
-# ── strength bar display ───────────────────────────────────────────────────────
-SBAR_Y     = -170   # mm: y-position of strength bars (below robot body)
-SBAR_SCALE = 140    # mm per unit strength (max 140 mm at str=1.0)
-
-# ── arc radius for delta_w indicator ──────────────────────────────────────────
-ARC_R      = 75     # mm: radius of rotation arc around robot center
+# ── strength bar / arc display ────────────────────────────────────────────────
+SBAR_Y     = -170   # mm: y-position of strength bars
+SBAR_SCALE = 140    # mm per unit strength
+ARC_R      = 75     # mm: rotation arc radius
 
 # ── figure ────────────────────────────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(8, 10))
@@ -74,10 +88,8 @@ ax.add_patch(patches.Rectangle(
 ))
 
 # ── static: side repulsion detection zones (purple dashed) ────────────────────
-# Left:  x [-300, -110],  y [-240, +50]
-# Right: x [+110, +300],  y [-240, +50]
-_sw = SIDE_OUTER - SIDE_INNER        # 190 mm wide
-_sh = SIDE_FWD_REAR + SIDE_FWD_LEAD  # 290 mm tall
+_sw = SIDE_OUTER - SIDE_INNER        # 190 mm
+_sh = SIDE_FWD_REAR + SIDE_FWD_LEAD  # 290 mm
 ax.add_patch(patches.Rectangle(
     (-SIDE_OUTER, -SIDE_FWD_REAR), _sw, _sh,
     linewidth=1.8, edgecolor='purple', facecolor='purple',
@@ -99,11 +111,11 @@ ax.annotate('', xy=(0, 200), xytext=(0, 90),
             arrowprops=dict(arrowstyle='->', color='black', lw=2.5), zorder=5)
 ax.text(0, 215, 'fwd', ha='center', fontsize=8)
 
-# ── static: rotation arc reference circle (gray dotted) ───────────────────────
-# Parametrization used: x=r*sin(t), y=r*cos(t)
-#   t=0   → top   (0, r)  = forward
-#   t>0   → right = CW    (right turn, negative delta_w)
-#   t<0   → left  = CCW   (left turn,  positive delta_w)
+# ── static: rotation arc reference circle ─────────────────────────────────────
+# Parametrization: x=r*sin(t), y=r*cos(t)
+#   t=0   → top (0, r) = forward direction
+#   t > 0 → sweeps right  = CW  = right turn (negative w)
+#   t < 0 → sweeps left   = CCW = left  turn (positive w)
 _t_bg = np.linspace(0, 2 * math.pi, 80)
 ax.plot(ARC_R * np.sin(_t_bg), ARC_R * np.cos(_t_bg),
         ':', color='lightgray', lw=1, alpha=0.6, zorder=3)
@@ -142,11 +154,14 @@ side_left_line,  = ax.plot([], [], 'o', color='purple', markersize=5,
 side_right_line, = ax.plot([], [], 'o', color='orchid',  markersize=5,
                            alpha=0.85, zorder=7)
 
-# Rotation arc: shows delta_w direction (CCW=left, CW=right) and magnitude
+# w_layer arc (gray dashed): layer-based w only, BEFORE side correction
+w_base_arc,      = ax.plot([], [], '--', color='gray', lw=2.0,
+                           alpha=0.7, zorder=8)
+# w_total arc (green solid): w_layer + side_dw, the actual command sent
 rot_arc_line,    = ax.plot([], [], '-',  color='limegreen', lw=3.5, zorder=9)
-rot_arc_tip,     = ax.plot([], [], 'o',  color='limegreen', markersize=7,  zorder=10)
+rot_arc_tip,     = ax.plot([], [], 'o',  color='limegreen', markersize=7, zorder=10)
 
-# Side strength bars: horizontal bars below robot showing L/R repulsion strength
+# Side strength bars
 side_left_bar,   = ax.plot([], [], '-', color='purple', lw=5,
                            solid_capstyle='round', zorder=8)
 side_right_bar,  = ax.plot([], [], '-', color='orchid',  lw=5,
@@ -162,7 +177,7 @@ ax.set_title('RPLIDAR C1 - Bounding Box View')
 
 DYNAMIC_ARTISTS = (scan_line, stop_line,
                    side_left_line, side_right_line,
-                   rot_arc_line, rot_arc_tip,
+                   w_base_arc, rot_arc_line, rot_arc_tip,
                    side_left_bar, side_right_bar,
                    info_text, title_obj)
 
@@ -173,31 +188,134 @@ scan_iter = lidar.iter_scans(max_buf_meas=2000, min_len=5)
 print("[Visualizer] Ready. Close window or Ctrl+C to stop.")
 
 
+# ── computation: ported from jw_won.py ────────────────────────────────────────
+
+def _is_in_front_90(a):
+    return -90 <= a <= 90
+
+def _decompose(a_deg, dist):
+    rad = math.radians(a_deg)
+    return abs(dist * math.sin(rad)), dist * math.cos(rad)  # horiz, fwd
+
+def _cosine_dist(d1, d2, ang_diff_deg):
+    t = math.radians(abs(ang_diff_deg))
+    return math.sqrt(d1**2 + d2**2 - 2 * d1 * d2 * math.cos(t))
+
+def _process_layer(scan_norm, layer):
+    pts = []
+    for a, d in scan_norm:
+        if d < MIN_VALID_MM or d > DETECTION_RANGE:
+            continue
+        if not _is_in_front_90(a):
+            continue
+        horiz, fwd = _decompose(a, d)
+        if layer['fwd_min'] <= fwd < layer['fwd_max'] and horiz < layer['horiz_th']:
+            pts.append({'angle': a, 'dist': d, 'horiz': horiz, 'fwd': fwd,
+                        'horiz_error': layer['horiz_th'] - horiz})
+    if not pts:
+        return None
+
+    n_take = max(1, int(len(pts) * LAYER_PERCENTILE / 100))
+    rep = sorted(pts, key=lambda p: p['dist'])[:n_take]
+    rep_angle = sum(p['angle'] for p in rep) / len(rep)
+    rep_horiz = sum(p['horiz'] for p in rep) / len(rep)
+    rep_fwd   = sum(p['fwd']   for p in rep) / len(rep)
+    rep_h_err = layer['horiz_th'] - rep_horiz
+
+    if layer['weight_dynamic']:
+        weight = max(layer['weight_base'], min(1.0, rep_h_err / layer['horiz_th']))
+    else:
+        prog = max(0.0, min(1.0,
+               (rep_fwd - layer['fwd_min']) / (layer['fwd_max'] - layer['fwd_min'])))
+        weight = layer['weight_start'] + (layer['weight_base'] - layer['weight_start']) * prog
+
+    urgency = layer['w_gain'] * rep_h_err / layer['horiz_th']
+
+    if layer['affects_v']:
+        prog = max(0.0, min(1.0,
+               (rep_fwd - layer['fwd_min']) / (layer['fwd_max'] - layer['fwd_min'])))
+        v_proposal = MIN_SPEED + (FORWARD_SPEED - MIN_SPEED) * prog
+    else:
+        v_proposal = None
+
+    push_left  = sum(p['horiz_error'] for p in rep if p['angle'] < 0)
+    push_right = sum(p['horiz_error'] for p in rep if p['angle'] > 0)
+
+    return {'weight': weight, 'urgency': urgency, 'v_proposal': v_proposal,
+            'rep_angle': rep_angle, 'rep_horiz': rep_horiz, 'rep_fwd': rep_fwd,
+            'push_left': push_left, 'push_right': push_right, 'name': layer['name']}
+
+def _get_gap_width(scan_norm, ref_angle, ref_dist, is_left):
+    front = [(a, d) for a, d in scan_norm if _is_in_front_90(a)]
+    if is_left:
+        search = sorted([(a, d) for a, d in front if a < ref_angle],
+                        key=lambda x: x[0], reverse=True)
+    else:
+        search = sorted([(a, d) for a, d in front if a > ref_angle],
+                        key=lambda x: x[0])
+    if not search:
+        return 0.0
+    edge_p = (ref_angle, ref_dist)
+    for i, p in enumerate(search):
+        if abs(p[1] - edge_p[1]) > DEPTH_JUMP_THRES:
+            wall = search[i:]
+            if wall:
+                return min(_cosine_dist(edge_p[1], wp[1], abs(edge_p[0] - wp[0]))
+                           for wp in wall)
+        edge_p = p
+    rem = abs((-90 - edge_p[0]) if is_left else (90 - edge_p[0]))
+    if rem > 15:
+        return _cosine_dist(edge_p[1], edge_p[1], rem)
+    return 0.0
+
+def _compute_layer_w(scan_norm):
+    """
+    Port of find_vw_layered: returns w from layers only (no side repulsion).
+    heading_deg assumed 0 (no IMU in visualizer).
+    """
+    layer_results = [r for r in (_process_layer(scan_norm, L) for L in LAYERS)
+                     if r is not None]
+    if not layer_results:
+        return 0.0
+
+    closest   = min(layer_results, key=lambda r: r['rep_horiz'])
+    ref_angle = closest['rep_angle']
+    ref_dist  = math.sqrt(closest['rep_horiz']**2 + closest['rep_fwd']**2)
+
+    gap_L = _get_gap_width(scan_norm, ref_angle, ref_dist, is_left=True)
+    gap_R = _get_gap_width(scan_norm, ref_angle, ref_dist, is_left=False)
+
+    sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
+    sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
+    score_L = SCORE_ALPHA * gap_L + SCORE_BETA * sum_pR
+    score_R = SCORE_ALPHA * gap_R + SCORE_BETA * sum_pL
+
+    direction   = 1.0 if score_L >= score_R else -1.0
+    total_w_all = sum(r['weight'] for r in layer_results)
+    w_mag       = sum(r['weight'] * r['urgency'] for r in layer_results) / total_w_all
+    w_mag       = max(min(w_mag, MAX_W), W_MIN_DANGER)
+
+    return direction * w_mag
+
 def _exp_strength(horizs_in_zone):
     """Exponential repulsion: 1.0 at robot edge (110 mm), 0.0 at outer boundary (300 mm)."""
     if len(horizs_in_zone) == 0:
         return 0.0
-    t = (horizs_in_zone - SIDE_INNER) / SIDE_SAFE_MARGIN   # 0=edge, 1=boundary
+    t = (horizs_in_zone - SIDE_INNER) / SIDE_SAFE_MARGIN
     s = (np.exp(SIDE_EXP_K * (1.0 - t)) - 1.0) / (math.exp(SIDE_EXP_K) - 1.0)
     return float(np.max(s))
 
-
-def _make_rotation_arc(dw):
+def _make_arc(w_val):
     """
-    Rotation arc around robot center (radius=ARC_R).
-
-    Parametrization: x = r*sin(t),  y = r*cos(t)
-      t = 0         -> top  (0, r)  = forward direction
-      t increasing  -> rightward = CW  rotation (right turn)
-      t decreasing  -> leftward  = CCW rotation (left turn)
-
-    delta_w > 0  ->  right obstacle  ->  left turn  (CCW)  ->  sweep < 0
-    delta_w < 0  ->  left  obstacle  ->  right turn (CW)   ->  sweep > 0
+    Arc for a given angular velocity w_val (range -MAX_W ~ +MAX_W).
+    Parametrization: x=r*sin(t), y=r*cos(t)
+      sweep < 0 (t decreasing from 0) -> sweeps left  = CCW = left  turn (+w)
+      sweep > 0 (t increasing from 0) -> sweeps right = CW  = right turn (-w)
     """
-    if abs(dw) < 0.02:
+    if abs(w_val) < 0.05:
         return np.array([]), np.array([])
-    max_sweep = 0.75 * math.pi                          # max arc = 135 deg at full gain
-    sweep = -(dw / SIDE_REPULSE_GAIN) * max_sweep       # negative for CCW (left turn)
+    max_sweep = 0.75 * math.pi                  # 135 deg at MAX_W
+    sweep = -(w_val / MAX_W) * max_sweep        # negative for CCW (+w = left turn)
     t = np.linspace(0.0, sweep, 40)
     return ARC_R * np.sin(t), ARC_R * np.cos(t)
 
@@ -217,12 +335,13 @@ def update(_frame):
     raw_angles = np.array([a for _, a, _ in raw])
     dists      = np.array([d for _, _, d in raw])
 
-    xs     = dists * np.sin(np.radians(raw_angles))   # lateral  (+x = right)
-    ys     = dists * np.cos(np.radians(raw_angles))   # forward  (+y = fwd)
+    xs     = dists * np.sin(np.radians(raw_angles))   # lateral (+x = right)
+    ys     = dists * np.cos(np.radians(raw_angles))   # forward (+y = fwd)
     horizs = np.abs(xs)
 
-    # 0~360 -> -180~+180  (for wide-scan range check)
+    # 0~360 -> -180~+180  (required for layer / wide-scan logic)
     norm_angles = np.where(raw_angles > 180, raw_angles - 360, raw_angles)
+    scan_norm   = list(zip(norm_angles.tolist(), dists.tolist()))
 
     # ── scan points ───────────────────────────────────────────────────────────
     scan_line.set_data(xs, ys)
@@ -235,10 +354,10 @@ def update(_frame):
     else:
         stop_line.set_data([], [])
 
-    # ── side repulsion (mirrors jw_won.py get_side_repulsion exactly) ─────────
-    wide_mask = np.abs(norm_angles) <= SCAN_WIDE_HALF           # |angle| <= 135 deg
-    fwd_mask  = (ys >= -SIDE_FWD_REAR) & (ys <= SIDE_FWD_LEAD) # -240 ~ +50 mm
-    hrz_mask  = (horizs >= SIDE_INNER)  & (horizs < SIDE_OUTER) # 110 ~ 300 mm
+    # ── side repulsion (mirrors jw_won.py get_side_repulsion) ─────────────────
+    wide_mask = np.abs(norm_angles) <= SCAN_WIDE_HALF
+    fwd_mask  = (ys >= -SIDE_FWD_REAR) & (ys <= SIDE_FWD_LEAD)
+    hrz_mask  = (horizs >= SIDE_INNER)  & (horizs < SIDE_OUTER)
     side_mask = wide_mask & fwd_mask & hrz_mask
 
     left_mask  = side_mask & (xs < 0)
@@ -249,13 +368,24 @@ def update(_frame):
 
     left_str  = _exp_strength(horizs[left_mask])
     right_str = _exp_strength(horizs[right_mask])
-    delta_w   = (right_str - left_str) * SIDE_REPULSE_GAIN
+    side_dw   = (right_str - left_str) * SIDE_REPULSE_GAIN
 
-    # ── rotation arc (delta_w) ────────────────────────────────────────────────
-    arc_xs, arc_ys = _make_rotation_arc(delta_w)
-    rot_arc_line.set_data(arc_xs, arc_ys)
-    if len(arc_xs) > 0:
-        rot_arc_tip.set_data([arc_xs[-1]], [arc_ys[-1]])
+    # ── layer-based w (before side correction) ────────────────────────────────
+    w_layer = _compute_layer_w(scan_norm)
+
+    # ── total w = layer + side correction ─────────────────────────────────────
+    w_total = float(np.clip(w_layer + side_dw, -MAX_W, MAX_W))
+
+    # ── arcs ──────────────────────────────────────────────────────────────────
+    # gray dashed: w_layer only (before side correction)
+    bx, by = _make_arc(w_layer)
+    w_base_arc.set_data(bx, by)
+
+    # green solid: w_total (after side correction applied)
+    ax_xs, ax_ys = _make_arc(w_total)
+    rot_arc_line.set_data(ax_xs, ax_ys)
+    if len(ax_xs) > 0:
+        rot_arc_tip.set_data([ax_xs[-1]], [ax_ys[-1]])
     else:
         rot_arc_tip.set_data([], [])
 
@@ -282,13 +412,13 @@ def update(_frame):
     na  = float(math.degrees(math.atan2(xs[idx], ys[idx])))
 
     # ── info text ─────────────────────────────────────────────────────────────
-    dir_str  = 'CCW(L)' if delta_w > 0.02 else ('CW(R)' if delta_w < -0.02 else 'none')
+    dir_str  = 'L(CCW)' if w_total > 0.05 else ('R(CW)' if w_total < -0.05 else 'straight')
     stop_str = '  *** STOP ***' if stop_on else ''
     info_text.set_text(
-        f'Nearest : {nd:.0f}mm @ {na:+.1f}deg\n'
-        f'Side  L : str={left_str:.2f}  ({int(np.sum(left_mask))}pts)\n'
-        f'Side  R : str={right_str:.2f}  ({int(np.sum(right_mask))}pts)\n'
-        f'Side dw : {delta_w:+.3f} rad/s  [{dir_str}]'
+        f'Nearest   : {nd:.0f}mm @ {na:+.1f}deg\n'
+        f'w_layer   : {w_layer:+.3f} rad/s  (gray arc)\n'
+        f'side dw   : {side_dw:+.3f} rad/s  L={left_str:.2f} R={right_str:.2f}\n'
+        f'w_total   : {w_total:+.3f} rad/s  [{dir_str}]  (green arc)'
     )
     title_obj.set_text(
         f'RPLIDAR C1 - Bounding Box View  |  '

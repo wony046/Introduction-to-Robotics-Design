@@ -22,7 +22,7 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 
 ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
-FORWARD_SPEED    = 0.35
+FORWARD_SPEED    = 0.45
 MIN_SPEED        = 0.07
 MAX_W            = 2.0
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
@@ -35,7 +35,7 @@ W_SMOOTH         = 0.45
 
 LAYERS = [
     # L1: 가장 가까움, 동적 가중치, 측면까지 넓게 봄
-    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200,
+    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':220,
      'w_gain':2.8, 'weight_base':0.8, 'weight_dynamic':True,  'affects_v':True},
     # L2: 가까움, 동적 가중치
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':200,
