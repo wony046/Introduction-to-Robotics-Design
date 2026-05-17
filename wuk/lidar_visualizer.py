@@ -1,147 +1,160 @@
 """
-RPLIDAR C1 독립 실행형 시각화 도구
+RPLIDAR C1 바운딩 박스 시각화 도구
 ====================================
 용도:
-    1) LiDAR 마운트 방향 검증 (0°가 진짜 로봇 전방인지)
-    2) 측정 노이즈/사각지대 확인
-    3) 장애물 인식 거리 확인
+    jw_won.py 레이어 바운딩 박스 + STOP zone 상시 표시
+    라이다 마운트 방향 및 장애물 인식 범위 확인
 
 실행:
     python3 lidar_visualizer.py
 
 제어:
-    Ctrl+C 또는 창 닫기 → 종료
+    Ctrl+C 또는 창 닫기 -> 종료
 """
-
 import math
 import time
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.patches as patches
 import matplotlib.animation as animation
 from rplidar_c1 import RPLidar
 
-
-# ============================================================
-# 설정
-# ============================================================
+# ── 설정 ──────────────────────────────────────────────────────────────────────
 LIDAR_PORT      = '/dev/ttyUSB0'
-MAX_RANGE       = 3.5             # m, 표시 최대 거리
-MIN_VALID_RANGE = 0.10            # m, 노이즈 컷
-UPDATE_INTERVAL = 100             # ms, 화면 갱신 주기
-LIDAR_BAUDRATE  = 460800            # ← 이 줄 추가 (C1 전용)
-MAX_RANGE       = 3.5
+LIDAR_BAUDRATE  = 460800
+MAX_RANGE_MM    = 800    # 표시 최대 거리 (mm)
+MIN_VALID_MM    = 100    # 노이즈 컷 (mm)
+UPDATE_INTERVAL = 100    # ms
 
-# ============================================================
-# 폴라 플롯 설정
-# ============================================================
-fig = plt.figure(figsize=(8, 8))
-ax  = fig.add_subplot(111, projection='polar')
+# ── jw_won.py 바운딩 박스 파라미터 ───────────────────────────────────────────
+ROBOT_HALF_WIDTH = 110
+STOP_FWD_MIN  = 100
+STOP_FWD_MAX  = 180
+STOP_HORIZ_TH = 105
 
-# LiDAR 좌표 ↔ matplotlib 폴라 좌표 정합
-ax.set_theta_zero_location('N')   # 0° = 위쪽 (= 로봇 전방)
-ax.set_theta_direction(-1)         # 시계방향 양수 (= LiDAR 규약)
+LAYERS = [
+    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200, 'color':'#FF4444'},
+    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':190, 'color':'#FF8800'},
+    {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140, 'color':'#DDCC00'},
+    {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':140, 'color':'#88CC00'},
+    {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':120, 'color':'#00BB44'},
+    {'name':'L6', 'fwd_min':660, 'fwd_max':780, 'horiz_th':100, 'color':'#0088CC'},
+]
 
-ax.set_rmax(MAX_RANGE)
-ax.set_rticks([0.5, 1.0, 1.5, 2.0, 2.5, 3.0])
-ax.set_rlabel_position(135)        # 거리 라벨 위치
-ax.grid(True, alpha=0.4)
-ax.set_title('RPLIDAR C1 Live Scan  (Front = Top, CW = +)\n'
-             'Verify: object directly in front should appear at TOP',
-             fontsize=11, pad=20)
+# ── 화면 구성 ─────────────────────────────────────────────────────────────────
+fig, ax = plt.subplots(figsize=(8, 10))
 
-# 거리별 색상 그라디언트로 표시 (가까울수록 빨강)
-scatter = ax.scatter([], [], s=8, c=[], cmap='RdYlBu_r',
-                      vmin=0, vmax=MAX_RANGE, alpha=0.8)
+# ── 정적 요소: 바운딩 박스 (한 번만 그림) ────────────────────────────────────
+for layer in LAYERS:
+    ax.add_patch(patches.Rectangle(
+        (-layer['horiz_th'], layer['fwd_min']),
+        layer['horiz_th'] * 2, layer['fwd_max'] - layer['fwd_min'],
+        linewidth=1.5, edgecolor=layer['color'], facecolor=layer['color'],
+        alpha=0.13, label=layer['name'], zorder=2
+    ))
 
-# 정면 참고선
-ax.plot([0, 0], [0, MAX_RANGE], 'r--', alpha=0.4, linewidth=1.5,
-        label='Front (0°)')
-# 좌우 90° 참고선
-ax.plot([math.radians(90), math.radians(90)], [0, MAX_RANGE],
-        'b--', alpha=0.3, linewidth=1, label='Right (+90°)')
-ax.plot([math.radians(-90), math.radians(-90)], [0, MAX_RANGE],
-        'g--', alpha=0.3, linewidth=1, label='Left (-90°)')
-ax.legend(loc='upper right', fontsize=9)
+ax.add_patch(patches.Rectangle(
+    (-STOP_HORIZ_TH, STOP_FWD_MIN), STOP_HORIZ_TH * 2, STOP_FWD_MAX - STOP_FWD_MIN,
+    linewidth=2, edgecolor='red', facecolor='red',
+    alpha=0.25, label='STOP', zorder=3
+))
 
-# 정면 거리 텍스트 표시용
-front_text = ax.text(0.5, -0.08, '', transform=ax.transAxes,
-                     ha='center', fontsize=10,
-                     bbox=dict(boxstyle='round', facecolor='lightyellow'))
+ax.add_patch(patches.FancyBboxPatch(
+    (-ROBOT_HALF_WIDTH, -80), ROBOT_HALF_WIDTH * 2, 240,
+    boxstyle='round,pad=5', linewidth=2,
+    edgecolor='#333', facecolor='#888', alpha=0.6, zorder=4
+))
+ax.annotate('', xy=(0, 200), xytext=(0, 90),
+            arrowprops=dict(arrowstyle='->', color='black', lw=2.5), zorder=5)
+ax.text(0, 215, 'fwd', ha='center', fontsize=8)
 
+# 100mm 격자
+ax.set_xlim(-MAX_RANGE_MM, MAX_RANGE_MM)
+ax.set_ylim(-MAX_RANGE_MM * 0.4, MAX_RANGE_MM)
+ax.set_aspect('equal')
+ax.set_xticks(range(-MAX_RANGE_MM, MAX_RANGE_MM + 1, 100))
+ax.set_yticks(range(-300, MAX_RANGE_MM + 1, 100))
+ax.tick_params(labelsize=7)
+ax.axhline(0, color='gray', lw=0.5, zorder=1)
+ax.axvline(0, color='gray', lw=0.5, zorder=1)
+ax.set_xlabel('<- Left (mm)  |  Right (mm) ->', fontsize=9)
+ax.set_ylabel('Forward (mm)', fontsize=9)
+ax.grid(True, alpha=0.25, zorder=0)
+ax.legend(fontsize=7, loc='upper right', ncol=2)
 
-# ============================================================
-# LiDAR 연결
-# ============================================================
-print(f"[Visualizer] LiDAR 연결 중: {LIDAR_PORT}")
-lidar = RPLidar(LIDAR_PORT, baudrate=LIDAR_BAUDRATE)
-try:
-    info = lidar.get_info()
-    print(f"[Visualizer] Info: {info}")
-    health = lidar.get_health()
-    print(f"[Visualizer] Health: {health}")
-except Exception as e:
-    print(f"[Visualizer] Info/Health 조회 실패 (무시): {e}")
+# ── 동적 요소 ─────────────────────────────────────────────────────────────────
+scan_line, = ax.plot([], [], '.', color='steelblue', markersize=3,
+                     alpha=0.85, zorder=6)
+stop_line, = ax.plot([], [], 'rx', markersize=9, markeredgewidth=2, zorder=8)
+near_text  = ax.text(0, -MAX_RANGE_MM * 0.3, '', ha='center', fontsize=8,
+                     color='orangered', fontweight='bold')
+title_obj  = ax.title
+ax.set_title('RPLIDAR C1 - Bounding Box View')
 
+DYNAMIC_ARTISTS = (scan_line, stop_line, near_text, title_obj)
+
+# ── 라이다 연결 ───────────────────────────────────────────────────────────────
+print(f"[Visualizer] Connecting: {LIDAR_PORT}")
+lidar     = RPLidar(LIDAR_PORT, baudrate=LIDAR_BAUDRATE)
 scan_iter = lidar.iter_scans(max_buf_meas=2000, min_len=5)
+print("[Visualizer] Ready. Close window or Ctrl+C to stop.")
 
-
-# ============================================================
-# 갱신 함수
-# ============================================================
-def update(frame):
+# ── 업데이트 ─────────────────────────────────────────────────────────────────
+def update(_frame):
     try:
         scan = next(scan_iter)
     except StopIteration:
-        return scatter, front_text
+        return DYNAMIC_ARTISTS
 
-    angles, distances = [], []
-    front_min = MAX_RANGE  # 정면 ±5° 최소 거리
+    # rplidar_c1 -> numpy 변환
+    raw = [(q, a, d) for q, a, d in scan
+           if q > 0 and MIN_VALID_MM < d < MAX_RANGE_MM]
+    if not raw:
+        return DYNAMIC_ARTISTS
 
-    for (quality, angle_deg, distance_mm) in scan:
-        if quality == 0 or distance_mm == 0:
-            continue
-        d_m = distance_mm / 1000.0
-        if d_m < MIN_VALID_RANGE or d_m > MAX_RANGE:
-            continue
+    arr    = np.array([(d * math.sin(math.radians(a)),   # x (lateral)
+                        d * math.cos(math.radians(a)))    # y (forward)
+                       for _, a, d in raw])
+    dists  = np.array([d for _, _, d in raw])
+    xs, ys = arr[:, 0], arr[:, 1]
+    horizs = np.abs(xs)
 
-        angles.append(math.radians(angle_deg))
-        distances.append(d_m)
+    # 스캔 포인트
+    scan_line.set_data(xs, ys)
 
-        # 정면 ±5° 범위 최소 거리 추적
-        if angle_deg <= 5 or angle_deg >= 355:
-            if d_m < front_min:
-                front_min = d_m
-
-    if angles:
-        offsets = np.column_stack([angles, distances])
-        scatter.set_offsets(offsets)
-        scatter.set_array(np.array(distances))
-
-    # 정면 거리 표시
-    if front_min < MAX_RANGE:
-        front_text.set_text(f'Front (0°±5°) min: {front_min:.2f} m')
+    # STOP 트리거
+    stop_mask = (ys >= STOP_FWD_MIN) & (ys <= STOP_FWD_MAX) & (horizs < STOP_HORIZ_TH)
+    if np.any(stop_mask):
+        stop_line.set_data(xs[stop_mask], ys[stop_mask])
     else:
-        front_text.set_text('Front (0°±5°): clear')
+        stop_line.set_data([], [])
 
-    return scatter, front_text
+    # 최근접
+    idx = int(np.argmin(dists))
+    nd  = float(dists[idx])
+    na  = float(math.degrees(math.atan2(xs[idx], ys[idx])))
+    near_text.set_text(f'nearest: {nd:.0f}mm @ {na:+.1f}deg')
+
+    stop_str = '  *** STOP ***' if np.any(stop_mask) else ''
+    title_obj.set_text(
+        f'RPLIDAR C1 - Bounding Box View  |  '
+        f'{len(raw)}pts  nearest {nd:.0f}mm{stop_str}'
+    )
+
+    return DYNAMIC_ARTISTS
 
 
-# ============================================================
-# 메인
-# ============================================================
 ani = animation.FuncAnimation(fig, update, interval=UPDATE_INTERVAL,
                                blit=True, cache_frame_data=False)
 
-print("[Visualizer] 시각화 시작 — 창을 닫거나 Ctrl+C로 종료")
-print("            로봇 정면에 물체를 두면 위쪽에 표시되는지 확인하세요.")
-
 try:
+    plt.tight_layout()
     plt.show()
 except KeyboardInterrupt:
     pass
 finally:
-    print("[Visualizer] 종료 중...")
+    print("[Visualizer] Stopping...")
     lidar.stop()
     lidar.stop_motor()
     lidar.disconnect()
-    print("[Visualizer] 종료 완료")
+    print("[Visualizer] Done.")
