@@ -30,13 +30,22 @@ STOP_HORIZ_TH    = 105
 DETECTION_RANGE  = 1500
 FORWARD_SPEED    = 0.45
 MIN_SPEED        = 0.12
-MAX_W            = 2.0
+MAX_W            = 2.5
 W_MIN_DANGER     = 0.5
 LAYER_PERCENTILE = 5
 SCORE_ALPHA      = 5.0
-SCORE_BETA       = 8        # 정면 방향 영향 (약화)
-SCORE_SIDE       = 2000.0   # 측방 방향 가중치 (주도)
+SCORE_BETA       = 8
+SCORE_SIDE       = 2500.0
+HEADING_WEIGHT_MM = 5.0
 DEPTH_JUMP_THRES = 120
+FGM_MIN_ANG_DEG     = 3
+FGM_RATIO_THRES     = 1.2
+FGM_MAX_RANGE_MM    = 800
+STOP_ESCAPE_MIN_GAP = ROBOT_HALF_WIDTH * 2 + 40  # 260 mm
+FRONT_GAP_MIN_DEPTH = 300
+SCORE_GAP_FRONT     = 1500.0
+DIR_ARROW_Y   = 50    # mm: y-position of score-direction indicator
+DIR_ARROW_LEN = 200   # mm: length of score-direction arrow
 
 LAYERS = [
     # L1: 가장 가까움, 동적 가중치, weight_cap=7.5, v_max=0.30
@@ -77,7 +86,7 @@ SCAN_WIDE_HALF    = 135
 SIDE_LAYER_ANG_START = 15   # deg
 SIDE_LAYER_ANG_END   = 75   # deg
 SIDE_LAYER_DIST_MAX  = 600  # mm
-SIDE_W_BOOST_GAIN    = 3.0  # 측방 레이어 net delta 계수 (부호 있는 합산)
+SIDE_W_BOOST_GAIN    = 5.0  # 측방 레이어 net delta 계수 (부호 있는 합산)
 
 # ── path prediction / strength bar display ────────────────────────────────────
 PREDICT_SEC = 1.5    # s: how far ahead to draw the predicted path
@@ -178,6 +187,15 @@ ax.set_ylabel('Forward (mm)', fontsize=9)
 ax.grid(True, alpha=0.25, zorder=0)
 ax.legend(fontsize=7, loc='upper right', ncol=2)
 
+# ── color key for dynamic path artists (static text) ─────────────────────────
+ax.text(-MAX_RANGE_MM + 12, MAX_RANGE_MM - 15,
+        '— gray  : score dir path (before side correction)\n'
+        '— green : actual path (w_total)\n'
+        '— RED   : score-chosen L/R direction\n'
+        '-- cyan : front passable gap direction',
+        fontsize=6.5, va='top', color='#333',
+        bbox=dict(boxstyle='round,pad=0.3', fc='white', alpha=0.70))
+
 # ── dynamic artists ───────────────────────────────────────────────────────────
 scan_line,       = ax.plot([], [], '.', color='steelblue', markersize=3,
                            alpha=0.85, zorder=6)
@@ -191,10 +209,19 @@ slayer_left_line,  = ax.plot([], [], 'o', color='darkcyan', markersize=4,
 slayer_right_line, = ax.plot([], [], 'o', color='teal', markersize=4,
                               alpha=0.80, zorder=7)
 
-# Predicted path (gray dashed = w_layer only,  green solid = w_total with side correction)
+# Predicted path (gray dashed = w_base score-only,  green solid = w_total with side corrections)
 path_base_line,  = ax.plot([], [], '--', color='gray',      lw=1.8, alpha=0.7, zorder=8)
 path_line,       = ax.plot([], [], '-',  color='limegreen', lw=3.0, zorder=9)
 path_tip,        = ax.plot([], [], 'o',  color='limegreen', markersize=8, zorder=10)
+
+# Score-chosen direction indicator (crimson): shaft + arrowhead
+dir_shaft,       = ax.plot([], [], '-',  color='crimson',  lw=5,  alpha=0.90, zorder=11)
+dir_arrowL,      = ax.plot([], [], '<',  color='crimson',  markersize=14, alpha=0.90, zorder=12)
+dir_arrowR,      = ax.plot([], [], '>',  color='crimson',  markersize=14, alpha=0.90, zorder=12)
+
+# Best front passable gap direction (deepskyblue dashed line + square tip)
+fgap_line,       = ax.plot([], [], '--', color='deepskyblue', lw=2.5, alpha=0.80, zorder=9)
+fgap_dot,        = ax.plot([], [], 's',  color='deepskyblue', markersize=9,  alpha=0.80, zorder=10)
 
 # Side strength bars
 side_left_bar,   = ax.plot([], [], '-', color='purple', lw=5,
@@ -214,6 +241,8 @@ DYNAMIC_ARTISTS = (scan_line, stop_line,
                    side_left_line, side_right_line,
                    slayer_left_line, slayer_right_line,
                    path_base_line, path_line, path_tip,
+                   dir_shaft, dir_arrowL, dir_arrowR,
+                   fgap_line, fgap_dot,
                    side_left_bar, side_right_bar,
                    info_text, title_obj)
 
@@ -322,18 +351,96 @@ def _get_side_layer_push(scan_norm):
             right_push = max(right_push, strength)
     return left_push, right_push
 
+
+def _point_to_segment_dist(px, py, ax, ay, bx, by):
+    dx, dy = bx - ax, by - ay
+    seg_sq = dx*dx + dy*dy
+    if seg_sq == 0:
+        return math.sqrt((px-ax)**2 + (py-ay)**2)
+    t = max(0.0, min(1.0, ((px-ax)*dx + (py-ay)*dy) / seg_sq))
+    return math.sqrt((px-ax-t*dx)**2 + (py-ay-t*dy)**2)
+
+
+def _nearest_to_segments(px, py, cluster_xy):
+    if len(cluster_xy) == 1:
+        ox, oy = cluster_xy[0]
+        return math.sqrt((px-ox)**2 + (py-oy)**2)
+    return min(_point_to_segment_dist(px, py,
+                                      cluster_xy[j][0], cluster_xy[j][1],
+                                      cluster_xy[j+1][0], cluster_xy[j+1][1])
+               for j in range(len(cluster_xy)-1))
+
+
+def _get_front_passable_gaps(scan_norm):
+    """jw_won.py get_front_passable_gaps 포팅: 전방 ±90° 갭 후보 목록 반환."""
+    front = sorted([(a, d) for a, d in scan_norm
+                    if _is_in_front_90(a) and MIN_VALID_MM < d < DETECTION_RANGE],
+                   key=lambda p: p[0])
+    if len(front) < 2:
+        return []
+
+    def to_xy(a, d):
+        r = math.radians(a)
+        return d * math.sin(r), d * math.cos(r)
+
+    edge_indices = []
+    for i in range(len(front) - 1):
+        a1, d1 = front[i]
+        a2, d2 = front[i+1]
+        if (abs(d2-d1) > DEPTH_JUMP_THRES or
+                (a2-a1) >= FGM_MIN_ANG_DEG or
+                d2/d1 > FGM_RATIO_THRES or d1/d2 > FGM_RATIO_THRES):
+            edge_indices.append(i)
+    if not edge_indices:
+        return []
+
+    gap_set = set(edge_indices)
+    cluster_ids, cid = [], 0
+    for i in range(len(front)):
+        cluster_ids.append(cid)
+        if i in gap_set:
+            cid += 1
+
+    n_clusters = cluster_ids[-1] + 1
+    clusters_xy = [[] for _ in range(n_clusters)]
+    for i, (a, d) in enumerate(front):
+        clusters_xy[cluster_ids[i]].append(to_xy(a, d))
+
+    def depth_at_center(ca):
+        best = min(front, key=lambda p: abs(p[0] - ca))
+        return best[1] if abs(best[0] - ca) < 10.0 else FGM_MAX_RANGE_MM
+
+    passable = []
+    for i in edge_indices:
+        a1, d1 = front[i];   a2, d2 = front[i+1]
+        x1, y1 = to_xy(a1, d1);  x2, y2 = to_xy(a2, d2)
+        width = min(_nearest_to_segments(x1, y1, clusters_xy[cluster_ids[i+1]]),
+                    _nearest_to_segments(x2, y2, clusters_xy[cluster_ids[i]]))
+        if width < STOP_ESCAPE_MIN_GAP:
+            continue
+        ca    = math.degrees(math.atan2((x1+x2)/2, (y1+y2)/2))
+        depth = depth_at_center(ca)
+        if depth < FRONT_GAP_MIN_DEPTH:
+            continue
+        passable.append({'center_angle': ca, 'width': width,
+                         'depth': depth, 'score': width * depth})
+    return sorted(passable, key=lambda g: g['score'], reverse=True)
+
+
 def _compute_vw(scan_norm):
     """
-    Port of find_vw_layered.
-    Returns (v, w_base, w_with_side):
-      w_base      = direction * forward_urgency  (정면 레이어만, 회색 경로)
-      w_with_side = w_base + side_w_delta        (측방 net delta 합산 후, 초록 경로 기준)
-    heading_deg assumed 0 (no IMU in visualizer).
+    Port of find_vw_layered (heading_deg=0 assumed — no IMU in visualizer).
+    Returns (v, w_base, w_with_side, direction, score_L, score_R, best_fg):
+      w_base      = direction * forward_urgency  (gray path)
+      w_with_side = w_base + side_w_delta        (green path base)
+      direction   = +1.0 LEFT / -1.0 RIGHT       (red indicator)
+      score_L/R   = full scoring terms           (shown in info text)
+      best_fg     = best front passable gap or None
     """
     layer_results = [r for r in (_process_layer(scan_norm, L) for L in LAYERS)
                      if r is not None]
     if not layer_results:
-        return FORWARD_SPEED, 0.0, 0.0
+        return FORWARD_SPEED, 0.0, 0.0, 1.0, 0.0, 0.0, None
 
     closest   = min(layer_results, key=lambda r: r['rep_horiz'])
     ref_angle = closest['rep_angle']
@@ -347,12 +454,27 @@ def _compute_vw(scan_norm):
 
     side_left_push, side_right_push = _get_side_layer_push(scan_norm)
 
+    # 전방 통과 가능 갭 보너스 (jw_won.py 동일 로직)
+    front_gaps = _get_front_passable_gaps(scan_norm)
+    best_fg    = front_gaps[0] if front_gaps else None
+    gap_bonus_L = gap_bonus_R = 0.0
+    if best_fg is not None:
+        norm = ((best_fg['width'] / STOP_ESCAPE_MIN_GAP) *
+                (best_fg['depth'] / FRONT_GAP_MIN_DEPTH))
+        bonus = SCORE_GAP_FRONT * norm
+        if best_fg['center_angle'] < 0:
+            gap_bonus_L = bonus
+        else:
+            gap_bonus_R = bonus
+
     score_L = (SCORE_ALPHA * gap_L
                + SCORE_BETA  * sum_pR
-               + SCORE_SIDE  * side_right_push)
+               + SCORE_SIDE  * side_right_push
+               + gap_bonus_L)
     score_R = (SCORE_ALPHA * gap_R
                + SCORE_BETA  * sum_pL
-               + SCORE_SIDE  * side_left_push)
+               + SCORE_SIDE  * side_left_push
+               + gap_bonus_R)
 
     direction       = 1.0 if score_L >= score_R else -1.0
     total_w_all     = sum(r['weight'] for r in layer_results)
@@ -360,7 +482,6 @@ def _compute_vw(scan_norm):
     forward_urgency = max(min(forward_urgency, MAX_W), W_MIN_DANGER)
     w_base          = direction * forward_urgency
 
-    # 측방 레이어 net delta: 부호 있는 합산 (방향과 같으면 크기 증가, 반대면 감소)
     side_w_delta = (side_right_push - side_left_push) * SIDE_W_BOOST_GAIN
     w_with_side  = w_base + side_w_delta
 
@@ -371,7 +492,7 @@ def _compute_vw(scan_norm):
     else:
         v = FORWARD_SPEED
 
-    return v, w_base, w_with_side
+    return v, w_base, w_with_side, direction, score_L, score_R, best_fg
 
 def _exp_strength(horizs_in_zone):
     """Exponential repulsion: 1.0 at robot edge (110 mm), 0.0 at outer boundary (300 mm)."""
@@ -462,18 +583,40 @@ def update(_frame):
     side_left_push, side_right_push = _get_side_layer_push(scan_norm)
 
     # ── v / w from layers ─────────────────────────────────────────────────────
-    v, w_base, w_with_side = _compute_vw(scan_norm)
+    v, w_base, w_with_side, direction, score_L, score_R, best_fg = _compute_vw(scan_norm)
     w_total = float(np.clip(w_with_side + side_dw, -MAX_W, MAX_W))
 
     # ── predicted paths ───────────────────────────────────────────────────────
-    # 회색 점선: 정면 레이어 urgency만 (w_base)
+    # 회색 점선: score direction × forward urgency (side 보정 전)
     bx, by = _predict_path(v, w_base)
     path_base_line.set_data(bx, by)
 
-    # 초록 실선: 측방 net delta + 측면 반발력 합산 후
+    # 초록 실선: 측방 net delta + 측면 반발력 합산 후 실제 경로
     gx, gy = _predict_path(v, w_total)
     path_line.set_data(gx, gy)
     path_tip.set_data([gx[-1]], [gy[-1]])
+
+    # ── 점수 선택 방향 벡터 (빨간색) ───────────────────────────────────────────
+    if direction > 0:  # LEFT (score_L > score_R)
+        dir_shaft.set_data([0, -DIR_ARROW_LEN], [DIR_ARROW_Y, DIR_ARROW_Y])
+        dir_arrowL.set_data([-DIR_ARROW_LEN], [DIR_ARROW_Y])
+        dir_arrowR.set_data([], [])
+    else:              # RIGHT
+        dir_shaft.set_data([0, DIR_ARROW_LEN], [DIR_ARROW_Y, DIR_ARROW_Y])
+        dir_arrowL.set_data([], [])
+        dir_arrowR.set_data([DIR_ARROW_LEN], [DIR_ARROW_Y])
+
+    # ── 전방 통과 가능 갭 방향 (하늘색 점선) ──────────────────────────────────
+    if best_fg is not None:
+        ca_rad = math.radians(best_fg['center_angle'])
+        arr_len = min(best_fg['depth'], MAX_RANGE_MM - 50)
+        ex = arr_len * math.sin(ca_rad)
+        ey = arr_len * math.cos(ca_rad)
+        fgap_line.set_data([0, ex], [0, ey])
+        fgap_dot.set_data([ex], [ey])
+    else:
+        fgap_line.set_data([], [])
+        fgap_dot.set_data([], [])
 
     # ── side strength bars ────────────────────────────────────────────────────
     if left_str > 0.02:
@@ -498,19 +641,28 @@ def update(_frame):
     na  = float(math.degrees(math.atan2(xs[idx], ys[idx])))
 
     # ── info text ─────────────────────────────────────────────────────────────
-    dir_str  = 'L' if w_total > 0.05 else ('R' if w_total < -0.05 else 'straight')
-    stop_str = '  *** STOP ***' if stop_on else ''
+    score_dir_str = 'LEFT ' if direction > 0 else 'RIGHT'
+    actual_dir    = 'L' if w_total > 0.05 else ('R' if w_total < -0.05 else 'fwd')
+    stop_str      = '  *** STOP ***' if stop_on else ''
+    fg_line = (f'fgap       : ca={best_fg["center_angle"]:+.0f}° '
+               f'w={best_fg["width"]:.0f} d={best_fg["depth"]:.0f}mm\n'
+               if best_fg else 'fgap       : none\n')
     info_text.set_text(
         f'Nearest    : {nd:.0f}mm @ {na:+.1f}deg\n'
+        f'score_L    : {score_L:.0f}   score_R : {score_R:.0f}\n'
+        f'dir(score) : {score_dir_str}  margin={abs(score_L-score_R):.0f}  ← RED\n'
+        f'{fg_line}'
         f'v          : {v:.3f} m/s\n'
-        f'w_base     : {w_base:+.3f} rad/s  (gray, fwd urgency only)\n'
-        f'side delta : {w_with_side - w_base:+.3f} rad/s  (net: L={side_left_push:.2f} R={side_right_push:.2f})\n'
+        f'w_base     : {w_base:+.3f} rad/s  (gray)\n'
+        f'side delta : {w_with_side - w_base:+.3f} rad/s  '
+        f'(L={side_left_push:.2f} R={side_right_push:.2f})\n'
         f'side rep dw: {side_dw:+.3f} rad/s  L={left_str:.2f} R={right_str:.2f}\n'
-        f'w_total    : {w_total:+.3f} rad/s  [{dir_str}]  (green path)'
+        f'w_total    : {w_total:+.3f} rad/s  [{actual_dir}]  (green)'
     )
     title_obj.set_text(
         f'RPLIDAR C1 - Bounding Box View  |  '
-        f'v={v:.2f}m/s  w={w_total:+.2f}rad/s  nearest {nd:.0f}mm{stop_str}'
+        f'score:{score_dir_str}  actual:{actual_dir}  '
+        f'v={v:.2f}  w={w_total:+.2f}  nearest {nd:.0f}mm{stop_str}'
     )
 
     return DYNAMIC_ARTISTS
