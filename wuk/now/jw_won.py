@@ -23,7 +23,7 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
 FORWARD_SPEED    = 0.45
-MIN_SPEED        = 0.1
+MIN_SPEED        = 0.15
 MAX_W            = 2.0
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
 W_SMOOTH         = 0.2
@@ -93,7 +93,7 @@ DEPTH_JUMP_THRES  = 120    # mm: 이상이면 다른 물체로 인식
 # 스캔 범위 & 통신
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-SCAN_WIDE_HALF = 135   # 측면 반발력 감지 범위 (is_in_wide_scan 사용)
+SCAN_WIDE_HALF = 135   # 측면 반발력 감지 범위 (is_in_wide_scan 사용) (각도)
 SEND_INTERVAL  = 0.1
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -236,14 +236,17 @@ def choose_escape_gap(gaps, prefer_angle=0.0):
                 if g['width'] >= STOP_ESCAPE_MIN_GAP
                 and g['depth'] >= FGM_MIN_DEPTH_MM]
     if passable:
-        return min(passable, key=lambda g: abs(g['center_angle'] - prefer_angle))
+        return min(passable,
+                   key=lambda g: abs(((g['center_angle'] - prefer_angle) + 180) % 360 - 180))
     return None
 
 
-def find_stop_escape_direction(scan_points):
-    """FGM 기반 STOP 탈출 방향 결정. 반환: (target_angle, gap_width, gap_info_list)"""
+def find_stop_escape_direction(scan_points, heading_deg=0.0):
+    """FGM 기반 STOP 탈출 방향 결정. 반환: (target_angle, gap_width, gap_info_list)
+    heading_deg 기준 글로벌 0°에 가장 가까운(최소 회전) 통과 가능 갭 선택.
+    """
     gaps   = find_all_gaps(scan_points)
-    chosen = choose_escape_gap(gaps, prefer_angle=0.0)
+    chosen = choose_escape_gap(gaps, prefer_angle=heading_deg)
 
     if chosen is None:
         return 0.0, 0.0, []
@@ -575,7 +578,7 @@ def find_vw_command(scan_points, heading_deg):
 
     # ── Phase 0: 정상 → STOP 감지 시 즉시 피봇 ──────────────────────────────
     if detect_stop_zone(scan_points):
-        target, gap_width, gap_info = find_stop_escape_direction(scan_points)
+        target, gap_width, gap_info = find_stop_escape_direction(scan_points, heading_deg)
         _stop_set_pivot(heading_deg, target, gap_width)
         stop_cycle_count = 0
         stop_phase       = 2
