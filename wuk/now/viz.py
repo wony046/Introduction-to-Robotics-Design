@@ -6,7 +6,9 @@ Usage:
   python3 viz.py              # load latest stop_event_*.json
   python3 viz.py <file.json>  # load specific file
 """
-import json, sys, glob, math
+import json, sys, glob, math, os
+
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -24,7 +26,7 @@ def to_xy(angle_deg, dist_mm):
     return dist_mm * math.sin(r), dist_mm * math.cos(r)  # x=lateral, y=fwd
 
 
-def visualize(path):
+def visualize(path, show=True):
     with open(path) as f:
         d = json.load(f)
 
@@ -210,23 +212,36 @@ def visualize(path):
     plt.tight_layout()
     out = path.replace('.json', '.png')
     plt.savefig(out, dpi=150, bbox_inches='tight')
-    print(f"Saved: {out}")
-    try:
-        plt.show()
-    except Exception:
-        pass
-
-
-def load_latest():
-    files = sorted(glob.glob('stop_event_*.json'))
-    if not files:
-        print("No stop_event_*.json files found in current directory.")
-        return None
-    print(f"Loading: {files[-1]}")
-    return files[-1]
+    print(f"  Saved: {out}")
+    if show:
+        try:
+            plt.show()
+        except Exception:
+            pass
+    plt.close()
 
 
 if __name__ == '__main__':
-    fpath = sys.argv[1] if len(sys.argv) > 1 else load_latest()
-    if fpath:
-        visualize(fpath)
+    if len(sys.argv) > 1:
+        files = sys.argv[1:]
+    else:
+        files = sorted(glob.glob(os.path.join(SCRIPT_DIR, 'stop_event_*.json')))
+
+    if not files:
+        print("No stop_event_*.json files found.")
+        print("Usage:")
+        print("  python viz.py                        # process all stop_event_*.json")
+        print("  python viz.py stop_event_123.json    # process single file")
+        print("  python viz.py *.json                 # process multiple files")
+        sys.exit(1)
+
+    show_window = len(files) == 1
+
+    for fpath in files:
+        print(f"[{files.index(fpath)+1}/{len(files)}] Processing: {fpath}")
+        try:
+            visualize(fpath, show=show_window)
+        except Exception as e:
+            print(f"  ERROR: {e}")
+
+    print(f"\nDone. {len(files)} file(s) processed.")
