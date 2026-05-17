@@ -20,7 +20,7 @@ STOP_FWD_MIN  = 100
 STOP_FWD_MAX  = 180
 STOP_HORIZ_TH = 105
 
-UPDATE_INTERVAL = 150   # ms: 갱신 주기 (낮출수록 빠르나 CPU 사용 증가)
+UPDATE_INTERVAL = 500   # ms: 갱신 주기 (낮출수록 빠르나 CPU 사용 증가)
 
 LAYERS = [
     {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200, 'color':'#FF4444'},
