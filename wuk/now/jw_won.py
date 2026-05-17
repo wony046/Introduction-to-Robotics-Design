@@ -25,9 +25,9 @@ ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
 FORWARD_SPEED    = 0.45
 MIN_SPEED        = 0.12
-MAX_W            = 2.5
+MAX_W            = 1.8
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
-W_SMOOTH         = 0.9
+W_SMOOTH         = 0.7
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 계층형 바운딩 박스 정의 (6개 레이어)
@@ -72,7 +72,7 @@ STOP_HORIZ_TH = 105
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
 STOP_MAX_CYCLES       = 30                          # 연속 STOP 사이클 상한 (초과 시 강제 탈출)
 STOP_PIVOT_MAX_W      = 1.0   # rad/s: 피봇 최대 회전 속도 (목표에서 멀 때)
-STOP_PIVOT_MIN_W      = 0.3   # rad/s: 피봇 최소 회전 속도 (목표 근처)
+STOP_PIVOT_MIN_W      = 0.7   # rad/s: 피봇 최소 회전 속도 (목표 근처)
 STOP_PIVOT_SLOW_DEG   = 30    # deg: 이 이내부터 선형 감속 시작
 
 # FGM (Follow the Gap Method) — STOP escape 전용
