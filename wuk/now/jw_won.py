@@ -35,17 +35,17 @@ W_SMOOTH         = 0.6
 # 각 레이어: 거리 범위, horiz 임계, w_gain, 기본 가중치, 동적 가중치 여부, v 영향 여부
 
 LAYERS = [
-    # L1: 가장 가까움, 동적 가중치, weight_cap=5.0, v_max=0.30
+    # L1: 가장 가까움, 동적 가중치, weight_cap=7.5, v_max=0.30
     {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':120,
      'w_gain':2.8, 'weight_base':0.8, 'weight_cap':7.5, 'weight_dynamic':True,
      'v_max':0.30, 'affects_v':True},
-    # L2: 가까움, 동적 가중치, weight_cap=3.0, v_max=0.38
+    # L2: 가까움, 동적 가중치, weight_cap=4.5, v_max=0.38
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':120,
      'w_gain':2.5, 'weight_base':0.6, 'weight_cap':4.5, 'weight_dynamic':True,
      'v_max':0.38, 'affects_v':True},
-    # L3: 중간 (weight: 진입 0.4 → 끝 0.2 선형 보간)
+    # L3: 중간, 동적 가중치, weight_cap=2.5, v_max=FORWARD_SPEED
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':120,
-     'w_gain':1.8, 'weight_base':0.2, 'weight_start':0.4, 'weight_dynamic':False, 'affects_v':True},
+     'w_gain':1.8, 'weight_base':0.2, 'weight_cap':2.5, 'weight_dynamic':True, 'affects_v':True},
     # L4: 중간-원거리 (weight: 진입 0.2 → 끝 0.1)
     {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':100,
      'w_gain':1.0, 'weight_base':0.1, 'weight_start':0.2, 'weight_dynamic':False, 'affects_v':True},
@@ -62,7 +62,7 @@ LAYER_PERCENTILE = 5    # %: 하위 N% dist 평균으로 레이어 대표점 계
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # STOP zone (계층형과 완전 별도)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# STOP rectangle: 전방 100~180mm 사이, horiz < 105mm (210mm 폭)
+# STOP rectangle: 전방 100~175mm 사이, horiz < 105mm (210mm 폭)
 
 STOP_FWD_MIN  = 100
 STOP_FWD_MAX  = 175
@@ -97,7 +97,7 @@ SCAN_WIDE_HALF = 135   # 측면 반발력 감지 범위 (is_in_wide_scan 사용)
 SEND_INTERVAL  = 0.1
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 측면 반발력 파라미터 (50mm × 240mm 레이어)
+# 측면 반발력 파라미터 (horiz 190mm × fwd 160mm 감지 구간)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SIDE_SAFE_MARGIN  = 190   # mm: 로봇 측면 안전 마진 (side_th = 110+190 = 300mm)
 SIDE_FWD_LEAD     = 80    # mm: 라이다 기준 전방 여유 (진입 예측)
@@ -182,7 +182,7 @@ def read_arduino(arduino):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def detect_stop_zone(scan_points):
-    """STOP rectangle (fwd 100~150mm, horiz<110mm) 안에 장애물이 있는가?"""
+    """STOP rectangle (fwd 100~175mm, horiz<105mm) 안에 장애물이 있는가?"""
     for angle_norm, dist in scan_points:
         if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
         if not is_in_front_90(angle_norm): continue
@@ -326,7 +326,7 @@ def process_layer(scan_points, layer):
         raw = rep_h_err / layer['horiz_th'] * cap
         weight = max(layer['weight_base'], min(cap, raw))
     else:
-        # L3~L6: fwd 위치에 따라 weight_start → weight_base 선형 보간
+        # L4~L6: fwd 위치에 따라 weight_start → weight_base 선형 보간
         progress = (rep_fwd - layer['fwd_min']) / (layer['fwd_max'] - layer['fwd_min'])
         progress = max(0.0, min(1.0, progress))
         weight = layer['weight_start'] + (layer['weight_base'] - layer['weight_start']) * progress
@@ -399,8 +399,7 @@ def get_side_repulsion(scan_points):
 
     감지 구간:
       horiz: ROBOT_HALF_WIDTH(110mm) ~ ROBOT_HALF_WIDTH + SIDE_SAFE_MARGIN(300mm)
-      fwd:   -SIDE_FWD_REAR(-240mm) ~ +SIDE_FWD_LEAD(+50mm)
-             라이다 뒤쪽(로봇 몸체)이 주 감지 영역
+      fwd:   -SIDE_FWD_REAR(-80mm) ~ +SIDE_FWD_LEAD(+80mm)
 
     반환: (delta_w, left_str, right_str)
       delta_w > 0 → 오른쪽 장애물 → 왼쪽 보정
@@ -716,8 +715,8 @@ def _motor_controller(arduino):
 def main():
     print("=== RPLIDAR Obstacle Avoidance (Layered Bounding Box) ===")
     print(f"  Layers      : 6 layers (60~780mm), bottom {LAYER_PERCENTILE}% per layer")
-    print(f"  L1-L2       : dynamic weight max(base, h_err/h_th), affects v")
-    print(f"  L3-L4       : interp weight (L3: 0.4→0.2, L4: 0.2→0.1), affects v")
+    print(f"  L1-L3       : dynamic weight max(base, h_err/h_th*cap), affects v")
+    print(f"  L4          : interp weight (0.2→0.1), affects v")
     print(f"  L5-L6       : interp weight (L5: 0.1→0.05, L6: 0.05→0.02), no v effect")
     print(f"  STOP zone   : fwd {STOP_FWD_MIN}-{STOP_FWD_MAX}mm, horiz<{STOP_HORIZ_TH}mm")
     print(f"  STOP escape : 360deg scan, "
