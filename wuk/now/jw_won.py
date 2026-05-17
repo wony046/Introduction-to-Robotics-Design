@@ -25,9 +25,9 @@ ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
 FORWARD_SPEED    = 0.45
 MIN_SPEED        = 0.12
-MAX_W            = 2.0
+MAX_W            = 2.5
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
-W_SMOOTH         = 0.6
+W_SMOOTH         = 0.9
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 계층형 바운딩 박스 정의 (6개 레이어)
@@ -115,7 +115,7 @@ SIDE_EXP_K        = 2.0   # 지수 계수: 클수록 근접 시 반발력이 급
 SIDE_LAYER_ANG_START = 15   # deg: 정면 레이어와 경계
 SIDE_LAYER_ANG_END   = 75   # deg: 측방 레이어 바깥 경계
 SIDE_LAYER_DIST_MAX  = 600  # mm: 측방 감지 최대 거리
-SIDE_W_BOOST_GAIN    = 3.0  # rad/s: 측방 레이어 w 크기 기여 계수 (우측 push → +w, 좌측 push → -w)
+SIDE_W_BOOST_GAIN    = 5.0  # rad/s: 측방 레이어 w 크기 기여 계수 (우측 push → +w, 좌측 push → -w)
 
 # ── 디버그 토글 ──────────────────────────────────────────────────────────────
 DEBUG_LAYERS = True    # 각 레이어 처리 결과
