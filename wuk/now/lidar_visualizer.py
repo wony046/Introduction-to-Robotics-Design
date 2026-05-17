@@ -24,23 +24,24 @@ UPDATE_INTERVAL = 100   # ms
 # ── jw_won.py parameters (keep in sync) ───────────────────────────────────────
 ROBOT_HALF_WIDTH = 110
 STOP_FWD_MIN     = 100
-STOP_FWD_MAX     = 180
+STOP_FWD_MAX     = 160
 STOP_HORIZ_TH    = 105
 
 DETECTION_RANGE  = 1500
-FORWARD_SPEED    = 0.35
-MIN_SPEED        = 0.07
+FORWARD_SPEED    = 0.45
+MIN_SPEED        = 0.15
 MAX_W            = 2.0
 W_MIN_DANGER     = 0.5
 LAYER_PERCENTILE = 5
 SCORE_ALPHA      = 5.0
-SCORE_BETA       = 20.0
+SCORE_BETA       = 8      # 정면 방향 영향 (약화)
+SCORE_SIDE       = 50.0   # 측방 방향 가중치 (주도)
 DEPTH_JUMP_THRES = 120
 
 LAYERS = [
-    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':220, 'color':'#FF4444',
+    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':190, 'color':'#FF4444',
      'w_gain':2.8, 'weight_base':0.8, 'weight_dynamic':True,  'affects_v':True},
-    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':200, 'color':'#FF8800',
+    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':170, 'color':'#FF8800',
      'w_gain':2.5, 'weight_base':0.6, 'weight_dynamic':True,  'affects_v':True},
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140, 'color':'#DDCC00',
      'w_gain':1.8, 'weight_base':0.2, 'weight_start':0.4, 'weight_dynamic':False, 'affects_v':True},
@@ -53,15 +54,21 @@ LAYERS = [
 ]
 
 # ── side repulsion parameters (jw_won.py: get_side_repulsion) ─────────────────
-# Detection zone: horiz 110~300 mm,  fwd -240~+50 mm
+# Detection zone: horiz 110~300 mm,  fwd -80~+80 mm
 SIDE_INNER        = ROBOT_HALF_WIDTH
 SIDE_SAFE_MARGIN  = 190
 SIDE_OUTER        = SIDE_INNER + SIDE_SAFE_MARGIN  # 300 mm
-SIDE_FWD_LEAD     = 50
-SIDE_FWD_REAR     = 240
+SIDE_FWD_LEAD     = 80
+SIDE_FWD_REAR     = 80
 SIDE_REPULSE_GAIN = 0.8
 SIDE_EXP_K        = 3.0
 SCAN_WIDE_HALF    = 135
+
+# ── side layer parameters (jw_won.py: get_side_layer_push) ───────────────────
+# Sector: ±15°~±75° (robot-local), up to 600 mm
+SIDE_LAYER_ANG_START = 15   # deg
+SIDE_LAYER_ANG_END   = 75   # deg
+SIDE_LAYER_DIST_MAX  = 600  # mm
 
 # ── path prediction / strength bar display ────────────────────────────────────
 PREDICT_SEC = 1.5    # s: how far ahead to draw the predicted path
@@ -72,7 +79,22 @@ SBAR_SCALE  = 140    # mm per unit strength (max bar length)
 # ── figure ────────────────────────────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(8, 10))
 
-# ── static: layer bounding boxes ──────────────────────────────────────────────
+# ── static: side layer fan zones (±15°~±75°, 600mm) ──────────────────────────
+# Coordinate: +x=right, +y=forward → matplotlib Wedge angle from +x (CCW)
+# Robot +15°~+75° → mpl 15°~75°  (right side)
+# Robot -75°~-15° → mpl 105°~165° (left side)
+ax.add_patch(patches.Wedge(
+    (0, 0), SIDE_LAYER_DIST_MAX, 15, 75,
+    facecolor='cyan', alpha=0.08, edgecolor='darkcyan', linewidth=1.2,
+    linestyle='-.', label='side layer R', zorder=2
+))
+ax.add_patch(patches.Wedge(
+    (0, 0), SIDE_LAYER_DIST_MAX, 105, 165,
+    facecolor='cyan', alpha=0.08, edgecolor='darkcyan', linewidth=1.2,
+    linestyle='-.', label='side layer L', zorder=2
+))
+
+# ── static: layer bounding boxes (front layers) ───────────────────────────────
 for layer in LAYERS:
     ax.add_patch(patches.Rectangle(
         (-layer['horiz_th'], layer['fwd_min']),
@@ -89,14 +111,14 @@ ax.add_patch(patches.Rectangle(
 ))
 
 # ── static: side repulsion detection zones (purple dashed) ────────────────────
-# Left:  x [-300, -110],  y [-240, +50]
-# Right: x [+110, +300],  y [-240, +50]
+# Left:  x [-300, -110],  y [-80, +80]
+# Right: x [+110, +300],  y [-80, +80]
 _sw = SIDE_OUTER - SIDE_INNER        # 190 mm
-_sh = SIDE_FWD_REAR + SIDE_FWD_LEAD  # 290 mm
+_sh = SIDE_FWD_REAR + SIDE_FWD_LEAD  # 160 mm
 ax.add_patch(patches.Rectangle(
     (-SIDE_OUTER, -SIDE_FWD_REAR), _sw, _sh,
     linewidth=1.8, edgecolor='purple', facecolor='purple',
-    alpha=0.10, linestyle='--', label='side zone', zorder=2
+    alpha=0.10, linestyle='--', label='side repulsion', zorder=2
 ))
 ax.add_patch(patches.Rectangle(
     (SIDE_INNER, -SIDE_FWD_REAR), _sw, _sh,
@@ -113,6 +135,15 @@ ax.add_patch(patches.FancyBboxPatch(
 ax.annotate('', xy=(0, 200), xytext=(0, 90),
             arrowprops=dict(arrowstyle='->', color='black', lw=2.5), zorder=5)
 ax.text(0, 215, 'fwd', ha='center', fontsize=8)
+
+# ── static: sector boundary lines (±15°, ±75°) ────────────────────────────────
+for ang_deg in [15, 75]:
+    for sign in [1, -1]:
+        r = math.radians(sign * ang_deg)
+        ex = SIDE_LAYER_DIST_MAX * math.sin(r)
+        ey = SIDE_LAYER_DIST_MAX * math.cos(r)
+        ax.plot([0, ex], [0, ey], color='darkcyan', lw=0.8,
+                linestyle=':', alpha=0.5, zorder=2)
 
 # ── static: strength bar backgrounds ──────────────────────────────────────────
 ax.plot([-ROBOT_HALF_WIDTH - SBAR_SCALE, -ROBOT_HALF_WIDTH], [SBAR_Y, SBAR_Y],
@@ -146,10 +177,12 @@ side_left_line,  = ax.plot([], [], 'o', color='purple', markersize=5,
                            alpha=0.85, zorder=7)
 side_right_line, = ax.plot([], [], 'o', color='orchid',  markersize=5,
                            alpha=0.85, zorder=7)
+slayer_left_line,  = ax.plot([], [], 'o', color='darkcyan', markersize=4,
+                              alpha=0.80, zorder=7)
+slayer_right_line, = ax.plot([], [], 'o', color='teal', markersize=4,
+                              alpha=0.80, zorder=7)
 
 # Predicted path (gray dashed = w_layer only,  green solid = w_total with side correction)
-# - Curvature shows w (angular velocity): straight=0, left curve=+w, right curve=-w
-# - Length shows v (linear velocity): PREDICT_SEC seconds ahead at current speed
 path_base_line,  = ax.plot([], [], '--', color='gray',      lw=1.8, alpha=0.7, zorder=8)
 path_line,       = ax.plot([], [], '-',  color='limegreen', lw=3.0, zorder=9)
 path_tip,        = ax.plot([], [], 'o',  color='limegreen', markersize=8, zorder=10)
@@ -170,6 +203,7 @@ ax.set_title('RPLIDAR C1 - Bounding Box View')
 
 DYNAMIC_ARTISTS = (scan_line, stop_line,
                    side_left_line, side_right_line,
+                   slayer_left_line, slayer_right_line,
                    path_base_line, path_line, path_tip,
                    side_left_bar, side_right_bar,
                    info_text, title_obj)
@@ -261,6 +295,20 @@ def _get_gap_width(scan_norm, ref_angle, ref_dist, is_left):
         return _cosine_dist(edge_p[1], edge_p[1], rem)
     return 0.0
 
+def _get_side_layer_push(scan_norm):
+    """측방 레이어: ±15°~±75°, 최대 600mm. 반환: (left_push, right_push) [0~1]"""
+    left_push  = 0.0
+    right_push = 0.0
+    for a, d in scan_norm:
+        if d < MIN_VALID_MM or d > SIDE_LAYER_DIST_MAX:
+            continue
+        strength = (SIDE_LAYER_DIST_MAX - d) / SIDE_LAYER_DIST_MAX
+        if -SIDE_LAYER_ANG_END <= a <= -SIDE_LAYER_ANG_START:
+            left_push  = max(left_push,  strength)
+        elif SIDE_LAYER_ANG_START <= a <= SIDE_LAYER_ANG_END:
+            right_push = max(right_push, strength)
+    return left_push, right_push
+
 def _compute_vw(scan_norm):
     """
     Port of find_vw_layered.
@@ -279,10 +327,17 @@ def _compute_vw(scan_norm):
     gap_L = _get_gap_width(scan_norm, ref_angle, ref_dist, is_left=True)
     gap_R = _get_gap_width(scan_norm, ref_angle, ref_dist, is_left=False)
 
-    sum_pR  = sum(r['weight'] * r['push_right'] for r in layer_results)
-    sum_pL  = sum(r['weight'] * r['push_left']  for r in layer_results)
-    score_L = SCORE_ALPHA * gap_L + SCORE_BETA * sum_pR
-    score_R = SCORE_ALPHA * gap_R + SCORE_BETA * sum_pL
+    sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
+    sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
+
+    side_left_push, side_right_push = _get_side_layer_push(scan_norm)
+
+    score_L = (SCORE_ALPHA * gap_L
+               + SCORE_BETA  * sum_pR
+               + SCORE_SIDE  * side_right_push)
+    score_R = (SCORE_ALPHA * gap_R
+               + SCORE_BETA  * sum_pL
+               + SCORE_SIDE  * side_left_push)
 
     direction   = 1.0 if score_L >= score_R else -1.0
     total_w_all = sum(r['weight'] for r in layer_results)
@@ -311,11 +366,6 @@ def _predict_path(v, w):
     """
     Differential drive path prediction over PREDICT_SEC seconds.
     Coordinate: x=lateral (right=+), y=forward (+y), robot starts at (0,0) facing +y.
-
-    Integration:
-      theta += w * dt          (w>0 = left turn = CCW)
-      x     += -v*sin(theta)*dt*1000   (m -> mm)
-      y     +=  v*cos(theta)*dt*1000
     """
     dt = PREDICT_SEC / PREDICT_N
     theta, px, py = 0.0, 0.0, 0.0
@@ -379,16 +429,27 @@ def update(_frame):
     right_str = _exp_strength(horizs[right_mask])
     side_dw   = (right_str - left_str) * SIDE_REPULSE_GAIN
 
+    # ── side layer (±15°~±75°, 600mm) ─────────────────────────────────────────
+    slayer_left_mask  = ((norm_angles >= -SIDE_LAYER_ANG_END) &
+                         (norm_angles <= -SIDE_LAYER_ANG_START) &
+                         (dists <= SIDE_LAYER_DIST_MAX))
+    slayer_right_mask = ((norm_angles >= SIDE_LAYER_ANG_START) &
+                         (norm_angles <= SIDE_LAYER_ANG_END) &
+                         (dists <= SIDE_LAYER_DIST_MAX))
+
+    slayer_left_line.set_data(xs[slayer_left_mask],   ys[slayer_left_mask])
+    slayer_right_line.set_data(xs[slayer_right_mask], ys[slayer_right_mask])
+
+    side_left_push, side_right_push = _get_side_layer_push(scan_norm)
+
     # ── v / w from layers ─────────────────────────────────────────────────────
     v, w_layer = _compute_vw(scan_norm)
     w_total    = float(np.clip(w_layer + side_dw, -MAX_W, MAX_W))
 
     # ── predicted paths ───────────────────────────────────────────────────────
-    # gray dashed: path using w_layer only (before side correction)
     bx, by = _predict_path(v, w_layer)
     path_base_line.set_data(bx, by)
 
-    # green solid: path using w_total (layer + side correction)
     gx, gy = _predict_path(v, w_total)
     path_line.set_data(gx, gy)
     path_tip.set_data([gx[-1]], [gy[-1]])
@@ -419,11 +480,12 @@ def update(_frame):
     dir_str  = 'L' if w_total > 0.05 else ('R' if w_total < -0.05 else 'straight')
     stop_str = '  *** STOP ***' if stop_on else ''
     info_text.set_text(
-        f'Nearest : {nd:.0f}mm @ {na:+.1f}deg\n'
-        f'v       : {v:.3f} m/s\n'
-        f'w_layer : {w_layer:+.3f} rad/s  (gray path)\n'
-        f'side dw : {side_dw:+.3f} rad/s  L={left_str:.2f} R={right_str:.2f}\n'
-        f'w_total : {w_total:+.3f} rad/s  [{dir_str}]  (green path)'
+        f'Nearest    : {nd:.0f}mm @ {na:+.1f}deg\n'
+        f'v          : {v:.3f} m/s\n'
+        f'w_layer    : {w_layer:+.3f} rad/s  (gray path)\n'
+        f'side rep dw: {side_dw:+.3f} rad/s  L={left_str:.2f} R={right_str:.2f}\n'
+        f'side layer : L_push={side_left_push:.2f}  R_push={side_right_push:.2f}\n'
+        f'w_total    : {w_total:+.3f} rad/s  [{dir_str}]  (green path)'
     )
     title_obj.set_text(
         f'RPLIDAR C1 - Bounding Box View  |  '
