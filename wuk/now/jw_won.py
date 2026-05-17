@@ -78,7 +78,9 @@ FGM_MIN_ANG_DEG      = 5     # deg: 이 이상 각도 공백이면 갭으로 인
 FGM_MIN_DEPTH_MM     = 200   # mm: 갭 너머 최소 깊이 (얕은 함몰부 제외)
 FGM_MAX_RANGE_MM     = 800   # mm: FGM 갭 탐색 최대 거리 (이 이상 포인트 무시)
 FGM_RATIO_THRES      = 1.5   # 인접 포인트 거리 비율 이상이면 갭 경계로 인식 (벽 끝 완만 전환)
-HEADING_CONVERGE_DEG = 15    # deg: 목표 헤딩에 이 이내면 피봇 종료
+STOP_REVERSE_SPEED      = 0.12  # m/s: 후진 속도
+STOP_REVERSE_EXTRA      = 50    # mm:  후진으로 확보할 추가 전방 거리
+STOP_REVERSE_MAX_CYCLES = 20    # 후진 최대 사이클 (2s @ 10Hz) — 거리 미달 시 강제 피봇 진입
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 방향 점수제 (gap + layer 통합)
@@ -117,11 +119,13 @@ DEBUG_SIDE   = True    # 측면 반발력
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
 prev_w                = 0.0
-stop_cycle_count      = 0     # 연속 STOP 사이클 카운터
-stop_pivot_w          = 0.0   # STOP 세션 내 고정 피봇 방향
+stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터
+stop_pivot_w               = 0.0   # 피봇 방향 (부호만 사용)
 stop_locked_target         = 0.0
 stop_locked_gap            = 0.0
-stop_locked_global_heading = 0.0   # STOP 첫 진입 시 계산한 전역 목표 헤딩
+stop_locked_global_heading = 0.0
+stop_phase                 = 0     # 0=idle, 1=후진, 2=피봇
+stop_reverse_init_dist     = 0.0   # 후진 시작 시 전방 거리 (mm)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -262,6 +266,18 @@ def find_stop_escape_direction(scan_points):
         for g in gaps
     ]
     return float(chosen['center_angle']), float(chosen['width']), gap_info
+
+
+def get_stop_fwd_dist(scan_points):
+    """STOP 존 정면 방향의 최소 거리 (horiz < STOP_HORIZ_TH인 전방 포인트 중 가장 가까운 dist)."""
+    min_d = float('inf')
+    for angle_norm, dist in scan_points:
+        if dist <= 0:
+            continue
+        horiz, fwd = decompose(angle_norm, dist)
+        if fwd > 0 and horiz < STOP_HORIZ_TH:
+            min_d = min(min_d, dist)
+    return min_d if min_d < float('inf') else 9999.0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -516,81 +532,108 @@ def find_vw_layered(scan_points, heading_deg):
 # 메인 진입점 (STOP 우선)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def find_vw_command(scan_points, heading_deg):
-    """STOP zone 우선 검사 → 활성 시 STOP escape, 아니면 계층형 처리."""
-    global stop_cycle_count, stop_pivot_w, stop_locked_target, stop_locked_gap, \
-           stop_locked_global_heading
+def _stop_reset():
+    """STOP 상태 전역 변수 초기화."""
+    global stop_cycle_count, stop_pivot_w, stop_phase
+    stop_cycle_count = 0
+    stop_pivot_w     = 0.0
+    stop_phase       = 0
 
-    # ── 피봇 중 목표 헤딩 도달 확인 (STOP zone 감지 여부와 무관하게 우선 처리) ──
-    if stop_cycle_count > 0:
-        heading_err = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
-        if heading_err < HEADING_CONVERGE_DEG:
-            if DEBUG_STOP:
-                print(f"  [STOP] heading converged "
-                      f"(target={stop_locked_global_heading:.1f}° err={heading_err:.1f}°) "
-                      f"-> layered")
+
+def _stop_set_pivot(heading_deg, target, gap_width):
+    """피봇 목표 헤딩·방향 계산 및 전역 변수 세팅."""
+    global stop_locked_target, stop_locked_gap, stop_locked_global_heading, stop_pivot_w
+    stop_locked_target = target
+    stop_locked_gap    = gap_width
+    if gap_width == 0:
+        stop_locked_global_heading = 0.0
+        stop_pivot_w = (-math.copysign(MAX_W, heading_deg)
+                        if abs(heading_deg) > 1 else -MAX_W)
+    else:
+        stop_locked_global_heading = ((heading_deg - target) + 180) % 360 - 180
+        stop_pivot_w = -MAX_W if abs(target) < 5 else -math.copysign(MAX_W, target)
+
+
+def find_vw_command(scan_points, heading_deg):
+    """STOP zone 우선 검사 → 활성 시 후진→피봇 탈출, 아니면 계층형 처리.
+
+    상태 (stop_phase):
+      0 = idle (정상 주행)
+      1 = 후진  : 전방 장애물에서 STOP_REVERSE_EXTRA mm 거리 확보까지 후진
+      2 = 피봇  : 360° 갭 방향으로 피봇, STOP 존 해제되면 즉시 layered 복귀
+    """
+    global stop_cycle_count, stop_pivot_w, stop_locked_target, stop_locked_gap, \
+           stop_locked_global_heading, stop_phase, stop_reverse_init_dist
+
+    # ── Phase 1: 후진 중 ──────────────────────────────────────────────────────
+    if stop_phase == 1:
+        stop_cycle_count += 1
+        cur_dist    = get_stop_fwd_dist(scan_points)
+        target_dist = stop_reverse_init_dist + STOP_REVERSE_EXTRA
+        if cur_dist >= target_dist or stop_cycle_count >= STOP_REVERSE_MAX_CYCLES:
+            # 거리 확보 완료 (또는 타임아웃) → 360° 갭 탐색 후 피봇 진입
+            target, gap_width, gap_info = find_stop_escape_direction(scan_points)
+            _stop_set_pivot(heading_deg, target, gap_width)
             stop_cycle_count = 0
-            stop_pivot_w     = 0.0
+            stop_phase       = 2
+            if DEBUG_STOP:
+                gained = cur_dist - stop_reverse_init_dist
+                print(f"  [STOP] reverse done dist={cur_dist:.0f}mm (+{gained:.0f}mm) "
+                      f"-> pivot target={target:+.0f}° "
+                      f"global={stop_locked_global_heading:.1f}°")
+        else:
+            if DEBUG_STOP:
+                print(f"  [STOP] reversing dist={cur_dist:.0f}mm / need={target_dist:.0f}mm "
+                      f"(cycle {stop_cycle_count}/{STOP_REVERSE_MAX_CYCLES})")
+        return -STOP_REVERSE_SPEED, 0.0
+
+    # ── Phase 2: 피봇 중 ──────────────────────────────────────────────────────
+    if stop_phase == 2:
+        # STOP 존 해제가 헤딩 수렴보다 우선 — 방향이 조금 어긋나도 일단 주행 재개
+        if not detect_stop_zone(scan_points):
+            if DEBUG_STOP:
+                err = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
+                print(f"  [STOP] zone cleared (heading err={err:.1f}°) -> layered")
+            _stop_reset()
             return find_vw_layered(scan_points, heading_deg)
 
-    if detect_stop_zone(scan_points) and stop_cycle_count < STOP_MAX_CYCLES:
-
-        if stop_cycle_count == 0:
-            # 첫 진입: FGM으로 탈출 방향 계산 후 세션 내 고정
-            target, gap_width, gap_info = find_stop_escape_direction(scan_points)
-            stop_locked_target = target
-            stop_locked_gap    = gap_width
-            # 전역 목표 헤딩 계산: 로봇이 target 방향을 정면으로 보려면
-            # CW(+angle)=heading 감소, CCW(-angle)=heading 증가 → 목표 = H - target
-            if gap_width == 0:
-                # 갭 없음: 절대 헤딩 0°를 향해 피봇 (STOP존 벗어나면 자동 layered 복귀)
-                stop_locked_global_heading = 0.0
-                stop_pivot_w = -math.copysign(MAX_W, heading_deg) if abs(heading_deg) > 1 else -MAX_W
-            else:
-                stop_locked_global_heading = ((heading_deg - target) + 180) % 360 - 180
-                if abs(target) < 5:
-                    stop_pivot_w = -MAX_W  # 정면이 가장 빈 경우 default 우회전
-                else:
-                    stop_pivot_w = -math.copysign(MAX_W, target)
-            # STOP 이벤트 저장 (viz.py로 시각화 가능)
-            _fname = f'stop_event_{int(time.time())}.json'
-            with open(_fname, 'w') as _f:
-                json.dump({
-                    'heading':  heading_deg,
-                    'target':   target,
-                    'gap_dist': gap_width,
-                    'gap_info': gap_info,
-                    'scan':     [[a, d] for a, d in scan_points if d > 0],
-                }, _f)
-            if DEBUG_STOP:
-                print(f"  [STOP] event saved → {_fname}  "
-                      f"global_target={stop_locked_global_heading:.1f}°")
-        else:
-            target    = stop_locked_target
-            gap_width = stop_locked_gap
-
-        pivot_w = stop_pivot_w
         stop_cycle_count += 1
+        if stop_cycle_count >= STOP_MAX_CYCLES:
+            if DEBUG_STOP:
+                print(f"  [STOP] max pivot cycles ({STOP_MAX_CYCLES}) -> force layered")
+            _stop_reset()
+            return find_vw_layered(scan_points, heading_deg)
 
-        # 헤딩 오차 비례 피봇 속도 (가까울수록 감속, 오버슈트 방지)
-        pivot_sign = math.copysign(1.0, pivot_w)
-        err_now = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
-        dyn_w = pivot_sign * min(STOP_PIVOT_MAX_W, STOP_PIVOT_K * err_now)
-        dyn_w = math.copysign(max(abs(dyn_w), W_MIN_DANGER), pivot_sign)
-
+        pivot_sign = math.copysign(1.0, stop_pivot_w)
+        err_now    = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
+        dyn_w      = pivot_sign * min(STOP_PIVOT_MAX_W, STOP_PIVOT_K * err_now)
+        dyn_w      = math.copysign(max(abs(dyn_w), W_MIN_DANGER), pivot_sign)
         if DEBUG_STOP:
-            print(f"  [STOP] zone detected (cycle {stop_cycle_count}/{STOP_MAX_CYCLES}) "
-                  f"-> escape target={target:+.0f}° "
-                  f"(width={gap_width:.0f}mm) err={err_now:.1f}° pivot w={dyn_w:+.2f}")
-
+            print(f"  [STOP] pivoting (cycle {stop_cycle_count}/{STOP_MAX_CYCLES}) "
+                  f"target={stop_locked_target:+.0f}° "
+                  f"(width={stop_locked_gap:.0f}mm) err={err_now:.1f}° w={dyn_w:+.2f}")
         return 0.0, dyn_w
 
-    # STOP 존을 성공적으로 벗어났거나 강제 탈출 시 초기화
-    if stop_cycle_count > 0:
-        if stop_cycle_count >= STOP_MAX_CYCLES and DEBUG_STOP:
-            print(f"  [STOP] max cycles reached ({STOP_MAX_CYCLES}) -> force layered mode")
-        stop_cycle_count = 0
-        stop_pivot_w     = 0.0
+    # ── Phase 0: 정상 → STOP 감지 시 후진 시작 ───────────────────────────────
+    if detect_stop_zone(scan_points):
+        stop_phase             = 1
+        stop_cycle_count       = 0
+        stop_reverse_init_dist = get_stop_fwd_dist(scan_points)
+        # 트리거 시점 스캔 저장 (viz.py 시각화용)
+        target, gap_width, gap_info = find_stop_escape_direction(scan_points)
+        _fname = f'stop_event_{int(time.time())}.json'
+        with open(_fname, 'w') as _f:
+            json.dump({
+                'heading':  heading_deg,
+                'target':   target,
+                'gap_dist': gap_width,
+                'gap_info': gap_info,
+                'scan':     [[a, d] for a, d in scan_points if d > 0],
+            }, _f)
+        if DEBUG_STOP:
+            print(f"  [STOP] triggered -> reversing "
+                  f"(init_dist={stop_reverse_init_dist:.0f}mm) event saved {_fname}")
+        return -STOP_REVERSE_SPEED, 0.0
 
     return find_vw_layered(scan_points, heading_deg)
 
