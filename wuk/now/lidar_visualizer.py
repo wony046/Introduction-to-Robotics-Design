@@ -35,14 +35,14 @@ W_MIN_DANGER     = 0.5
 LAYER_PERCENTILE = 5
 SCORE_ALPHA      = 5.0
 SCORE_BETA       = 8        # 정면 방향 영향 (약화)
-SCORE_SIDE       = 10000.0  # 측방 방향 가중치 (주도)
+SCORE_SIDE       = 2000.0   # 측방 방향 가중치 (주도)
 DEPTH_JUMP_THRES = 120
 
 LAYERS = [
     # L1: 가장 가까움, 동적 가중치, weight_cap=7.5, v_max=0.30
-    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':120, 'color':'#FF4444',
+    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':140, 'color':'#FF4444',
      'w_gain':2.8, 'weight_base':0.8, 'weight_cap':7.5, 'weight_dynamic':True,
-     'v_max':0.30, 'affects_v':True},
+     'v_max':0.22, 'affects_v':True},
     # L2: 가까움, 동적 가중치, weight_cap=4.5, v_max=0.38
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':120, 'color':'#FF8800',
      'w_gain':2.5, 'weight_base':0.6, 'weight_cap':4.5, 'weight_dynamic':True,
@@ -69,7 +69,7 @@ SIDE_OUTER        = SIDE_INNER + SIDE_SAFE_MARGIN  # 300 mm
 SIDE_FWD_LEAD     = 80
 SIDE_FWD_REAR     = 80
 SIDE_REPULSE_GAIN = 0.8
-SIDE_EXP_K        = 3.0
+SIDE_EXP_K        = 2.0
 SCAN_WIDE_HALF    = 135
 
 # ── side layer parameters (jw_won.py: get_side_layer_push) ───────────────────
@@ -77,7 +77,7 @@ SCAN_WIDE_HALF    = 135
 SIDE_LAYER_ANG_START = 15   # deg
 SIDE_LAYER_ANG_END   = 75   # deg
 SIDE_LAYER_DIST_MAX  = 600  # mm
-SIDE_W_MAG_GAIN      = 1.0  # 측방 push 기반 w_mag: obstacle_push × MAX_W × gain
+SIDE_W_BOOST_GAIN    = 3.0  # 측방 레이어 net delta 계수 (부호 있는 합산)
 
 # ── path prediction / strength bar display ────────────────────────────────────
 PREDICT_SEC = 1.5    # s: how far ahead to draw the predicted path
@@ -327,7 +327,7 @@ def _compute_vw(scan_norm):
     Port of find_vw_layered.
     Returns (v, w_base, w_with_side):
       w_base      = direction * forward_urgency  (정면 레이어만, 회색 경로)
-      w_with_side = direction * w_mag            (측방 push 기반 크기 교체 후, 초록 경로 기준)
+      w_with_side = w_base + side_w_delta        (측방 net delta 합산 후, 초록 경로 기준)
     heading_deg assumed 0 (no IMU in visualizer).
     """
     layer_results = [r for r in (_process_layer(scan_norm, L) for L in LAYERS)
@@ -360,11 +360,9 @@ def _compute_vw(scan_norm):
     forward_urgency = max(min(forward_urgency, MAX_W), W_MIN_DANGER)
     w_base          = direction * forward_urgency
 
-    # 방향과 일치하는 측방 push: 있으면 primary, 없으면 forward_urgency fallback
-    obstacle_push = side_right_push if direction > 0 else side_left_push
-    w_mag         = max(forward_urgency, obstacle_push * MAX_W * SIDE_W_MAG_GAIN)
-    w_mag         = max(min(w_mag, MAX_W), W_MIN_DANGER)
-    w_with_side   = direction * w_mag
+    # 측방 레이어 net delta: 부호 있는 합산 (방향과 같으면 크기 증가, 반대면 감소)
+    side_w_delta = (side_right_push - side_left_push) * SIDE_W_BOOST_GAIN
+    w_with_side  = w_base + side_w_delta
 
     v_layers = [r for r in layer_results if r['v_proposal'] is not None]
     if v_layers:
@@ -472,7 +470,7 @@ def update(_frame):
     bx, by = _predict_path(v, w_base)
     path_base_line.set_data(bx, by)
 
-    # 초록 실선: 측방 push 크기 교체 + 측면 반발력 합산 후
+    # 초록 실선: 측방 net delta + 측면 반발력 합산 후
     gx, gy = _predict_path(v, w_total)
     path_line.set_data(gx, gy)
     path_tip.set_data([gx[-1]], [gy[-1]])
@@ -506,7 +504,7 @@ def update(_frame):
         f'Nearest    : {nd:.0f}mm @ {na:+.1f}deg\n'
         f'v          : {v:.3f} m/s\n'
         f'w_base     : {w_base:+.3f} rad/s  (gray, fwd urgency only)\n'
-        f'w_side     : {w_with_side:+.3f} rad/s  (green base, obs_push applied)\n'
+        f'side delta : {w_with_side - w_base:+.3f} rad/s  (net: L={side_left_push:.2f} R={side_right_push:.2f})\n'
         f'side rep dw: {side_dw:+.3f} rad/s  L={left_str:.2f} R={right_str:.2f}\n'
         f'w_total    : {w_total:+.3f} rad/s  [{dir_str}]  (green path)'
     )
