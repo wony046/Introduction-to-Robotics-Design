@@ -12,7 +12,7 @@ ARDUINO_PORT     = "/dev/ttyAMA3"
 BAUDRATE_LIDAR   = 460800
 BAUDRATE_ARDUINO = 115200
 
-LIDAR_OFFSET    = 0     # mm: 라이다 측정값 보정
+LIDAR_OFFSET    = 10     # mm: 라이다 측정값 보정
 LIDAR_MIN_VALID = 100   # mm: 이 미만 무시 (노이즈)
 DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 

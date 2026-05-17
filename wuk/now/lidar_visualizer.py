@@ -38,7 +38,7 @@ SCORE_BETA       = 20.0
 DEPTH_JUMP_THRES = 120
 
 LAYERS = [
-    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200, 'color':'#FF4444',
+    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':220, 'color':'#FF4444',
      'w_gain':2.8, 'weight_base':0.8, 'weight_dynamic':True,  'affects_v':True},
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':200, 'color':'#FF8800',
      'w_gain':2.5, 'weight_base':0.6, 'weight_dynamic':True,  'affects_v':True},
