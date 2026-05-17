@@ -38,7 +38,7 @@ LAYERS = [
     {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':200,
      'w_gain':2.8, 'weight_base':0.8, 'weight_dynamic':True,  'affects_v':True},
     # L2: 가까움, 동적 가중치
-    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':190,
+    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':200,
      'w_gain':2.5, 'weight_base':0.6, 'weight_dynamic':True,  'affects_v':True},
     # L3: 중간 (weight: 진입 0.4 → 끝 0.2 선형 보간)
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140,
