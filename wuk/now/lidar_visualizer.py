@@ -86,7 +86,7 @@ SCAN_WIDE_HALF    = 135
 SIDE_LAYER_ANG_START = 15   # deg
 SIDE_LAYER_ANG_END   = 75   # deg
 SIDE_LAYER_DIST_MAX  = 600  # mm
-SIDE_W_BOOST_GAIN    = 5.0  # 측방 레이어 net delta 계수 (부호 있는 합산)
+SIDE_W_BOOST_GAIN    = 0.9  # 측방 레이어 net delta 계수 (부호 있는 합산)
 
 # ── path prediction / strength bar display ────────────────────────────────────
 PREDICT_SEC = 1.5    # s: how far ahead to draw the predicted path

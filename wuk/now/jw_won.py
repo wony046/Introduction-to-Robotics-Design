@@ -89,7 +89,7 @@ SCORE_GAP_FRONT      = 1500.0 # 전방 통과 가능 갭 방향 보너스 계수
 
 SCORE_ALPHA       = 5.0    # gap_width 계수
 SCORE_BETA        = 8     # 정면 레이어 push 계수
-SCORE_SIDE        = 2500.0  # 측방 레이어 방향 가중치 
+SCORE_SIDE        = 2500.0  # 측방 레이어 방향 가중치
 HEADING_WEIGHT_MM = 5.0    # 헤딩 1° = 여유 5mm
 DEPTH_JUMP_THRES  = 120    # mm: 이상이면 다른 물체로 인식
 
@@ -117,12 +117,29 @@ SIDE_LAYER_ANG_END   = 75   # deg: 측방 레이어 바깥 경계
 SIDE_LAYER_DIST_MAX  = 600  # mm: 측방 감지 최대 거리
 SIDE_W_BOOST_GAIN    = 5.0  # rad/s: 측방 레이어 w 크기 기여 계수 (우측 push → +w, 좌측 push → -w)
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# [추가] 가상 장애물 (통과 불가 갭)  ─ 코드 1에서 이식
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# [Option A] MIN_PASSAGE_WIDTH 를 STOP_ESCAPE_MIN_GAP 과 동일하게 정렬.
+#   → "통과 가능" 정의가 front gap bonus 와 가상 장애물에서 일치
+#   → 모든 갭은 항상 척력(< 기준) 또는 보너스(>= 기준), 중립 구간 없음
+#   → 기준 한 곳(STOP_ESCAPE_MIN_GAP)만 바꾸면 두 시스템이 함께 따라감
+
+MIN_PASSAGE_WIDTH       = STOP_ESCAPE_MIN_GAP  # 260mm: 이 미만 갭 → 통과 불가 → 가상 장애물
+VIRTUAL_OBS_GAIN        = 1.5   # 가상 장애물 척력 배율 (레이어별 horiz_th 기준)
+VIRTUAL_CENTER_DEADBAND = 10    # deg: 갭 중심이 ±이내면 정면 → 양쪽 동등 척력
+                                 # 0° 근처 노이즈로 인한 방향 편향 방지
+VIRTUAL_EXP_K           = 2.5   # 지수 계수: 클수록 좁은 갭에서 척력이 급격히 증가
+                                 # 1.0=거의 선형 / 2.5=권장 / 3.5=급격 / 5.0↑=거의 이진
+                                 # SIDE_EXP_K(2.0)보다 약간 크게 (갭은 더 민감하게)
+
 # ── 디버그 토글 ──────────────────────────────────────────────────────────────
-DEBUG_LAYERS = True    # 각 레이어 처리 결과
-DEBUG_STOP   = True    # STOP zone 감지 & 탈출
-DEBUG_DIR    = True    # 점수 계산 & 방향 결정
-DEBUG_FINAL  = True    # 최종 v, w
-DEBUG_SIDE   = True    # 측면 반발력
+DEBUG_LAYERS  = True    # 각 레이어 처리 결과
+DEBUG_STOP    = True    # STOP zone 감지 & 탈출
+DEBUG_DIR     = True    # 점수 계산 & 방향 결정
+DEBUG_FINAL   = True    # 최종 v, w
+DEBUG_SIDE    = True    # 측면 반발력
+DEBUG_VIRTUAL = True    # [추가] 가상 장애물 디버그
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
@@ -341,7 +358,6 @@ def find_stop_escape_direction(scan_points, heading_deg=0.0):
         for g in gaps
     ]
     return float(chosen['center_angle']), float(chosen['width']), gap_info
-
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -623,6 +639,157 @@ def get_front_passable_gaps(scan_points):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# [추가] 통과 불가 갭 → 가상 장애물 척력  ─ 코드 1에서 이식
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def get_narrow_gap_pushes(scan_points, layer, in_stop=False):
+    """
+    레이어 fwd 범위 내에서 통과 불가 갭을 탐지 → 가상 장애물 척력 반환.
+
+    [Option A] MIN_PASSAGE_WIDTH == STOP_ESCAPE_MIN_GAP 으로 정렬되어,
+    이 함수가 척력을 거는 갭(< 기준)과 get_front_passable_gaps 가 보너스를
+    주는 갭(>= 기준)이 동일 기준으로 깔끔히 분리됨 (중립 구간 없음).
+
+    [보완 사항]
+
+    ① depth jump 방향 구분 (벽 끝 오인 방지)
+       opening edge (d 증가): 장애물 오른쪽 끝
+       closing edge (d 감소): 장애물 왼쪽 끝
+       → opening-closing 쌍으로 매칭해야 실제 갭
+       → opening만 있고 closing 없음 = 벽 끝 → 자동 스킵
+
+    ② 수평 너비 사용 (코사인 거리 대신)
+       x = d × sin(angle) → |x_closing - x_opening| = 실제 통과 가능 수평 폭
+
+    ③ 정면 데드밴드 (±VIRTUAL_CENTER_DEADBAND)
+       갭 중심이 0° 근처 → 양쪽 동등한 0.5×strength
+
+    ④ STOP 피봇 중 비활성화
+       in_stop=True → 즉시 0.0, 0.0 반환
+
+    ⑤ 이중 반응 억제 (overlap_scale)
+       갭 에지 horiz vs 레이어 horiz_th 비교
+       - 양쪽 에지 모두 horiz_th 이내: scale=0.0 (완전 억제)
+       - 한쪽만 horiz_th 이내: scale=0.4 (부분 억제)
+       - 양쪽 모두 horiz_th 밖: scale=1.0 (억제 없음)
+    """
+    # ④ STOP 피봇 중 비활성화
+    if in_stop:
+        return 0.0, 0.0
+
+    # 레이어 fwd 범위 내 포인트 수집 (horiz 제한 없음)
+    pts = []
+    for angle_norm, dist in scan_points:
+        if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE:
+            continue
+        if not is_in_front_90(angle_norm):
+            continue
+        _, fwd = decompose(angle_norm, dist)
+        if layer['fwd_min'] <= fwd < layer['fwd_max']:
+            pts.append((angle_norm, dist))
+
+    if len(pts) < 2:
+        return 0.0, 0.0
+
+    pts_sorted = sorted(pts, key=lambda p: p[0])
+
+    # ── ① opening / closing 에지 분리 ──────────────────────────────────────
+    opening_edges = []
+    closing_edges = []
+
+    for i in range(len(pts_sorted) - 1):
+        a1, d1 = pts_sorted[i]
+        a2, d2 = pts_sorted[i + 1]
+        if abs(d2 - d1) <= DEPTH_JUMP_THRES:
+            continue
+        if d2 > d1:
+            # d 증가: 왼쪽 장애물의 오른쪽 끝
+            opening_edges.append((a1, d1))
+        else:
+            # d 감소: 오른쪽 장애물의 왼쪽 끝
+            closing_edges.append((a2, d2))
+
+    if not opening_edges or not closing_edges:
+        return 0.0, 0.0
+
+    virtual_push_left  = 0.0
+    virtual_push_right = 0.0
+
+    for ao, do in opening_edges:
+        # ao보다 오른쪽(큰 각도)의 closing edge 중 가장 가까운 것 = 갭 반대편
+        candidates = [(ac, dc) for ac, dc in closing_edges if ac > ao]
+        if not candidates:
+            # 이후 closing edge 없음 = 벽 끝 → 열린 공간 → 스킵
+            continue
+
+        ac, dc = min(candidates, key=lambda x: x[0])
+
+        # ── ② 수평 너비 계산 (x좌표 차이) ────────────────────────────────
+        xo = do * math.sin(math.radians(ao))
+        xc = dc * math.sin(math.radians(ac))
+        gap_width = abs(xc - xo)
+
+        if gap_width >= MIN_PASSAGE_WIDTH:
+            continue
+
+        # ── ⑤ 이중 반응 억제: overlap_scale ──────────────────────────────
+        horiz_o   = abs(xo)
+        horiz_c   = abs(xc)
+        inside_o  = horiz_o < layer['horiz_th']
+        inside_c  = horiz_c < layer['horiz_th']
+
+        if inside_o and inside_c:
+            overlap_scale = 0.0
+        elif inside_o or inside_c:
+            overlap_scale = 0.4
+        else:
+            overlap_scale = 1.0
+
+        if overlap_scale == 0.0:
+            if DEBUG_VIRTUAL:
+                print(f"  [VIRTUAL/{layer['name']}] skip: 양쪽 에지 모두 horiz_th 이내 "
+                      f"(ho={horiz_o:.0f} hc={horiz_c:.0f} th={layer['horiz_th']})")
+            continue
+
+        # ── 지수함수 척력 계산 ────────────────────────────────────────────
+        # t: 갭 여유 비율 (0=완전 막힘, 1=간당간당 통과 경계)
+        t         = gap_width / MIN_PASSAGE_WIDTH
+        t         = max(0.0, min(1.0, t))   # 갭이 음수/초과 노이즈 클리핑
+        exp_ratio = (math.exp(VIRTUAL_EXP_K * (1.0 - t)) - 1.0) \
+                  / (math.exp(VIRTUAL_EXP_K) - 1.0)
+        strength  = exp_ratio * layer['horiz_th'] * VIRTUAL_OBS_GAIN * overlap_scale
+
+        center_angle = (ao + ac) / 2.0
+
+        # ── ③ 정면 데드밴드: 양쪽 동등 척력 ──────────────────────────────
+        if abs(center_angle) < VIRTUAL_CENTER_DEADBAND:
+            half = strength * 0.5
+            virtual_push_left  = max(virtual_push_left,  half)
+            virtual_push_right = max(virtual_push_right, half)
+            if DEBUG_VIRTUAL:
+                print(f"  [VIRTUAL/{layer['name']}] CENTER "
+                      f"gap={gap_width:.0f}mm t={t:.2f} exp={exp_ratio:.2f} "
+                      f"center={center_angle:+.1f}° scale={overlap_scale:.1f} "
+                      f"→ both={half:.0f}mm (deadband)")
+        elif center_angle < 0:
+            virtual_push_left  = max(virtual_push_left,  strength)
+            if DEBUG_VIRTUAL:
+                print(f"  [VIRTUAL/{layer['name']}] L "
+                      f"gap={gap_width:.0f}mm t={t:.2f} exp={exp_ratio:.2f} "
+                      f"center={center_angle:+.1f}° scale={overlap_scale:.1f} "
+                      f"→ vL={strength:.0f}mm")
+        else:
+            virtual_push_right = max(virtual_push_right, strength)
+            if DEBUG_VIRTUAL:
+                print(f"  [VIRTUAL/{layer['name']}] R "
+                      f"gap={gap_width:.0f}mm t={t:.2f} exp={exp_ratio:.2f} "
+                      f"center={center_angle:+.1f}° scale={overlap_scale:.1f} "
+                      f"→ vR={strength:.0f}mm")
+
+    return virtual_push_left, virtual_push_right
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 계층형 v/w 산출 (메인 로직)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -631,6 +798,8 @@ def find_vw_layered(scan_points, heading_deg):
     1. 6개 레이어 병렬 처리
     2. gap 너비 계산 (가장 가까운 레이어의 대표점 기준)
     3. 좌우 점수 통합 → 방향 결정 (매 사이클 score로 재결정)
+       - [추가] 통과 불가 갭 가상 장애물 척력 반영
+         이중 반응 방지를 위해 effective_push = max(real, virtual)
     4. v: affects_v 레이어 v_proposal의 가중 평균
     5. w: 모든 활성 레이어 urgency의 가중 평균 × direction
     6. w 보정: 측방 레이어 net delta + 측면 반발력 합산
@@ -696,13 +865,31 @@ def find_vw_layered(scan_points, heading_deg):
     sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
     sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
 
+    # 3-2. [추가] 가상 장애물 척력 (통과 불가 갭) — 레이어별 max 취합
+    #   레이어 경계 중복 가산 없음. STOP 피봇 중에는 비활성화.
+    virt_push_L_total = 0.0
+    virt_push_R_total = 0.0
+    for layer in LAYERS:
+        vpl, vpr = get_narrow_gap_pushes(
+            scan_points, layer,
+            in_stop=(stop_phase == 2)
+        )
+        virt_push_L_total = max(virt_push_L_total, vpl)
+        virt_push_R_total = max(virt_push_R_total, vpr)
+
+    # ── 이중 반응 안전망: max(실제, 가상) → 더 강한 신호 하나만 적용 ─────────
+    #   sum_pR / virt_push_R_total : 오른쪽 장애물·불통과 갭 → 둘 다 score_L 기여
+    #   같은 방향 신호이므로 합산 대신 max() 사용
+    effective_push_R = max(sum_pR, virt_push_R_total)
+    effective_push_L = max(sum_pL, virt_push_L_total)
+
     # 측방 레이어 방향 기여 (방향 결정 주도)
     side_left_push, side_right_push = get_side_layer_push(scan_points)
 
     term_gap_L    = SCORE_ALPHA * gap_L
     term_gap_R    = SCORE_ALPHA * gap_R
-    term_push_L   = SCORE_BETA  * sum_pR
-    term_push_R   = SCORE_BETA  * sum_pL
+    term_push_L   = SCORE_BETA  * effective_push_R
+    term_push_R   = SCORE_BETA  * effective_push_L
     term_side_L   = SCORE_SIDE  * side_right_push
     term_side_R   = SCORE_SIDE  * side_left_push
     term_head_L   = max(0.0, -heading_deg) * HEADING_WEIGHT_MM
@@ -716,7 +903,9 @@ def find_vw_layered(scan_points, heading_deg):
               f"(ref={ref_angle:+.1f}°/{ref_dist:.0f}mm from {closest['name']})")
         print(f"  [SCORE] L={score_L:.0f}  R={score_R:.0f}")
         print(f"    gap   αL={term_gap_L:.0f} / αR={term_gap_R:.0f}")
-        print(f"    push  βL={term_push_L:.0f} / βR={term_push_R:.0f}")
+        print(f"    push  βL={term_push_L:.0f} / βR={term_push_R:.0f}  "
+              f"[real {SCORE_BETA*sum_pR:.0f}/{SCORE_BETA*sum_pL:.0f}  "
+              f"virt {SCORE_BETA*virt_push_R_total:.0f}/{SCORE_BETA*virt_push_L_total:.0f}]")
         print(f"    side  γL={term_side_L:.0f} / γR={term_side_R:.0f}")
         print(f"    head  hL={term_head_L:.0f} / hR={term_head_R:.0f}")
         print(f"    fgap  fL={gap_bonus_L:.0f} / fR={gap_bonus_R:.0f}")
@@ -908,18 +1097,24 @@ def _motor_controller(arduino):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def main():
-    print("=== RPLIDAR Obstacle Avoidance (Layered Bounding Box) ===")
+    print("=== RPLIDAR Obstacle Avoidance (Layered + Front Gap + Virtual Obstacle) ===")
     print(f"  Layers      : 6 layers (60~780mm), bottom {LAYER_PERCENTILE}% per layer")
     print(f"  L1-L3       : dynamic weight max(base, h_err/h_th*cap), affects v")
     print(f"  L4          : interp weight (0.2→0.1), affects v")
     print(f"  L5-L6       : interp weight (L5: 0.1→0.05, L6: 0.05→0.02), no v effect")
     print(f"  STOP zone   : fwd {STOP_FWD_MIN}-{STOP_FWD_MAX}mm, horiz<{STOP_HORIZ_TH}mm")
-    print(f"  STOP escape : 360deg scan, "
-          f"min_gap={STOP_ESCAPE_MIN_GAP}mm")
-    print(f"  Scoring     : alpha={SCORE_ALPHA} beta={SCORE_BETA}")
+    print(f"  STOP escape : 360deg scan, min_gap={STOP_ESCAPE_MIN_GAP}mm")
+    print(f"  Front gap   : bonus for passable gap (min_w={STOP_ESCAPE_MIN_GAP}mm "
+          f"min_d={FRONT_GAP_MIN_DEPTH}mm)")
+    print(f"  Virtual obs : MIN_PASSAGE={MIN_PASSAGE_WIDTH}mm (= STOP_ESCAPE_MIN_GAP) "
+          f"GAIN={VIRTUAL_OBS_GAIN} EXP_K={VIRTUAL_EXP_K} "
+          f"DEADBAND=±{VIRTUAL_CENTER_DEADBAND}°")
+    print(f"  Scoring     : alpha={SCORE_ALPHA} beta={SCORE_BETA} "
+          f"(real/virtual push: max 선택)")
     print(f"  Direction   : score-based per cycle (no locking anywhere)")
     print(f"  Debug flags : LAYERS={DEBUG_LAYERS} STOP={DEBUG_STOP} "
-          f"DIR={DEBUG_DIR} FINAL={DEBUG_FINAL}")
+          f"DIR={DEBUG_DIR} FINAL={DEBUG_FINAL} "
+          f"SIDE={DEBUG_SIDE} VIRTUAL={DEBUG_VIRTUAL}")
     print("=" * 70)
 
     lidar   = serial.Serial(LIDAR_PORT,   BAUDRATE_LIDAR,   timeout=1)
