@@ -85,9 +85,9 @@ ax1.set_ylim(-600, 1800)
 ax1.set_aspect('equal')
 ax1.axhline(0, color='gray', lw=0.5, zorder=1)
 ax1.axvline(0, color='gray', lw=0.5, zorder=1)
-ax1.set_xlabel('← Left  |  Lateral (mm)  |  Right →')
-ax1.set_ylabel('Forward (mm) ↑')
-ax1.set_title('Top-down View  (레이어 박스 + STOP zone)')
+ax1.set_xlabel('<- Left  |  Lateral (mm)  |  Right ->')
+ax1.set_ylabel('Forward (mm)')
+ax1.set_title('Top-down View  (Layer boxes + STOP zone)')
 ax1.grid(True, alpha=0.2, zorder=0)
 ax1.legend(fontsize=7, loc='upper right')
 
@@ -100,9 +100,9 @@ near_ann   = ax1.text(0, -460, '', ha='center', fontsize=9,
 # ── ax2: 정적 요소 ────────────────────────────────────────────────────────────
 ax2.set_xlim(-180, 180)
 ax2.set_ylim(0, DETECTION_RANGE)
-ax2.set_xlabel('Angle (deg)   ← Left (−) | (+) Right →')
+ax2.set_xlabel('Angle (deg)   <- Left (-) | (+) Right ->')
 ax2.set_ylabel('Distance (mm)')
-ax2.set_title('Distance vs Angle  (전 방향 360°)')
+ax2.set_title('Distance vs Angle  (360 deg)')
 ax2.grid(True, alpha=0.3)
 ax2.axhline(STOP_FWD_MIN, color='red', lw=1.2, linestyle='--',
             alpha=0.6, label=f'STOP min {STOP_FWD_MIN}mm')
@@ -117,10 +117,12 @@ near_vline  = ax2.axvline(0, color='orange', lw=1.8, linestyle='--', alpha=0.0)
 near_hline  = ax2.axhline(0, color='orange', lw=1.2, linestyle=':', alpha=0.0)
 near_label  = ax2.text(0, 0, '', fontsize=8, color='darkorange',
                        fontweight='bold', va='bottom')
-title_txt   = fig.suptitle('LIDAR Monitor', fontsize=11, fontweight='bold')
+
+fig.suptitle('LIDAR Real-time Monitor', fontsize=11, fontweight='bold')
+dyn_title = ax1.title   # ax1 title을 동적 정보 표시에 사용
 
 DYNAMIC_ARTISTS = (scan_line, stop_line, near_ann,
-                   dist_line, near_vline, near_hline, near_label, title_txt)
+                   dist_line, near_vline, near_hline, near_label, dyn_title)
 
 # ── 스캔 버퍼 ─────────────────────────────────────────────────────────────────
 current_scan = []
@@ -189,10 +191,9 @@ def update(_frame):
         counts.append(f"{layer['name']}:{np.sum(m)}")
 
     stop_n = int(np.sum(stop_mask))
-    stop_str = f"  ⚠ STOP ({stop_n}pts)" if stop_n else ""
-    title_txt.set_text(
-        f"LIDAR Monitor  |  {len(arr)}pts  |  nearest {nd:.0f}mm @ {na:+.1f}°{stop_str}\n"
-        f"Layers: {' '.join(counts)}"
+    stop_str = f"  STOP! ({stop_n}pts)" if stop_n else ""
+    dyn_title.set_text(
+        f"Top-down View  |  {len(arr)}pts  nearest {nd:.0f}mm @ {na:+.1f}deg{stop_str}"
     )
 
     return DYNAMIC_ARTISTS
