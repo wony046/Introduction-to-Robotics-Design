@@ -63,10 +63,11 @@ SIDE_REPULSE_GAIN = 0.8
 SIDE_EXP_K        = 3.0
 SCAN_WIDE_HALF    = 135
 
-# ── strength bar / arc display ────────────────────────────────────────────────
-SBAR_Y     = -170   # mm: y-position of strength bars
-SBAR_SCALE = 140    # mm per unit strength
-ARC_R      = 75     # mm: rotation arc radius
+# ── path prediction / strength bar display ────────────────────────────────────
+PREDICT_SEC = 1.5    # s: how far ahead to draw the predicted path
+PREDICT_N   = 50     # number of integration steps
+SBAR_Y      = -170   # mm: y-position of side strength bars
+SBAR_SCALE  = 140    # mm per unit strength (max bar length)
 
 # ── figure ────────────────────────────────────────────────────────────────────
 fig, ax = plt.subplots(figsize=(8, 10))
@@ -88,6 +89,8 @@ ax.add_patch(patches.Rectangle(
 ))
 
 # ── static: side repulsion detection zones (purple dashed) ────────────────────
+# Left:  x [-300, -110],  y [-240, +50]
+# Right: x [+110, +300],  y [-240, +50]
 _sw = SIDE_OUTER - SIDE_INNER        # 190 mm
 _sh = SIDE_FWD_REAR + SIDE_FWD_LEAD  # 290 mm
 ax.add_patch(patches.Rectangle(
@@ -110,16 +113,6 @@ ax.add_patch(patches.FancyBboxPatch(
 ax.annotate('', xy=(0, 200), xytext=(0, 90),
             arrowprops=dict(arrowstyle='->', color='black', lw=2.5), zorder=5)
 ax.text(0, 215, 'fwd', ha='center', fontsize=8)
-
-# ── static: rotation arc reference circle ─────────────────────────────────────
-# Parametrization: x=r*sin(t), y=r*cos(t)
-#   t=0   → top (0, r) = forward direction
-#   t > 0 → sweeps right  = CW  = right turn (negative w)
-#   t < 0 → sweeps left   = CCW = left  turn (positive w)
-_t_bg = np.linspace(0, 2 * math.pi, 80)
-ax.plot(ARC_R * np.sin(_t_bg), ARC_R * np.cos(_t_bg),
-        ':', color='lightgray', lw=1, alpha=0.6, zorder=3)
-ax.text(0, ARC_R + 5, 'w', ha='center', va='bottom', fontsize=7, color='gray')
 
 # ── static: strength bar backgrounds ──────────────────────────────────────────
 ax.plot([-ROBOT_HALF_WIDTH - SBAR_SCALE, -ROBOT_HALF_WIDTH], [SBAR_Y, SBAR_Y],
@@ -154,12 +147,12 @@ side_left_line,  = ax.plot([], [], 'o', color='purple', markersize=5,
 side_right_line, = ax.plot([], [], 'o', color='orchid',  markersize=5,
                            alpha=0.85, zorder=7)
 
-# w_layer arc (gray dashed): layer-based w only, BEFORE side correction
-w_base_arc,      = ax.plot([], [], '--', color='gray', lw=2.0,
-                           alpha=0.7, zorder=8)
-# w_total arc (green solid): w_layer + side_dw, the actual command sent
-rot_arc_line,    = ax.plot([], [], '-',  color='limegreen', lw=3.5, zorder=9)
-rot_arc_tip,     = ax.plot([], [], 'o',  color='limegreen', markersize=7, zorder=10)
+# Predicted path (gray dashed = w_layer only,  green solid = w_total with side correction)
+# - Curvature shows w (angular velocity): straight=0, left curve=+w, right curve=-w
+# - Length shows v (linear velocity): PREDICT_SEC seconds ahead at current speed
+path_base_line,  = ax.plot([], [], '--', color='gray',      lw=1.8, alpha=0.7, zorder=8)
+path_line,       = ax.plot([], [], '-',  color='limegreen', lw=3.0, zorder=9)
+path_tip,        = ax.plot([], [], 'o',  color='limegreen', markersize=8, zorder=10)
 
 # Side strength bars
 side_left_bar,   = ax.plot([], [], '-', color='purple', lw=5,
@@ -177,7 +170,7 @@ ax.set_title('RPLIDAR C1 - Bounding Box View')
 
 DYNAMIC_ARTISTS = (scan_line, stop_line,
                    side_left_line, side_right_line,
-                   w_base_arc, rot_arc_line, rot_arc_tip,
+                   path_base_line, path_line, path_tip,
                    side_left_bar, side_right_bar,
                    info_text, title_obj)
 
@@ -268,15 +261,16 @@ def _get_gap_width(scan_norm, ref_angle, ref_dist, is_left):
         return _cosine_dist(edge_p[1], edge_p[1], rem)
     return 0.0
 
-def _compute_layer_w(scan_norm):
+def _compute_vw(scan_norm):
     """
-    Port of find_vw_layered: returns w from layers only (no side repulsion).
+    Port of find_vw_layered.
+    Returns (v, w_layer): linear velocity and layer-based angular velocity.
     heading_deg assumed 0 (no IMU in visualizer).
     """
     layer_results = [r for r in (_process_layer(scan_norm, L) for L in LAYERS)
                      if r is not None]
     if not layer_results:
-        return 0.0
+        return FORWARD_SPEED, 0.0
 
     closest   = min(layer_results, key=lambda r: r['rep_horiz'])
     ref_angle = closest['rep_angle']
@@ -285,8 +279,8 @@ def _compute_layer_w(scan_norm):
     gap_L = _get_gap_width(scan_norm, ref_angle, ref_dist, is_left=True)
     gap_R = _get_gap_width(scan_norm, ref_angle, ref_dist, is_left=False)
 
-    sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
-    sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
+    sum_pR  = sum(r['weight'] * r['push_right'] for r in layer_results)
+    sum_pL  = sum(r['weight'] * r['push_left']  for r in layer_results)
     score_L = SCORE_ALPHA * gap_L + SCORE_BETA * sum_pR
     score_R = SCORE_ALPHA * gap_R + SCORE_BETA * sum_pL
 
@@ -294,8 +288,16 @@ def _compute_layer_w(scan_norm):
     total_w_all = sum(r['weight'] for r in layer_results)
     w_mag       = sum(r['weight'] * r['urgency'] for r in layer_results) / total_w_all
     w_mag       = max(min(w_mag, MAX_W), W_MIN_DANGER)
+    w_layer     = direction * w_mag
 
-    return direction * w_mag
+    v_layers = [r for r in layer_results if r['v_proposal'] is not None]
+    if v_layers:
+        tw = sum(r['weight'] for r in v_layers)
+        v  = sum(r['weight'] * r['v_proposal'] for r in v_layers) / tw
+    else:
+        v = FORWARD_SPEED
+
+    return v, w_layer
 
 def _exp_strength(horizs_in_zone):
     """Exponential repulsion: 1.0 at robot edge (110 mm), 0.0 at outer boundary (300 mm)."""
@@ -305,19 +307,26 @@ def _exp_strength(horizs_in_zone):
     s = (np.exp(SIDE_EXP_K * (1.0 - t)) - 1.0) / (math.exp(SIDE_EXP_K) - 1.0)
     return float(np.max(s))
 
-def _make_arc(w_val):
+def _predict_path(v, w):
     """
-    Arc for a given angular velocity w_val (range -MAX_W ~ +MAX_W).
-    Parametrization: x=r*sin(t), y=r*cos(t)
-      sweep < 0 (t decreasing from 0) -> sweeps left  = CCW = left  turn (+w)
-      sweep > 0 (t increasing from 0) -> sweeps right = CW  = right turn (-w)
+    Differential drive path prediction over PREDICT_SEC seconds.
+    Coordinate: x=lateral (right=+), y=forward (+y), robot starts at (0,0) facing +y.
+
+    Integration:
+      theta += w * dt          (w>0 = left turn = CCW)
+      x     += -v*sin(theta)*dt*1000   (m -> mm)
+      y     +=  v*cos(theta)*dt*1000
     """
-    if abs(w_val) < 0.05:
-        return np.array([]), np.array([])
-    max_sweep = 0.75 * math.pi                  # 135 deg at MAX_W
-    sweep = -(w_val / MAX_W) * max_sweep        # negative for CCW (+w = left turn)
-    t = np.linspace(0.0, sweep, 40)
-    return ARC_R * np.sin(t), ARC_R * np.cos(t)
+    dt = PREDICT_SEC / PREDICT_N
+    theta, px, py = 0.0, 0.0, 0.0
+    xs, ys = [0.0], [0.0]
+    for _ in range(PREDICT_N):
+        theta += w * dt
+        px    += -v * math.sin(theta) * dt * 1000
+        py    +=  v * math.cos(theta) * dt * 1000
+        xs.append(px)
+        ys.append(py)
+    return xs, ys
 
 
 # ── update loop ───────────────────────────────────────────────────────────────
@@ -370,24 +379,19 @@ def update(_frame):
     right_str = _exp_strength(horizs[right_mask])
     side_dw   = (right_str - left_str) * SIDE_REPULSE_GAIN
 
-    # ── layer-based w (before side correction) ────────────────────────────────
-    w_layer = _compute_layer_w(scan_norm)
+    # ── v / w from layers ─────────────────────────────────────────────────────
+    v, w_layer = _compute_vw(scan_norm)
+    w_total    = float(np.clip(w_layer + side_dw, -MAX_W, MAX_W))
 
-    # ── total w = layer + side correction ─────────────────────────────────────
-    w_total = float(np.clip(w_layer + side_dw, -MAX_W, MAX_W))
+    # ── predicted paths ───────────────────────────────────────────────────────
+    # gray dashed: path using w_layer only (before side correction)
+    bx, by = _predict_path(v, w_layer)
+    path_base_line.set_data(bx, by)
 
-    # ── arcs ──────────────────────────────────────────────────────────────────
-    # gray dashed: w_layer only (before side correction)
-    bx, by = _make_arc(w_layer)
-    w_base_arc.set_data(bx, by)
-
-    # green solid: w_total (after side correction applied)
-    ax_xs, ax_ys = _make_arc(w_total)
-    rot_arc_line.set_data(ax_xs, ax_ys)
-    if len(ax_xs) > 0:
-        rot_arc_tip.set_data([ax_xs[-1]], [ax_ys[-1]])
-    else:
-        rot_arc_tip.set_data([], [])
+    # green solid: path using w_total (layer + side correction)
+    gx, gy = _predict_path(v, w_total)
+    path_line.set_data(gx, gy)
+    path_tip.set_data([gx[-1]], [gy[-1]])
 
     # ── side strength bars ────────────────────────────────────────────────────
     if left_str > 0.02:
@@ -412,17 +416,18 @@ def update(_frame):
     na  = float(math.degrees(math.atan2(xs[idx], ys[idx])))
 
     # ── info text ─────────────────────────────────────────────────────────────
-    dir_str  = 'L(CCW)' if w_total > 0.05 else ('R(CW)' if w_total < -0.05 else 'straight')
+    dir_str  = 'L' if w_total > 0.05 else ('R' if w_total < -0.05 else 'straight')
     stop_str = '  *** STOP ***' if stop_on else ''
     info_text.set_text(
-        f'Nearest   : {nd:.0f}mm @ {na:+.1f}deg\n'
-        f'w_layer   : {w_layer:+.3f} rad/s  (gray arc)\n'
-        f'side dw   : {side_dw:+.3f} rad/s  L={left_str:.2f} R={right_str:.2f}\n'
-        f'w_total   : {w_total:+.3f} rad/s  [{dir_str}]  (green arc)'
+        f'Nearest : {nd:.0f}mm @ {na:+.1f}deg\n'
+        f'v       : {v:.3f} m/s\n'
+        f'w_layer : {w_layer:+.3f} rad/s  (gray path)\n'
+        f'side dw : {side_dw:+.3f} rad/s  L={left_str:.2f} R={right_str:.2f}\n'
+        f'w_total : {w_total:+.3f} rad/s  [{dir_str}]  (green path)'
     )
     title_obj.set_text(
         f'RPLIDAR C1 - Bounding Box View  |  '
-        f'{len(raw)}pts  nearest {nd:.0f}mm{stop_str}'
+        f'v={v:.2f}m/s  w={w_total:+.2f}rad/s  nearest {nd:.0f}mm{stop_str}'
     )
 
     return DYNAMIC_ARTISTS
