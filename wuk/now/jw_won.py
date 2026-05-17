@@ -111,6 +111,7 @@ SIDE_EXP_K        = 3.0   # 지수 계수: 클수록 근접 시 반발력이 급
 SIDE_LAYER_ANG_START = 15   # deg: 정면 레이어와 경계
 SIDE_LAYER_ANG_END   = 75   # deg: 측방 레이어 바깥 경계
 SIDE_LAYER_DIST_MAX  = 600  # mm: 측방 감지 최대 거리
+SIDE_W_BOOST_GAIN    = 0.5  # rad/s: 측방 레이어 w 크기 기여 계수 (우측 push → +w, 좌측 push → -w)
 
 # ── 디버그 토글 ──────────────────────────────────────────────────────────────
 DEBUG_LAYERS = True    # 각 레이어 처리 결과
@@ -551,12 +552,17 @@ def find_vw_layered(scan_points, heading_deg):
 
     w = direction * w_mag
 
+    # 측방 레이어 거리 기반 w 크기 보정 (부호 있는 net delta)
+    side_w_delta = (side_right_push - side_left_push) * SIDE_W_BOOST_GAIN
+    w = w + side_w_delta
+
     # 측면 반발력 합산
     side_dw, _, _ = get_side_repulsion(scan_points)
     w = max(min(w + side_dw, MAX_W), -MAX_W)
 
     if DEBUG_FINAL:
-        print(f"  [FINAL] v={v:.2f} w={w:+.2f} dir={'L' if direction > 0 else 'R'}")
+        print(f"  [FINAL] v={v:.2f} w={w:+.2f} dir={'L' if direction > 0 else 'R'} "
+              f"side_boost={side_w_delta:+.3f}")
 
     return v, w
 

@@ -29,30 +29,34 @@ STOP_HORIZ_TH    = 105
 
 DETECTION_RANGE  = 1500
 FORWARD_SPEED    = 0.45
-MIN_SPEED        = 0.15
+MIN_SPEED        = 0.12
 MAX_W            = 2.0
 W_MIN_DANGER     = 0.5
 LAYER_PERCENTILE = 5
 SCORE_ALPHA      = 5.0
-SCORE_BETA       = 8       # 정면 방향 영향 (약화)
-SCORE_SIDE       = 600.0   # 측방 방향 가중치 (주도)
+SCORE_BETA       = 8        # 정면 방향 영향 (약화)
+SCORE_SIDE       = 10000.0  # 측방 방향 가중치 (주도)
 DEPTH_JUMP_THRES = 120
 
 LAYERS = [
-    # L1: weight_cap=5.0, v_max=0.30 (근접 위험, 속도 상한 제한)
+    # L1: 가장 가까움, 동적 가중치, weight_cap=7.5, v_max=0.30
     {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':120, 'color':'#FF4444',
-     'w_gain':2.8, 'weight_base':0.8, 'weight_cap':5.0, 'weight_dynamic':True,
+     'w_gain':2.8, 'weight_base':0.8, 'weight_cap':7.5, 'weight_dynamic':True,
      'v_max':0.30, 'affects_v':True},
-    # L2: weight_cap=3.0, v_max=0.38
+    # L2: 가까움, 동적 가중치, weight_cap=4.5, v_max=0.38
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':120, 'color':'#FF8800',
-     'w_gain':2.5, 'weight_base':0.6, 'weight_cap':3.0, 'weight_dynamic':True,
+     'w_gain':2.5, 'weight_base':0.6, 'weight_cap':4.5, 'weight_dynamic':True,
      'v_max':0.38, 'affects_v':True},
+    # L3: 중간, 동적 가중치, weight_cap=2.5, v_max=FORWARD_SPEED
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':120, 'color':'#DDCC00',
-     'w_gain':1.8, 'weight_base':0.2, 'weight_start':0.4, 'weight_dynamic':False, 'affects_v':True},
+     'w_gain':1.8, 'weight_base':0.2, 'weight_cap':2.5, 'weight_dynamic':True, 'affects_v':True},
+    # L4: 중간-원거리 (weight: 진입 0.2 → 끝 0.1)
     {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':100, 'color':'#88CC00',
      'w_gain':1.0, 'weight_base':0.1, 'weight_start':0.2, 'weight_dynamic':False, 'affects_v':True},
+    # L5: 원거리 (weight: 진입 0.1 → 끝 0.05)
     {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':100, 'color':'#00BB44',
      'w_gain':0.4, 'weight_base':0.05, 'weight_start':0.1,  'weight_dynamic':False, 'affects_v':False},
+    # L6: 최원거리 (weight: 진입 0.05 → 끝 0.02)
     {'name':'L6', 'fwd_min':660, 'fwd_max':780, 'horiz_th':100, 'color':'#0088CC',
      'w_gain':0.3, 'weight_base':0.02, 'weight_start':0.05, 'weight_dynamic':False, 'affects_v':False},
 ]
@@ -73,6 +77,7 @@ SCAN_WIDE_HALF    = 135
 SIDE_LAYER_ANG_START = 15   # deg
 SIDE_LAYER_ANG_END   = 75   # deg
 SIDE_LAYER_DIST_MAX  = 600  # mm
+SIDE_W_BOOST_GAIN    = 0.5  # rad/s: 측방 레이어 w 크기 기여 계수
 
 # ── path prediction / strength bar display ────────────────────────────────────
 PREDICT_SEC = 1.5    # s: how far ahead to draw the predicted path
@@ -258,6 +263,7 @@ def _process_layer(scan_norm, layer):
         raw    = rep_h_err / layer['horiz_th'] * cap
         weight = max(layer['weight_base'], min(cap, raw))
     else:
+        # L4~L6: fwd 위치에 따라 weight_start → weight_base 선형 보간
         prog = max(0.0, min(1.0,
                (rep_fwd - layer['fwd_min']) / (layer['fwd_max'] - layer['fwd_min'])))
         weight = layer['weight_start'] + (layer['weight_base'] - layer['weight_start']) * prog
@@ -319,13 +325,15 @@ def _get_side_layer_push(scan_norm):
 def _compute_vw(scan_norm):
     """
     Port of find_vw_layered.
-    Returns (v, w_layer): linear velocity and layer-based angular velocity.
+    Returns (v, w_base, w_with_boost):
+      w_base       = direction * w_mag  (정면 레이어만, 회색 경로)
+      w_with_boost = w_base + side_w_delta  (측방 레이어 크기 보정 포함, 초록 경로 기준)
     heading_deg assumed 0 (no IMU in visualizer).
     """
     layer_results = [r for r in (_process_layer(scan_norm, L) for L in LAYERS)
                      if r is not None]
     if not layer_results:
-        return FORWARD_SPEED, 0.0
+        return FORWARD_SPEED, 0.0, 0.0
 
     closest   = min(layer_results, key=lambda r: r['rep_horiz'])
     ref_angle = closest['rep_angle']
@@ -350,7 +358,11 @@ def _compute_vw(scan_norm):
     total_w_all = sum(r['weight'] for r in layer_results)
     w_mag       = sum(r['weight'] * r['urgency'] for r in layer_results) / total_w_all
     w_mag       = max(min(w_mag, MAX_W), W_MIN_DANGER)
-    w_layer     = direction * w_mag
+    w_base      = direction * w_mag
+
+    # 측방 레이어 거리 기반 w 크기 보정 (부호 있는 net delta)
+    side_w_delta  = (side_right_push - side_left_push) * SIDE_W_BOOST_GAIN
+    w_with_boost  = w_base + side_w_delta
 
     v_layers = [r for r in layer_results if r['v_proposal'] is not None]
     if v_layers:
@@ -359,7 +371,7 @@ def _compute_vw(scan_norm):
     else:
         v = FORWARD_SPEED
 
-    return v, w_layer
+    return v, w_base, w_with_boost
 
 def _exp_strength(horizs_in_zone):
     """Exponential repulsion: 1.0 at robot edge (110 mm), 0.0 at outer boundary (300 mm)."""
@@ -450,13 +462,16 @@ def update(_frame):
     side_left_push, side_right_push = _get_side_layer_push(scan_norm)
 
     # ── v / w from layers ─────────────────────────────────────────────────────
-    v, w_layer = _compute_vw(scan_norm)
-    w_total    = float(np.clip(w_layer + side_dw, -MAX_W, MAX_W))
+    v, w_base, w_with_boost = _compute_vw(scan_norm)
+    side_w_delta = w_with_boost - w_base
+    w_total      = float(np.clip(w_with_boost + side_dw, -MAX_W, MAX_W))
 
     # ── predicted paths ───────────────────────────────────────────────────────
-    bx, by = _predict_path(v, w_layer)
+    # 회색 점선: 정면 레이어만 (w_base)
+    bx, by = _predict_path(v, w_base)
     path_base_line.set_data(bx, by)
 
+    # 초록 실선: 전체 보정 후 (측방 boost + 측면 반발력)
     gx, gy = _predict_path(v, w_total)
     path_line.set_data(gx, gy)
     path_tip.set_data([gx[-1]], [gy[-1]])
@@ -489,9 +504,9 @@ def update(_frame):
     info_text.set_text(
         f'Nearest    : {nd:.0f}mm @ {na:+.1f}deg\n'
         f'v          : {v:.3f} m/s\n'
-        f'w_layer    : {w_layer:+.3f} rad/s  (gray path)\n'
+        f'w_base     : {w_base:+.3f} rad/s  (gray path, fwd layers)\n'
+        f'side boost : {side_w_delta:+.3f} rad/s  L={side_left_push:.2f} R={side_right_push:.2f}\n'
         f'side rep dw: {side_dw:+.3f} rad/s  L={left_str:.2f} R={right_str:.2f}\n'
-        f'side layer : L_push={side_left_push:.2f}  R_push={side_right_push:.2f}\n'
         f'w_total    : {w_total:+.3f} rad/s  [{dir_str}]  (green path)'
     )
     title_obj.set_text(
