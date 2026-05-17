@@ -71,7 +71,7 @@ STOP_HORIZ_TH = 105
 # STOP 탈출: 360° 전체 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
 STOP_MAX_CYCLES       = 30                          # 연속 STOP 사이클 상한 (초과 시 강제 탈출)
-STOP_PIVOT_MAX_W      = 1.0   # rad/s: 피봇 최대 회전 속도 (목표에서 멀 때)
+STOP_PIVOT_MAX_W      = 0.9   # rad/s: 피봇 최대 회전 속도 (목표에서 멀 때)
 STOP_PIVOT_MIN_W      = 0.7   # rad/s: 피봇 최소 회전 속도 (목표 근처)
 STOP_PIVOT_SLOW_DEG   = 30    # deg: 이 이내부터 선형 감속 시작
 
@@ -108,7 +108,7 @@ SEND_INTERVAL  = 0.1
 SIDE_SAFE_MARGIN  = 190   # mm: 로봇 측면 안전 마진 (side_th = 110+190 = 300mm)
 SIDE_FWD_LEAD     = 90    # mm: 라이다 기준 전방 여유 (진입 예측)
 SIDE_FWD_REAR     = 90    # mm: 라이다 기준 후방 깊이 (로봇 몸체)
-SIDE_REPULSE_GAIN = 1.2   # rad/s: 반발력 최대 w 기여
+SIDE_REPULSE_GAIN = 1.25   # rad/s: 반발력 최대 w 기여
 SIDE_EXP_K        = 2.0   # 지수 계수: 클수록 근접 시 반발력이 급격히 증가
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
