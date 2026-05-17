@@ -24,7 +24,7 @@ UPDATE_INTERVAL = 100   # ms
 # ── jw_won.py parameters (keep in sync) ───────────────────────────────────────
 ROBOT_HALF_WIDTH = 110
 STOP_FWD_MIN     = 100
-STOP_FWD_MAX     = 160
+STOP_FWD_MAX     = 175
 STOP_HORIZ_TH    = 105
 
 DETECTION_RANGE  = 1500
@@ -34,20 +34,24 @@ MAX_W            = 2.0
 W_MIN_DANGER     = 0.5
 LAYER_PERCENTILE = 5
 SCORE_ALPHA      = 5.0
-SCORE_BETA       = 8      # 정면 방향 영향 (약화)
-SCORE_SIDE       = 50.0   # 측방 방향 가중치 (주도)
+SCORE_BETA       = 8       # 정면 방향 영향 (약화)
+SCORE_SIDE       = 600.0   # 측방 방향 가중치 (주도)
 DEPTH_JUMP_THRES = 120
 
 LAYERS = [
-    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':190, 'color':'#FF4444',
-     'w_gain':2.8, 'weight_base':0.8, 'weight_dynamic':True,  'affects_v':True},
-    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':170, 'color':'#FF8800',
-     'w_gain':2.5, 'weight_base':0.6, 'weight_dynamic':True,  'affects_v':True},
-    {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':140, 'color':'#DDCC00',
+    # L1: weight_cap=5.0, v_max=0.30 (근접 위험, 속도 상한 제한)
+    {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':120, 'color':'#FF4444',
+     'w_gain':2.8, 'weight_base':0.8, 'weight_cap':5.0, 'weight_dynamic':True,
+     'v_max':0.30, 'affects_v':True},
+    # L2: weight_cap=3.0, v_max=0.38
+    {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':120, 'color':'#FF8800',
+     'w_gain':2.5, 'weight_base':0.6, 'weight_cap':3.0, 'weight_dynamic':True,
+     'v_max':0.38, 'affects_v':True},
+    {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':120, 'color':'#DDCC00',
      'w_gain':1.8, 'weight_base':0.2, 'weight_start':0.4, 'weight_dynamic':False, 'affects_v':True},
-    {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':140, 'color':'#88CC00',
+    {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':100, 'color':'#88CC00',
      'w_gain':1.0, 'weight_base':0.1, 'weight_start':0.2, 'weight_dynamic':False, 'affects_v':True},
-    {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':120, 'color':'#00BB44',
+    {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':100, 'color':'#00BB44',
      'w_gain':0.4, 'weight_base':0.05, 'weight_start':0.1,  'weight_dynamic':False, 'affects_v':False},
     {'name':'L6', 'fwd_min':660, 'fwd_max':780, 'horiz_th':100, 'color':'#0088CC',
      'w_gain':0.3, 'weight_base':0.02, 'weight_start':0.05, 'weight_dynamic':False, 'affects_v':False},
@@ -250,7 +254,9 @@ def _process_layer(scan_norm, layer):
     rep_h_err = layer['horiz_th'] - rep_horiz
 
     if layer['weight_dynamic']:
-        weight = max(layer['weight_base'], min(1.0, rep_h_err / layer['horiz_th']))
+        cap    = layer.get('weight_cap', 1.0)
+        raw    = rep_h_err / layer['horiz_th'] * cap
+        weight = max(layer['weight_base'], min(cap, raw))
     else:
         prog = max(0.0, min(1.0,
                (rep_fwd - layer['fwd_min']) / (layer['fwd_max'] - layer['fwd_min'])))
@@ -259,9 +265,10 @@ def _process_layer(scan_norm, layer):
     urgency = layer['w_gain'] * rep_h_err / layer['horiz_th']
 
     if layer['affects_v']:
-        prog = max(0.0, min(1.0,
-               (rep_fwd - layer['fwd_min']) / (layer['fwd_max'] - layer['fwd_min'])))
-        v_proposal = MIN_SPEED + (FORWARD_SPEED - MIN_SPEED) * prog
+        prog  = max(0.0, min(1.0,
+                (rep_fwd - layer['fwd_min']) / (layer['fwd_max'] - layer['fwd_min'])))
+        v_max = layer.get('v_max', FORWARD_SPEED)
+        v_proposal = MIN_SPEED + (v_max - MIN_SPEED) * prog
     else:
         v_proposal = None
 
