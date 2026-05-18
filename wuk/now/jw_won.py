@@ -90,10 +90,13 @@ SCORE_GAP_FRONT      = 900.0 # 전방 통과 가능 갭 방향 보너스 계수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 SCORE_ALPHA       = 5.0    # gap_width 계수
-SCORE_BETA        = 20     # 정면 레이어 push 계수 //수정
+SCORE_BETA        = 8     # 정면 레이어 push 계수 //수정
 SCORE_SIDE        = 2500.0  # 측방 레이어 방향 가중치
 HEADING_WEIGHT_MM = 5.0    # 헤딩 1° = 여유 5mm
 DEPTH_JUMP_THRES  = 120    # mm: 이상이면 다른 물체로 인식
+
+# 방향 히스테리시스: 이 점수 차 미만이면 직전 방향 유지 (정면 장애물 시 oscillation 방지)
+DIRECTION_HYSTERESIS = 150.0
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 스캔 범위 & 통신
@@ -146,6 +149,7 @@ DEBUG_VIRTUAL = True    # [추가] 가상 장애물 디버그
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
 prev_w                = 0.0
+_last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터
 stop_pivot_w               = 0.0   # 피봇 방향 (부호만 사용)
 stop_locked_target         = 0.0
@@ -912,10 +916,17 @@ def find_vw_layered(scan_points, heading_deg):
         print(f"    head  hL={term_head_L:.0f} / hR={term_head_R:.0f}")
         print(f"    fgap  fL={gap_bonus_L:.0f} / fR={gap_bonus_R:.0f}")
 
-    # 4. 방향 결정 (매 사이클 score로 재결정, 잠금 없음)
-    direction = 1.0 if score_L >= score_R else -1.0
+    # 4. 방향 결정 (히스테리시스: 점수 차가 DIRECTION_HYSTERESIS 미만이면 직전 방향 유지)
+    global _last_direction
+    score_diff = score_L - score_R  # 양수 = 왼쪽 유리, 음수 = 오른쪽 유리
+    if _last_direction > 0:
+        direction = 1.0 if score_diff > -DIRECTION_HYSTERESIS else -1.0
+    else:
+        direction = -1.0 if score_diff < DIRECTION_HYSTERESIS else 1.0
     if DEBUG_DIR:
-        print(f"  [DIR] {'LEFT' if direction > 0 else 'RIGHT'}")
+        switched = "SWITCH" if direction != _last_direction else "HOLD"
+        print(f"  [DIR] {'LEFT' if direction > 0 else 'RIGHT'} (diff={score_diff:+.0f} hyst=±{DIRECTION_HYSTERESIS:.0f} {switched})")
+    _last_direction = direction
 
     # 5. v 계산: affects_v 레이어 v_proposal의 가중 평균
     v_layers = [r for r in layer_results if r['v_proposal'] is not None]
@@ -953,10 +964,11 @@ def find_vw_layered(scan_points, heading_deg):
 
 def _stop_reset():
     """STOP 상태 전역 변수 초기화."""
-    global stop_cycle_count, stop_pivot_w, stop_phase
+    global stop_cycle_count, stop_pivot_w, stop_phase, _last_direction
     stop_cycle_count = 0
     stop_pivot_w     = 0.0
     stop_phase       = 0
+    _last_direction  = 1.0  # STOP 탈출 후 방향 히스테리시스 초기화
 
 
 def _stop_set_pivot(heading_deg, target, gap_width):
