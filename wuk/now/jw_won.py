@@ -41,11 +41,11 @@ LAYERS = [
      'v_max':0.22, 'affects_v':True},
     # L2: 가까움, 동적 가중치, weight_cap=4.5, v_max=0.38
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':120,
-     'w_gain':2.5, 'weight_base':0.6, 'weight_cap':4.5, 'weight_dynamic':True,
+     'w_gain':2.5, 'weight_base':0.6, 'weight_cap':5.0, 'weight_dynamic':True,
      'v_max':0.38, 'affects_v':True},
     # L3: 중간, 동적 가중치, weight_cap=2.5, v_max=FORWARD_SPEED
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':120,
-     'w_gain':2.0, 'weight_base':0.4, 'weight_cap':4.0, 'weight_dynamic':True, 'affects_v':True},
+     'w_gain':2.0, 'weight_base':0.4, 'weight_cap':4.5, 'weight_dynamic':True, 'affects_v':True},
     # L4: 중간-원거리 (weight: 진입 0.2 → 끝 0.1)
     {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':110,
      'w_gain':1.0, 'weight_base':0.1, 'weight_start':0.2, 'weight_dynamic':False, 'affects_v':True},
@@ -96,7 +96,7 @@ HEADING_WEIGHT_MM = 5.0    # 헤딩 1° = 여유 5mm
 DEPTH_JUMP_THRES  = 120    # mm: 이상이면 다른 물체로 인식
 
 # 방향 히스테리시스: 이 점수 차 미만이면 직전 방향 유지 (정면 장애물 시 oscillation 방지)
-DIRECTION_HYSTERESIS = 150.0
+DIRECTION_HYSTERESIS = 300.0
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 스캔 범위 & 통신
