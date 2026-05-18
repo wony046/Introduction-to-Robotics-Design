@@ -105,7 +105,7 @@ SEND_INTERVAL  = 0.1
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 측면 반발력 파라미터 (horiz 190mm × fwd 160mm 감지 구간)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-SIDE_SAFE_MARGIN  = 190   # mm: 로봇 측면 안전 마진 (side_th = 110+190 = 300mm)
+SIDE_SAFE_MARGIN  = 300   # mm: 로봇 측면 안전 마진 (side_th = 110+190 = 300mm)
 SIDE_FWD_LEAD     = 90    # mm: 라이다 기준 전방 여유 (진입 예측)
 SIDE_FWD_REAR     = 90    # mm: 라이다 기준 후방 깊이 (로봇 몸체)
 SIDE_REPULSE_GAIN = 1.25   # rad/s: 반발력 최대 w 기여
