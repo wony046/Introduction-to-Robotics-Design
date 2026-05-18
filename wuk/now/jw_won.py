@@ -45,7 +45,7 @@ LAYERS = [
      'v_max':0.38, 'affects_v':True},
     # L3: 중간, 동적 가중치, weight_cap=2.5, v_max=FORWARD_SPEED
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':120,
-     'w_gain':2.0, 'weight_base':0.5, 'weight_cap':4.0, 'weight_dynamic':True, 'affects_v':True},
+     'w_gain':2.0, 'weight_base':0.4, 'weight_cap':4.0, 'weight_dynamic':True, 'affects_v':True},
     # L4: 중간-원거리 (weight: 진입 0.2 → 끝 0.1)
     {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':110,
      'w_gain':1.0, 'weight_base':0.1, 'weight_start':0.2, 'weight_dynamic':False, 'affects_v':True},
@@ -108,7 +108,7 @@ SEND_INTERVAL  = 0.1
 SIDE_SAFE_MARGIN  = 300   # mm: 로봇 측면 안전 마진 (side_th = 110+190 = 300mm)
 SIDE_FWD_LEAD     = 90    # mm: 라이다 기준 전방 여유 (진입 예측)
 SIDE_FWD_REAR     = 90    # mm: 라이다 기준 후방 깊이 (로봇 몸체)
-SIDE_REPULSE_GAIN = 1.4   # rad/s: 반발력 최대 w 기여
+SIDE_REPULSE_GAIN = 1.25   # rad/s: 반발력 최대 w 기여
 SIDE_EXP_K        = 2.0   # 지수 계수: 클수록 근접 시 반발력이 급격히 증가
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
