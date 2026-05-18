@@ -90,7 +90,7 @@ SCORE_GAP_FRONT      = 900.0 # 전방 통과 가능 갭 방향 보너스 계수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 SCORE_ALPHA       = 5.0    # gap_width 계수
-SCORE_BETA        = 8     # 정면 레이어 push 계수
+SCORE_BETA        = 20     # 정면 레이어 push 계수 //수정
 SCORE_SIDE        = 2500.0  # 측방 레이어 방향 가중치
 HEADING_WEIGHT_MM = 5.0    # 헤딩 1° = 여유 5mm
 DEPTH_JUMP_THRES  = 120    # mm: 이상이면 다른 물체로 인식
