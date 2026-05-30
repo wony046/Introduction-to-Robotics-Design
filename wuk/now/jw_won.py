@@ -1088,7 +1088,7 @@ def _motor_controller(arduino):
         with _scan_lock:
             pts = [(a, d) for a, d in _latest_scan if d > 0]
         if pts:
-            v, w = find_vw_command(pts, arduino_heading_deg)
+            v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=30.0)
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
             prev_w = w
             cmd = f"{v:.2f} {w:.2f}\n"
