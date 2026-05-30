@@ -9,6 +9,15 @@ CAMERA_INDEX      = 0         # 인식 안 되면 1로 변경 시도
 FRAME_W           = 1280
 FRAME_H           = 720
 HFOV_DEG          = 60.0      # ★ 수평 FOV (deg) — 실측 필요, 튜닝값
+# 카메라가 90° 회전 마운트된 경우 설정. None=정방향
+# CW 회전 마운트 → ROTATE_90_COUNTERCLOCKWISE, CCW 회전 마운트 → ROTATE_90_CLOCKWISE
+FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
+
+# 회전 후 실효 해상도 (bearing·도착 판정에 사용)
+if FRAME_ROTATE in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
+    _EFF_W, _EFF_H = FRAME_H, FRAME_W
+else:
+    _EFF_W, _EFF_H = FRAME_W, FRAME_H
 
 # ── 도착 판정 ────────────────────────────────────────────────────────
 ARRIVE_AREA_MIN   = 12000     # px²: blob 최소 면적 (색지 위 판정 기준) — 튜닝값
@@ -93,8 +102,8 @@ def _to_bearing(cx):
     화면 중앙=0, 오른쪽=양수, 왼쪽=음수.
     jw_won.py의 스캔 각도 규약과 동일.
     """
-    offset = cx - FRAME_W / 2.0
-    return offset * (HFOV_DEG / FRAME_W)
+    offset = cx - _EFF_W / 2.0
+    return offset * (HFOV_DEG / _EFF_W)
 
 
 def _check_arrival(centroid, area):
@@ -105,7 +114,7 @@ def _check_arrival(centroid, area):
     if centroid is None or area < ARRIVE_AREA_MIN:
         return False
     _, cy = centroid
-    return cy > FRAME_H * ARRIVE_Y_RATIO
+    return cy > _EFF_H * ARRIVE_Y_RATIO
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -131,6 +140,8 @@ def _camera_loop():
         if not ret:
             time.sleep(0.03)
             continue
+        if FRAME_ROTATE is not None:
+            frame = cv2.rotate(frame, FRAME_ROTATE)
 
         with _lock:
             idx  = _mission_idx
@@ -192,7 +203,7 @@ def _camera_loop():
             _disp_color = (MISSION_ORDER[_disp_idx]
                            if not _disp_done and _disp_idx < len(MISSION_ORDER) else 'DONE')
             display = frame.copy()
-            cv2.line(display, (FRAME_W // 2, 0), (FRAME_W // 2, FRAME_H), (180, 180, 180), 1)
+            cv2.line(display, (_EFF_W // 2, 0), (_EFF_W // 2, _EFF_H), (180, 180, 180), 1)
             if centroid is not None:
                 cv2.circle(display, centroid, 14, (0, 255, 0),  3)
                 cv2.circle(display, centroid,  3, (0, 255, 0), -1)
