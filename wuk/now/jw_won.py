@@ -3,6 +3,7 @@ import time
 import math
 import json
 import threading
+import camera_tracker
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 포트 & 라이다 설정
@@ -1120,7 +1121,12 @@ def _motor_controller(arduino):
         with _scan_lock:
             pts = [(a, d) for a, d in _latest_scan if d > 0]
         if pts:
-            v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=30.0)
+            if camera_tracker.is_done() or camera_tracker.is_dwelling():
+                v, w = 0.0, 0.0
+            else:
+                bearing = camera_tracker.get_bearing()
+                tb = bearing if bearing is not None else 0.0
+                v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=tb)
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
             prev_w = w
             cmd = f"{v:.2f} {w:.2f}\n"
@@ -1175,6 +1181,7 @@ def main():
     t_motor = threading.Thread(target=_motor_controller,  args=(arduino,), daemon=True, name="motor")
 
     try:
+        camera_tracker.start()
         t_lidar.start()
         t_motor.start()
         while not _shutdown.is_set():
@@ -1183,6 +1190,7 @@ def main():
         print("\nShutting down...")
     finally:
         _shutdown.set()
+        camera_tracker.stop()
         t_lidar.join(timeout=2.0)
         t_motor.join(timeout=2.0)
         lidar.write(bytes([0xA5, 0x25]))
