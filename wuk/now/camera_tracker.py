@@ -34,7 +34,8 @@ COLOR_RANGES = {
 MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
 
 # ── 디버그 ───────────────────────────────────────────────────────────
-DEBUG_CAMERA = True
+DEBUG_CAMERA  = True
+SHOW_FRAME    = False     # True → imshow 디버그 창 표시 (VNC/모니터 필요)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 공유 상태 (모두 _lock 안에서 접근)
@@ -184,9 +185,31 @@ def _camera_loop():
                 _dwell_start = None
                 _dwelling    = False
 
+            _disp_bearing = _target_bearing
+            _disp_idx     = _mission_idx
+            _disp_done    = _done
+
+        if SHOW_FRAME:
+            _disp_color = (MISSION_ORDER[_disp_idx]
+                           if not _disp_done and _disp_idx < len(MISSION_ORDER) else 'DONE')
+            display = frame.copy()
+            cv2.line(display, (FRAME_W // 2, 0), (FRAME_W // 2, FRAME_H), (180, 180, 180), 1)
+            if centroid is not None:
+                cv2.circle(display, centroid, 14, (0, 255, 0),  3)
+                cv2.circle(display, centroid,  3, (0, 255, 0), -1)
+            bearing_str = f"{_disp_bearing:+.1f}" if _disp_bearing is not None else "None"
+            cv2.putText(display, f"Target:  {_disp_color}",      (10,  35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (  0, 255, 255), 2)
+            cv2.putText(display, f"Bearing: {bearing_str} deg",  (10,  75), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (  0, 255,   0), 2)
+            cv2.putText(display, f"Area:    {area:.0f} px2",     (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255,   0), 2)
+            cv2.imshow('camera_tracker', display)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                _shutdown.set()
+
         time.sleep(0.03)   # ~30fps
 
     cap.release()
+    if SHOW_FRAME:
+        cv2.destroyAllWindows()
     print("[CAMERA] 스레드 종료")
 
 
