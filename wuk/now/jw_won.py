@@ -101,8 +101,9 @@ DIRECTION_HYSTERESIS = 300.0
 # ── 목표 방향 추종 (카메라 색지) ──────────────────────────────
 GAP_TARGET_WEIGHT = 1.0           # 갭 선택: 목표 방향 추종 강도 (주 항)
 GAP_SMOOTH_WEIGHT = 0.3           # 갭 선택: 직전 방향 유지 강도 (떨림 억제)
-KP_GOAL           = MAX_W / 90.0  # 비례 조향 게인 (90° → MAX_W)
-TARGET_CLEAR_CONE = 18            # deg: 목표 방향 ± 이 각도 범위를 막힘 검사 대상으로
+KP_GOAL            = MAX_W / 45.0  # 비례 조향 게인 (45° → MAX_W)
+TARGET_ALIGN_ANGLE = 20.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
+TARGET_CLEAR_CONE  = 18           # deg: 목표 방향 ± 이 각도 범위를 막힘 검사 대상으로
 TARGET_BLOCK_DIST = 600           # mm: 이 거리 이내 장애물이 있으면 "목표 방향 막힘"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -880,8 +881,15 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         desired_heading      = target_bearing
         prev_desired_heading = desired_heading
         w = KP_GOAL * desired_heading
+
+        # 목표 정렬도에 따라 v 조정
+        # 정렬됨(0°) → FORWARD_SPEED / 많이 벗어남(≥TARGET_ALIGN_ANGLE) → MIN_SPEED
+        align_factor = max(0.0, 1.0 - abs(desired_heading) / TARGET_ALIGN_ANGLE)
+        v = MIN_SPEED + (FORWARD_SPEED - MIN_SPEED) * align_factor
+
         if DEBUG_DIR:
-            print(f"  [TARGET] clear -> head to target {target_bearing:+.1f}deg w={w:+.3f}")
+            print(f"  [TARGET] clear -> head to target {target_bearing:+.1f}deg "
+                  f"w={w:+.3f} v={v:.2f} align={align_factor:.2f}")
 
     elif chosen_gap is not None:
         # ② 목표 막힘 → 통과 갭 중 목표 최근접으로 우회 (gap-following)
