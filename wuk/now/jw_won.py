@@ -855,6 +855,9 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
     # ── 3. 전방 통과 갭 탐색 + 목표 편향 선택 ──────────────────────────────
     front_gaps = get_front_passable_gaps(scan_points)
     chosen_gap = choose_target_gap(front_gaps, target_bearing, prev_desired_heading)
+    print(f"[BRANCH] tb={target_bearing:+.0f} gaps={len(front_gaps)} "
+      f"chosen_ca={chosen_gap['center_angle'] if chosen_gap else None} "
+      f"layers={len(layer_results)}")
 
     # 측방 레이어 push — fallback 점수 계산 & 안전 보정 공용
     side_left_push, side_right_push = get_side_layer_push(scan_points)
