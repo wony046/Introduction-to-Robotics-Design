@@ -24,7 +24,7 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 
 ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
-FORWARD_SPEED    = 0.45
+FORWARD_SPEED    = 0.2
 MIN_SPEED        = 0.12
 MAX_W            = 1.8
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
