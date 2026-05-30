@@ -102,6 +102,8 @@ DIRECTION_HYSTERESIS = 300.0
 GAP_TARGET_WEIGHT = 1.0           # 갭 선택: 목표 방향 추종 강도 (주 항)
 GAP_SMOOTH_WEIGHT = 0.3           # 갭 선택: 직전 방향 유지 강도 (떨림 억제)
 KP_GOAL           = MAX_W / 90.0  # 비례 조향 게인 (90° → MAX_W)
+TARGET_CLEAR_CONE = 18            # deg: 목표 방향 ± 이 각도 범위를 막힘 검사 대상으로
+TARGET_BLOCK_DIST = 600           # mm: 이 거리 이내 장애물이 있으면 "목표 방향 막힘"
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 스캔 범위 & 통신
@@ -664,6 +666,14 @@ def choose_target_gap(passable_gaps, target_bearing, prev_heading):
     return min(passable_gaps, key=cost)
 
 
+def is_target_blocked(scan_points, target_bearing):
+    """목표 방향 ±TARGET_CLEAR_CONE° 안에 TARGET_BLOCK_DIST mm 이내 장애물이 있으면 True."""
+    for a, d in scan_points:
+        if LIDAR_MIN_VALID < d < TARGET_BLOCK_DIST and abs(a - target_bearing) < TARGET_CLEAR_CONE:
+            return True
+    return False
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # [추가] 통과 불가 갭 → 가상 장애물 척력  ─ 코드 1에서 이식
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -821,10 +831,11 @@ def get_narrow_gap_pushes(scan_points, layer, in_stop=False):
 
 def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
     """
-    통과 가능 전방 갭 존재 여부에 따라 3-way 분기:
-      ① 갭 있음         → 목표 편향 비례 조향 (Gap Following)
-      ② 갭 없음+장애물  → 기존 score 기반 회피 (fallback)
-      ③ 갭 없음+장애물X → 개활지 목표 직진 조향
+    목표 방향 막힘 여부 우선 판정 후 4-way 분기:
+      ① 목표 방향 열림           → 목표로 직진 (갭 무시)
+      ② 막힘 + 통과 갭 존재      → 갭 중 목표 최근접으로 우회 (Gap Following)
+      ③ 막힘 + 갭 없음 + 장애물  → score 기반 회피 (fallback)
+      ④ 막힘 + 갭 없음 + 장애물X → 목표 유지
     안전 보정(측면 반발력)은 모든 분기에서 항상 가산.
     """
     global _last_direction, prev_desired_heading
@@ -852,19 +863,28 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
     else:
         v = FORWARD_SPEED
 
-    # ── 3. 전방 통과 갭 탐색 + 목표 편향 선택 ──────────────────────────────
+    # ── 3. 전방 통과 갭 탐색 + 목표 방향 막힘 판정 ─────────────────────────
     front_gaps = get_front_passable_gaps(scan_points)
     chosen_gap = choose_target_gap(front_gaps, target_bearing, prev_desired_heading)
+    blocked    = is_target_blocked(scan_points, target_bearing)
     print(f"[BRANCH] tb={target_bearing:+.0f} gaps={len(front_gaps)} "
       f"chosen_ca={chosen_gap['center_angle'] if chosen_gap else None} "
-      f"layers={len(layer_results)}")
+      f"layers={len(layer_results)} blocked={blocked}")
 
     # 측방 레이어 push — fallback 점수 계산 & 안전 보정 공용
     side_left_push, side_right_push = get_side_layer_push(scan_points)
 
-    # ── 4. 3-way 분기: w 결정 ───────────────────────────────────────────────
-    if chosen_gap is not None:
-        # ① 통과 갭 있음 → 목표 편향 비례 조향
+    # ── 4. 4-way 분기: w 결정 ───────────────────────────────────────────────
+    if not blocked:
+        # ① 목표 방향이 비어있음 → 목표로 직진 (갭 무시)
+        desired_heading      = target_bearing
+        prev_desired_heading = desired_heading
+        w = -KP_GOAL * desired_heading   # 부호: HW에서 우측 목표→우회전 확인 필요
+        if DEBUG_DIR:
+            print(f"  [TARGET] clear -> head to target {target_bearing:+.1f}deg w={w:+.3f}")
+
+    elif chosen_gap is not None:
+        # ② 목표 막힘 → 통과 갭 중 목표 최근접으로 우회 (gap-following)
         desired_heading      = chosen_gap['center_angle']
         prev_desired_heading = desired_heading
         w = -KP_GOAL * desired_heading   # 부호: HW에서 우측 갭→우회전 확인 필요
@@ -873,7 +893,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
                   f"target={target_bearing:+.1f}° w={w:+.3f}")
 
     elif layer_results:
-        # ② 통과 갭 0개 + 장애물 있음 → 기존 score 기반 회피 (fallback)
+        # ③ 막힘 + 통과 갭 없음 + 장애물 → 기존 score 기반 회피 (fallback)
         closest   = min(layer_results, key=lambda r: r['rep_horiz'])
         ref_angle = closest['rep_angle']
         ref_dist  = math.sqrt(closest['rep_horiz']**2 + closest['rep_fwd']**2)
@@ -936,8 +956,9 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         w = direction * w_mag
 
     else:
-        # ③ 통과 갭도 장애물도 없음 → 개활지: 목표 방향 직진 조향
-        prev_desired_heading = target_bearing
+        # ④ 막힘인데 갭도 장애물도 없음(드묾) → 목표 유지
+        desired_heading      = target_bearing
+        prev_desired_heading = desired_heading
         w = -KP_GOAL * target_bearing   # 부호: HW에서 우측 목표→우회전 확인 필요
         if DEBUG_FINAL:
             print(f"  [CLEAR] no obstacles → target={target_bearing:+.1f}° w={w:+.3f}")
