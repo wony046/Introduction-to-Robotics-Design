@@ -1,30 +1,23 @@
 """
-HFOV_DEG 캘리브레이션 도구
-━━━━━━━━━━━━━━━━━━━━━━━━━━
-원리:
-  바닥/벽에 두 표시(P1, P2)를 W_mm 간격으로 놓고
-  로봇 바퀴 축에서 D_mm 앞에 정지.
-  화면에서 두 표시를 클릭 → 픽셀 간격으로 HFOV 계산.
-
-  f_px  = pixel_span × D / W
-  HFOV  = 2 × atan(EFF_W/2 / f_px)
+HFOV_DEG 캘리브레이션 도구 (시각화)
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+테이프 색상: 흰색 또는 주황색 추천
+  → 빨강/노랑/파랑은 미션 색지와 혼동 가능
 
 물리 준비:
-  1. 테이프 두 장을 정확히 W_mm 간격으로 바닥/벽에 붙임
-     (예: 400mm — 자로 정확히 측정)
-  2. 로봇을 바퀴 축 중심이 두 테이프 중앙에서 D_mm 앞에 오도록 정지
-     (예: 1000mm)
-  3. 스크립트 실행 → D, W 입력
+  1. 흰색(또는 주황) 테이프 두 장을 바닥/벽에 정확히 W_mm 간격으로 붙임
+  2. 로봇 바퀴 축 중심을 테이프 중앙에서 D_mm 앞에 정지
 
 조작:
-  마우스 클릭 : P1 → P2 순서로 두 표시 클릭
-  s           : 현재 샘플 저장 후 초기화
+  마우스 클릭 : P1(왼쪽) → P2(오른쪽) 순서로 클릭
+  s           : 샘플 저장
   r           : 클릭 초기화
-  q           : 종료 및 평균 HFOV 출력
+  q           : 종료
 """
 
 import cv2
 import math
+import time
 import numpy as np
 
 # ── 카메라 설정 (camera_tracker.py와 동일) ─────────────────────────────────
@@ -38,22 +31,35 @@ if FRAME_ROTATE in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
 else:
     _EFF_W, _EFF_H = FRAME_W, FRAME_H
 
-DISPLAY_SCALE = 0.55   # 창 크기 조정 (화면이 작으면 0.4로)
+DISPLAY_SCALE = 0.55
+
+# ── 색상 상수 ──────────────────────────────────────────────────────────────
+C_WHITE  = (255, 255, 255)
+C_BLACK  = (0,   0,   0  )
+C_GRAY   = (160, 160, 160)
+C_YELLOW = (0,   220, 255)
+C_GREEN  = (60,  230, 60 )
+C_RED    = (60,  60,  255)
+C_CYAN   = (255, 220, 0  )
+C_ORANGE = (0,   160, 255)
 
 # ── 전역 상태 ──────────────────────────────────────────────────────────────
-_clicks  = []    # [(x1,y1), (x2,y2)]
-_samples = []    # 저장된 HFOV 값 목록
-_frozen  = None  # 저장 직후 잠시 표시용 스냅샷
+_clicks      = []
+_samples     = []
+_mouse_pos   = (0, 0)
+_freeze_disp = None
+_freeze_until = 0.0
 
 
 def _mouse_cb(event, x, y, flags, param):
+    global _mouse_pos
+    _mouse_pos = (x, y)
     if event == cv2.EVENT_LBUTTONDOWN and len(_clicks) < 2:
         _clicks.append((x, y))
 
 
-def _compute(px1, px2, D_mm, W_mm):
-    """두 픽셀 클릭으로 f_px, HFOV 계산."""
-    span = abs(px2[0] - px1[0])
+def _compute(p1, p2, D_mm, W_mm):
+    span = abs(p2[0] - p1[0])
     if span == 0:
         return None, None
     f_px = span * D_mm / W_mm
@@ -61,89 +67,162 @@ def _compute(px1, px2, D_mm, W_mm):
     return f_px, hfov
 
 
-def _draw(frame, D_mm, W_mm):
-    """화면 렌더링. display 이미지 반환."""
+def _put(img, text, pos, scale=0.80, color=C_WHITE, thickness=2):
+    x, y = pos
+    cv2.putText(img, text, (x+2, y+2), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, C_BLACK, thickness + 2, cv2.LINE_AA)
+    cv2.putText(img, text, (x,   y  ), cv2.FONT_HERSHEY_SIMPLEX,
+                scale, color,   thickness,     cv2.LINE_AA)
+
+
+def _draw_crosshair(img, x, y, color, size=18, thickness=1):
+    cv2.line(img, (x - size, y), (x + size, y), color, thickness)
+    cv2.line(img, (x, y - size), (x, y + size), color, thickness)
+    cv2.circle(img, (x, y), 6, color, thickness)
+
+
+def _draw_step_panel(img, step):
+    """왼쪽 상단 단계 안내 패널."""
+    steps = [
+        (1, "P1 클릭  (왼쪽 테이프)"),
+        (2, "P2 클릭  (오른쪽 테이프)"),
+        (3, "s 키로 저장"),
+    ]
+    panel_x, panel_y = 10, 10
+    panel_w, panel_h = 310, len(steps) * 38 + 16
+    overlay = img.copy()
+    cv2.rectangle(overlay, (panel_x, panel_y),
+                  (panel_x + panel_w, panel_y + panel_h),
+                  (30, 30, 30), -1)
+    cv2.addWeighted(overlay, 0.65, img, 0.35, 0, img)
+    cv2.rectangle(img, (panel_x, panel_y),
+                  (panel_x + panel_w, panel_y + panel_h),
+                  C_GRAY, 1)
+
+    for i, (n, text) in enumerate(steps):
+        y = panel_y + 16 + i * 38
+        if n < step:
+            color = (80, 180, 80)
+            mark  = "✓"
+        elif n == step:
+            color = C_YELLOW
+            mark  = "▶"
+        else:
+            color = (120, 120, 120)
+            mark  = "  "
+        _put(img, f"{mark} Step {n}: {text}", (panel_x + 10, y),
+             scale=0.72, color=color)
+
+
+def _draw_result_panel(img, f_px, hfov, samples):
+    """오른쪽 하단 결과 패널."""
+    lines = []
+    if hfov is not None:
+        lines.append(("현재 HFOV", f"{hfov:.2f} deg", C_GREEN))
+        lines.append(("현재 f_px", f"{f_px:.1f} px",  C_GREEN))
+    if samples:
+        avg = sum(samples) / len(samples)
+        lines.append(("평균 HFOV", f"{avg:.2f} deg  (n={len(samples)})", C_CYAN))
+
+    if not lines:
+        return
+
+    pw = 300
+    ph = len(lines) * 36 + 16
+    px = _EFF_W - pw - 10
+    py = _EFF_H - ph - 10
+
+    overlay = img.copy()
+    cv2.rectangle(overlay, (px, py), (px + pw, py + ph), (20, 20, 20), -1)
+    cv2.addWeighted(overlay, 0.70, img, 0.30, 0, img)
+    cv2.rectangle(img, (px, py), (px + pw, py + ph), C_GRAY, 1)
+
+    for i, (label, value, color) in enumerate(lines):
+        y = py + 16 + i * 36
+        _put(img, f"{label}: {value}", (px + 10, y), scale=0.72, color=color)
+
+
+def _draw(frame, D_mm, W_mm, step):
     disp = frame.copy()
-    font   = cv2.FONT_HERSHEY_SIMPLEX
-    shadow = (0, 0, 0)
 
-    # 중심선
+    # ── 중심 수직선 ───────────────────────────────────────────────────────
     cx = _EFF_W // 2
-    cv2.line(disp, (cx, 0), (cx, _EFF_H), (160, 160, 160), 1)
+    cv2.line(disp, (cx, 0), (cx, _EFF_H), C_GRAY, 1)
 
-    # 클릭 포인트
-    colors = [(60, 60, 255), (60, 230, 60)]
-    labels = ['P1 (왼쪽)', 'P2 (오른쪽)']
+    # ── 마우스 커서 십자선 ────────────────────────────────────────────────
+    mx, my = _mouse_pos
+    if 0 < mx < _EFF_W and 0 < my < _EFF_H:
+        _draw_crosshair(disp, mx, my, (200, 200, 80), size=20, thickness=1)
+
+    # ── 클릭된 포인트 ─────────────────────────────────────────────────────
+    point_cfg = [(C_RED, "P1"), (C_GREEN, "P2")]
     for i, (px, py) in enumerate(_clicks):
-        c = colors[i]
-        cv2.circle(disp, (px, py), 10, (255, 255, 255), 3)
-        cv2.circle(disp, (px, py), 8,  c, -1)
-        cv2.putText(disp, labels[i], (px + 14, py + 6), font, 0.7, shadow, 3, cv2.LINE_AA)
-        cv2.putText(disp, labels[i], (px + 14, py + 6), font, 0.7, c,      2, cv2.LINE_AA)
+        color, label = point_cfg[i]
+        # 수직 가이드선
+        cv2.line(disp, (px, 0), (px, _EFF_H), color, 1)
+        # 포인트 마커
+        cv2.circle(disp, (px, py), 14, C_WHITE, 2)
+        cv2.circle(disp, (px, py), 12, color,   -1)
+        _put(disp, label, (px + 16, py + 6), scale=0.85, color=color)
 
-    # P1-P2 연결선 + 픽셀 간격
-    hfov_now = None
+    # ── P1-P2 연결선 + 픽셀 간격 + 계산 결과 ─────────────────────────────
     f_px_now = None
+    hfov_now = None
     if len(_clicks) == 2:
         f_px_now, hfov_now = _compute(_clicks[0], _clicks[1], D_mm, W_mm)
         if hfov_now:
-            span = abs(_clicks[1][0] - _clicks[0][0])
-            mid  = ((_clicks[0][0] + _clicks[1][0]) // 2,
-                    (min(_clicks[0][1], _clicks[1][1])) - 18)
-            cv2.line(disp, _clicks[0], _clicks[1], (255, 210, 0), 2)
-            cv2.putText(disp, f"{span}px", mid, font, 0.75, shadow,        3, cv2.LINE_AA)
-            cv2.putText(disp, f"{span}px", mid, font, 0.75, (255, 210, 0), 2, cv2.LINE_AA)
+            p1x, p1y = _clicks[0]
+            p2x, p2y = _clicks[1]
+            span = abs(p2x - p1x)
+            mid_x = (p1x + p2x) // 2
+            mid_y = min(p1y, p2y) - 24
 
-    # ── 정보 패널 ─────────────────────────────────────────────────────────
-    y = 42
+            # 수평 연결선 (클릭 y 평균)
+            avg_y = (p1y + p2y) // 2
+            cv2.line(disp, (p1x, avg_y), (p2x, avg_y), C_CYAN, 2)
+            # 양쪽 세로 눈금
+            cv2.line(disp, (p1x, avg_y - 10), (p1x, avg_y + 10), C_CYAN, 2)
+            cv2.line(disp, (p2x, avg_y - 10), (p2x, avg_y + 10), C_CYAN, 2)
+            # 픽셀 간격 표시
+            _put(disp, f"{span} px", (mid_x - 30, mid_y), scale=0.80, color=C_CYAN)
 
-    def put(text, color=(240, 240, 240), scale=0.82):
-        nonlocal y
-        cv2.putText(disp, text, (12, y + 2), font, scale, shadow, 3, cv2.LINE_AA)
-        cv2.putText(disp, text, (10, y),     font, scale, color,  2, cv2.LINE_AA)
-        y += 36
+    # ── 파라미터 표시 (상단 오른쪽) ──────────────────────────────────────
+    _put(disp, f"D = {D_mm:.0f} mm", (_EFF_W - 200, 36),  scale=0.78, color=C_WHITE)
+    _put(disp, f"W = {W_mm:.0f} mm", (_EFF_W - 200, 72),  scale=0.78, color=C_WHITE)
 
-    put(f"D = {D_mm:.0f} mm   W = {W_mm:.0f} mm")
+    # ── 단계 패널 ─────────────────────────────────────────────────────────
+    _draw_step_panel(disp, step)
 
-    if len(_clicks) == 0:
-        put("→ P1 클릭 (왼쪽 표시)",  color=(255, 200, 80))
-    elif len(_clicks) == 1:
-        put("→ P2 클릭 (오른쪽 표시)", color=(255, 200, 80))
-    else:
-        put("→ s=저장   r=재클릭",     color=(255, 200, 80))
+    # ── 결과 패널 ─────────────────────────────────────────────────────────
+    _draw_result_panel(disp, f_px_now, hfov_now, _samples)
 
-    if hfov_now:
-        put(f"HFOV  = {hfov_now:.2f} deg", color=(80, 255, 160))
-        put(f"f_px  = {f_px_now:.1f} px",  color=(80, 255, 160))
-
-    if _samples:
-        avg = sum(_samples) / len(_samples)
-        put(f"평균 HFOV = {avg:.2f} deg  (n={len(_samples)})", color=(80, 220, 255))
-
-    # 하단 안내
-    guide = "s=저장  r=초기화  q=종료"
-    cv2.putText(disp, guide, (10, _EFF_H - 16), font, 0.6, shadow, 3, cv2.LINE_AA)
-    cv2.putText(disp, guide, (10, _EFF_H - 16), font, 0.6, (200, 200, 200), 1, cv2.LINE_AA)
+    # ── 하단 조작 안내 ────────────────────────────────────────────────────
+    guide = "s = 저장    r = 초기화    q = 종료"
+    _put(disp, guide, (10, _EFF_H - 14), scale=0.62, color=C_GRAY, thickness=1)
 
     # 축소
     h, w = disp.shape[:2]
-    disp = cv2.resize(disp, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
-    return disp
+    return cv2.resize(disp, (int(w * DISPLAY_SCALE), int(h * DISPLAY_SCALE)))
 
 
 def main():
-    global _clicks, _frozen
+    global _freeze_disp, _freeze_until
 
-    print("=" * 50)
+    print("=" * 55)
     print("  HFOV 캘리브레이션")
-    print("=" * 50)
-    print("두 테이프 표시를 바닥/벽에 붙이고")
-    print("로봇 바퀴 축을 그 앞 D_mm에 정지하세요.")
+    print("=" * 55)
+    print()
+    print("테이프 색상:  흰색 또는 주황색 권장")
+    print("  (빨강/노랑/파랑은 미션 색지와 혼동 주의)")
+    print()
+    print("준비:")
+    print("  1. 흰색 테이프 2장을 바닥에 W_mm 간격으로 붙임")
+    print("  2. 로봇 바퀴 축 중심을 테이프 중앙에서 D_mm 앞에 정지")
     print()
 
     try:
-        D_mm = float(input("D_mm (바퀴축 ~ 표시 거리,  예 1000): ").strip())
-        W_mm = float(input("W_mm (두 표시 사이 실제 폭, 예  400): ").strip())
+        D_mm = float(input("D_mm (바퀴 축 ~ 테이프 거리,  예 1000): ").strip())
+        W_mm = float(input("W_mm (두 테이프 사이 실제 폭, 예  400): ").strip())
     except ValueError:
         print("[ERROR] 숫자를 입력하세요.")
         return
@@ -160,25 +239,31 @@ def main():
     cv2.setMouseCallback(win, _mouse_cb)
 
     print()
-    print("창에서 P1(왼쪽 표시) → P2(오른쪽 표시) 순서로 클릭")
+    print("창에서 P1(왼쪽 테이프) → P2(오른쪽 테이프) 순으로 클릭")
     print("s=저장  r=초기화  q=종료")
 
-    freeze_until = 0
+    last_frame = None
 
     while True:
         ret, frame = cap.read()
-        if not ret:
+        if ret:
+            if FRAME_ROTATE is not None:
+                frame = cv2.rotate(frame, FRAME_ROTATE)
+            last_frame = frame
+
+        if last_frame is None:
             continue
-        if FRAME_ROTATE is not None:
-            frame = cv2.rotate(frame, FRAME_ROTATE)
 
-        now = __import__('time').time()
+        now = time.time()
 
-        if now < freeze_until and _frozen is not None:
-            cv2.imshow(win, _frozen)
+        if now < _freeze_until and _freeze_disp is not None:
+            cv2.imshow(win, _freeze_disp)
         else:
-            _frozen = None
-            disp = _draw(frame, D_mm, W_mm)
+            _freeze_disp = None
+            step = len(_clicks) + 1
+            if len(_clicks) == 2:
+                step = 3
+            disp = _draw(last_frame, D_mm, W_mm, step)
             cv2.imshow(win, disp)
 
         key = cv2.waitKey(1) & 0xFF
@@ -188,6 +273,7 @@ def main():
 
         elif key == ord('r'):
             _clicks.clear()
+            print("[RESET] 클릭 초기화")
 
         elif key == ord('s') and len(_clicks) == 2:
             f_px, hfov = _compute(_clicks[0], _clicks[1], D_mm, W_mm)
@@ -196,9 +282,16 @@ def main():
                 span = abs(_clicks[1][0] - _clicks[0][0])
                 print(f"[SAMPLE #{len(_samples)}] "
                       f"span={span}px  f_px={f_px:.1f}  HFOV={hfov:.2f}°")
-                # 저장 확인 표시 (0.8초 프리즈)
-                _frozen     = _draw(frame, D_mm, W_mm)
-                freeze_until = now + 0.8
+                # 저장 확인 화면 0.8초 유지
+                step_disp = _draw(last_frame, D_mm, W_mm, 3)
+
+                # "저장됨!" 오버레이
+                h, w = step_disp.shape[:2]
+                _put(step_disp, f"저장됨!  HFOV={hfov:.2f}°",
+                     (w // 2 - 140, h // 2),
+                     scale=1.1, color=(60, 255, 100), thickness=2)
+                _freeze_disp  = step_disp
+                _freeze_until = now + 0.8
                 _clicks.clear()
 
     cap.release()
