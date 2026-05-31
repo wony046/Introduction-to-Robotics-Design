@@ -8,7 +8,7 @@ import numpy as np
 CAMERA_INDEX      = 0         # 인식 안 되면 1로 변경 시도
 FRAME_W           = 1280
 FRAME_H           = 720
-HFOV_DEG          = 60.0      # ★ 수평 FOV (deg) — 실측 필요, 튜닝값
+HFOV_DEG          = 35.2      # ★ 보정 후 화면 가로(_EFF_W=720) 기준 실측값
 # 카메라가 90° 회전 마운트된 경우 설정. None=정방향
 # CW 회전 마운트 → ROTATE_90_COUNTERCLOCKWISE, CCW 회전 마운트 → ROTATE_90_CLOCKWISE
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
@@ -28,7 +28,7 @@ ARRIVE_ROI_DROP   = 0.5       # peaked 후 이 값 미만으로 떨어지면 도
 # ── 근접 접근 제어 ────────────────────────────────────────────────────────
 CLOSE_ROI_BOTTOM   = 0.3      # CLOSE 판정 ROI 비율 (하단 30%)
 CLOSE_ROI_FILL     = 0.5      # 하단 30% ROI에서 목표색 점유율 >= 이 값 → CLOSE 전환
-CAM_HEIGHT_MM      = 540.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측 필요
+CAM_HEIGHT_MM      = 420.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측 필요
                                #   = 바퀴 반지름 + 바퀴축~카메라 높이(500mm)
 CAM_TILT_DEG       = 40.0    # ★ 카메라 광축 아래 기울기 (deg) 실측 필요
                                #   수평=0°, 아래로 내려다볼수록 +
@@ -355,8 +355,9 @@ def get_estimated_distance_mm():
     if cy is None:
         return 500.0
 
-    f_px_v     = (_EFF_H / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
-    delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, f_px_v))
+    # f_px는 렌즈 고유값 — HFOV_DEG가 _EFF_W 기준으로 측정됐으므로 _EFF_W로 계산
+    f_px       = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
+    delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, f_px))
     depression = CAM_TILT_DEG + delta_v   # cy 클수록(하단) → depression 커짐 → 가까움
 
     if depression <= 1.0:

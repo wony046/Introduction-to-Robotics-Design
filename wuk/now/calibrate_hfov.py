@@ -237,6 +237,17 @@ def main():
         print("[ERROR] 카메라를 열 수 없습니다.")
         return
 
+    # 실제 캡처 해상도 확인
+    actual_w = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+    actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+    print(f"\n[카메라] 요청: {FRAME_W}x{FRAME_H}  실제: {actual_w}x{actual_h}")
+    if actual_w != FRAME_W or actual_h != FRAME_H:
+        print(f"  ★ 해상도 불일치! camera_tracker.py의 FRAME_W/FRAME_H를")
+        print(f"     FRAME_W={actual_w}, FRAME_H={actual_h} 로 수정하세요.")
+        print(f"  ★ 캘리브레이션은 실제 해상도 기준으로 계속 진행합니다.")
+    else:
+        print(f"  해상도 일치 OK")
+
     win = 'HFOV Calibration'
     cv2.namedWindow(win)
     cv2.setMouseCallback(win, _mouse_cb)
