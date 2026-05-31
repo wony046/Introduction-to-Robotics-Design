@@ -31,7 +31,7 @@ CLOSE_ROI_BOTTOM   = 0.3      # CLOSE 판정 ROI 비율 (하단 30%)
 CLOSE_ROI_FILL     = 0.5      # 하단 30% ROI에서 목표색 점유율 >= 이 값 → CLOSE 전환
 CAM_HEIGHT_MM      = 420.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측 필요
                                #   = 바퀴 반지름 + 바퀴축~카메라 높이(500mm)
-CAM_TILT_DEG       = 40.0    # ★ 카메라 광축 아래 기울기 (deg) 실측 필요
+CAM_TILT_DEG       = 34.5    # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
                                #   수평=0°, 아래로 내려다볼수록 +
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
 
