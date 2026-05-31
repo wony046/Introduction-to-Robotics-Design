@@ -22,7 +22,8 @@ else:
 # ── 도착 판정 ────────────────────────────────────────────────────────
 ARRIVE_HOLD_SEC   = 1.2       # 연속 감지 유지 시간 (sec), 1초 인정 기준보다 0.2s 여유
 ARRIVE_ROI_BOTTOM = 0.1       # 하단 ROI 비율 (회전 후 화면 세로의 하단 10%)
-ARRIVE_ROI_FILL   = 0.2       # ROI 내 목표 색 점유율 >= 이 값이면 도착 판정
+ARRIVE_ROI_PEAK   = 0.7       # ROI 점유율이 이 값 이상 → "꽉 참" 표시
+ARRIVE_ROI_DROP   = 0.5       # peaked 후 이 값 미만으로 떨어지면 도착 판정
 
 # ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
 # 실내 조명 조건에서 반드시 튜닝 필요
@@ -56,6 +57,7 @@ _dwell_start     = None    # 도착 판정 시작 시각 (time.time())
 _dwelling        = False   # True 동안 모터 정지
 _done            = False   # BLUE 완료 → 영구 정지
 _shutdown        = threading.Event()
+_roi_peaked      = False   # 카메라 스레드 전용: ROI 점유율이 peak를 찍었는지
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -106,21 +108,18 @@ def _to_bearing(cx):
     return offset * (HFOV_DEG / _EFF_W)
 
 
-def _check_arrival(frame, color_name):
-    """
-    색지 위에 올라섰는지 판정.
-    조건: 회전 후 화면 하단 10% ROI에서 목표 색 점유율 >= ARRIVE_ROI_FILL(90%)
-    """
+def _get_roi_fill(frame, color_name):
+    """하단 ROI 내 목표 색 점유율(0.0~1.0) 반환."""
     roi_start = int(_EFF_H * (1.0 - ARRIVE_ROI_BOTTOM))
     roi = frame[roi_start:, :]
     roi_total = roi.shape[0] * roi.shape[1]
     if roi_total == 0:
-        return False
+        return 0.0
     hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for lo, hi in COLOR_RANGES[color_name]:
         mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
-    return cv2.countNonZero(mask) / roi_total >= ARRIVE_ROI_FILL
+    return cv2.countNonZero(mask) / roi_total
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -163,7 +162,15 @@ def _camera_loop():
 
         target_color   = MISSION_ORDER[idx]
         centroid, area = _detect_color(frame, target_color)   # CV 연산은 lock 밖
-        arrived        = _check_arrival(frame, target_color)
+        roi_fill       = _get_roi_fill(frame, target_color)
+
+        # peaked/drop 상태 갱신 (카메라 스레드 전용 변수, lock 불필요)
+        global _roi_peaked
+        if roi_fill >= ARRIVE_ROI_PEAK:
+            if not _roi_peaked and DEBUG_CAMERA:
+                print(f"[CAMERA] {target_color} ROI peak! fill={roi_fill:.2f}")
+            _roi_peaked = True
+        arrived = _roi_peaked and roi_fill < ARRIVE_ROI_DROP
 
         with _lock:
             if centroid is not None:
@@ -173,6 +180,10 @@ def _camera_loop():
                 _target_bearing = None
                 _color_detected = False
 
+            if DEBUG_CAMERA:
+                print(f"[CAMERA] {target_color} fill={roi_fill:.2f} "
+                      f"peaked={_roi_peaked} arrived={arrived}")
+
             if arrived:
                 if _dwell_start is None:
                     _dwell_start = time.time()
@@ -181,23 +192,18 @@ def _camera_loop():
                 _dwelling = True
 
                 elapsed = time.time() - _dwell_start
-                if DEBUG_CAMERA:
-                    print(f"[CAMERA] {target_color} dwell {elapsed:.1f}s "
-                          f"area={area:.0f} bearing={_target_bearing}")
-
                 if elapsed >= ARRIVE_HOLD_SEC:
                     print(f"[CAMERA] {target_color} 완료! → ", end='')
                     _mission_idx += 1
                     _dwell_start  = None
                     _dwelling     = False
+                    _roi_peaked   = False
                     if _mission_idx >= len(MISSION_ORDER):
                         _done = True
                         print("DONE (완주)")
                     else:
                         print(f"{MISSION_ORDER[_mission_idx]} 탐색 시작")
             else:
-                if _dwell_start is not None and DEBUG_CAMERA:
-                    print(f"[CAMERA] {target_color} 도착 조건 해제 (타이머 리셋)")
                 _dwell_start = None
                 _dwelling    = False
 
