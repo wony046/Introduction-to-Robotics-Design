@@ -28,7 +28,10 @@ ARRIVE_ROI_DROP   = 0.5       # peaked 후 이 값 미만으로 떨어지면 도
 # ── 근접 접근 제어 ────────────────────────────────────────────────────────
 CLOSE_ROI_BOTTOM   = 0.3      # CLOSE 판정 ROI 비율 (하단 30%)
 CLOSE_ROI_FILL     = 0.5      # 하단 30% ROI에서 목표색 점유율 >= 이 값 → CLOSE 전환
-DISTANCE_K_MM      = 30000.0  # area=(K/dist)² → dist=K/√area — 캘리브레이션 필요
+CAM_HEIGHT_MM      = 540.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측 필요
+                               #   = 바퀴 반지름 + 바퀴축~카메라 높이(500mm)
+CAM_TILT_DEG       = 40.0    # ★ 카메라 광축 아래 기울기 (deg) 실측 필요
+                               #   수평=0°, 아래로 내려다볼수록 +
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
 
 # ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
@@ -66,7 +69,7 @@ _shutdown            = threading.Event()
 _roi_peaked          = False   # 카메라 스레드 전용: ROI 점유율이 peak를 찍었는지
 _close               = False   # CLOSE 모드 (blob 크기 > 임계)
 _last_stable_bearing = 0.0     # 클리핑 전 마지막 유효 bearing (deg)
-_last_area           = 0.0     # 마지막 blob 면적 (거리 추정용)
+_last_cy             = None    # 마지막 centroid y (기하 거리 추정용)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -156,7 +159,7 @@ def _get_roi_fill(frame, color_name, bottom_ratio=None):
 def _camera_loop():
     global _target_bearing, _color_detected
     global _mission_idx, _dwell_start, _dwelling, _done
-    global _close, _last_stable_bearing, _last_area
+    global _close, _last_stable_bearing, _last_cy
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
@@ -211,7 +214,7 @@ def _camera_loop():
                 bearing = _to_bearing_seek(cx)
                 if not clipped:
                     _last_stable_bearing = bearing   # 안정 구간에서만 갱신
-            _last_area = area
+            _last_cy = cy
         else:
             bearing    = None
             is_close_now = False
@@ -341,11 +344,26 @@ def get_last_stable_bearing():
 
 
 def get_estimated_distance_mm():
-    """blob 면적으로 색지까지 거리 추정 (mm). area=(K/dist)² 역산."""
+    """
+    카메라 기하학 기반 거리 추정 (mm).
+    공식: d = CAM_HEIGHT_MM / tan(CAM_TILT_DEG + delta_v)
+      delta_v: centroid cy → 카메라 광축 기준 수직 편차 각도
+      카메라 90° 회전 마운트이므로 수직 방향 f_px = HFOV_DEG 기준으로 계산
+    """
     with _lock:
-        if _last_area < 100:
-            return 500.0
-        return DISTANCE_K_MM / math.sqrt(_last_area)
+        cy = _last_cy
+    if cy is None:
+        return 500.0
+
+    f_px_v     = (_EFF_H / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
+    delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, f_px_v))
+    depression = CAM_TILT_DEG + delta_v   # cy 클수록(하단) → depression 커짐 → 가까움
+
+    if depression <= 1.0:
+        return 5000.0   # 수평 이상 → 유효 범위 밖 (매우 먼 거리)
+
+    d = CAM_HEIGHT_MM / math.tan(math.radians(depression))
+    return max(d, 50.0)   # 최소 50mm 클램프
 
 
 def get_state():
