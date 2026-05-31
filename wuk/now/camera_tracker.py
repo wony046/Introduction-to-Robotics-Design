@@ -43,7 +43,7 @@ MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
 
 # ── 디버그 ───────────────────────────────────────────────────────────
 DEBUG_CAMERA  = True
-SHOW_FRAME    = True     # True → imshow 디버그 창 표시 (VNC/모니터 필요)
+SHOW_FRAME    = 0     # True → imshow 디버그 창 표시 (VNC/모니터 필요)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 공유 상태 (모두 _lock 안에서 접근)
