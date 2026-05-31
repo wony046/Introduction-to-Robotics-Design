@@ -3,6 +3,7 @@ import time
 import math
 import json
 import threading
+import camera_tracker
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 포트 & 라이다 설정
@@ -23,7 +24,7 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 
 ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
-FORWARD_SPEED    = 0.45
+FORWARD_SPEED    = 0.2
 MIN_SPEED        = 0.12
 MAX_W            = 1.8
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
@@ -98,6 +99,14 @@ DEPTH_JUMP_THRES  = 120    # mm: 이상이면 다른 물체로 인식
 # 방향 히스테리시스: 이 점수 차 미만이면 직전 방향 유지 (정면 장애물 시 oscillation 방지)
 DIRECTION_HYSTERESIS = 300.0
 
+# ── 목표 방향 추종 (카메라 색지) ──────────────────────────────
+GAP_TARGET_WEIGHT = 1.0           # 갭 선택: 목표 방향 추종 강도 (주 항)
+GAP_SMOOTH_WEIGHT = 0.3           # 갭 선택: 직전 방향 유지 강도 (떨림 억제)
+KP_GOAL            = MAX_W / 45.0  # 비례 조향 게인 (45° → MAX_W)
+TARGET_ALIGN_ANGLE = 28.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
+TARGET_CLEAR_CONE  = 18           # deg: 목표 방향 ± 이 각도 범위를 막힘 검사 대상으로
+TARGET_BLOCK_DIST = 600           # mm: 이 거리 이내 장애물이 있으면 "목표 방향 막힘"
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 스캔 범위 & 통신
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -148,7 +157,17 @@ DEBUG_VIRTUAL = True    # [추가] 가상 장애물 디버그
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
+arduino_x_mm          = 0.0   # 오도메트리 x 위치 (mm, 우측 +)
+arduino_y_mm          = 0.0   # 오도메트리 y 위치 (mm, 전방 +)
 prev_w                = 0.0
+
+# ── CLOSE 접근 제어 ───────────────────────────────────────────────────────────
+_close_target_x   = None   # 색지 추정 x 좌표 (mm)
+_close_target_y   = None   # 색지 추정 y 좌표 (mm)
+KP_CLOSE_HDG      = 1.5    # 헤딩 오차(deg) → w 게인
+CLOSE_SPEED_MAX   = 0.13   # CLOSE 모드 최대 전진 속도 (m/s)
+CLOSE_ARRIVE_MM   = 150    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
+prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터
 stop_pivot_w               = 0.0   # 피봇 방향 (부호만 사용)
@@ -220,12 +239,31 @@ def parse_packet(data):
     return (angle_q6 / 64.0), (distance_q2 / 4.0)
 
 def read_arduino(arduino):
-    global arduino_heading_deg
+    global arduino_heading_deg, arduino_x_mm, arduino_y_mm
     while arduino.in_waiting > 0:
         try:
             line = arduino.readline().decode('utf-8', errors='ignore').strip()
-            if line.startswith('H:'): arduino_heading_deg = float(line[2:])
+            if line.startswith('O:'):
+                parts = line[2:].split(',')
+                if len(parts) == 3:
+                    arduino_x_mm        = float(parts[0])
+                    arduino_y_mm        = float(parts[1])
+                    arduino_heading_deg = float(parts[2])
+            elif line.startswith('H:'):   # 구버전 아두이노 호환
+                arduino_heading_deg = float(line[2:])
         except Exception: pass
+
+
+def _compute_close_target():
+    """CLOSE 진입 시 색지 추정 좌표 계산. (x_mm, y_mm) 반환."""
+    bearing_global_deg = arduino_heading_deg + camera_tracker.get_last_stable_bearing()
+    dist_mm            = camera_tracker.get_estimated_distance_mm()
+    hdg_rad            = math.radians(bearing_global_deg)
+    x_t = arduino_x_mm + dist_mm * math.sin(hdg_rad)
+    y_t = arduino_y_mm + dist_mm * math.cos(hdg_rad)
+    print(f"[CLOSE] 목표 좌표: ({x_t:.0f}, {y_t:.0f})mm  "
+          f"dist={dist_mm:.0f}mm  global_bearing={bearing_global_deg:.1f}°")
+    return x_t, y_t
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -644,6 +682,28 @@ def get_front_passable_gaps(scan_points):
     return sorted(passable, key=lambda g: g['score'], reverse=True)
 
 
+def choose_target_gap(passable_gaps, target_bearing, prev_heading):
+    """통과 가능 갭 중 목표 방향에 가장 가깝되, 직전 방향에서 급변하지 않는 갭 선택.
+    cost = 목표편차 + (직전방향편차 가중) → 비슷한 두 갭 사이 깜빡임(jitter) 억제."""
+    if not passable_gaps:
+        return None
+
+    def cost(g):
+        d_target = abs(((g['center_angle'] - target_bearing) + 180) % 360 - 180)
+        d_prev   = abs(((g['center_angle'] - prev_heading)   + 180) % 360 - 180)
+        return GAP_TARGET_WEIGHT * d_target + GAP_SMOOTH_WEIGHT * d_prev
+
+    return min(passable_gaps, key=cost)
+
+
+def is_target_blocked(scan_points, target_bearing):
+    """목표 방향 ±TARGET_CLEAR_CONE° 안에 TARGET_BLOCK_DIST mm 이내 장애물이 있으면 True."""
+    for a, d in scan_points:
+        if LIDAR_MIN_VALID < d < TARGET_BLOCK_DIST and abs(a - target_bearing) < TARGET_CLEAR_CONE:
+            return True
+    return False
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # [추가] 통과 불가 갭 → 가상 장애물 척력  ─ 코드 1에서 이식
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -799,18 +859,18 @@ def get_narrow_gap_pushes(scan_points, layer, in_stop=False):
 # 계층형 v/w 산출 (메인 로직)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def find_vw_layered(scan_points, heading_deg):
+def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
     """
-    1. 6개 레이어 병렬 처리
-    2. gap 너비 계산 (가장 가까운 레이어의 대표점 기준)
-    3. 좌우 점수 통합 → 방향 결정 (매 사이클 score로 재결정)
-       - [추가] 통과 불가 갭 가상 장애물 척력 반영
-         이중 반응 방지를 위해 effective_push = max(real, virtual)
-    4. v: affects_v 레이어 v_proposal의 가중 평균
-    5. w: 모든 활성 레이어 urgency의 가중 평균 × direction
-    6. w 보정: 측방 레이어 net delta + 측면 반발력 합산
+    목표 방향 막힘 여부 우선 판정 후 4-way 분기:
+      ① 목표 방향 열림           → 목표로 직진 (갭 무시)
+      ② 막힘 + 통과 갭 존재      → 갭 중 목표 최근접으로 우회 (Gap Following)
+      ③ 막힘 + 갭 없음 + 장애물  → score 기반 회피 (fallback)
+      ④ 막힘 + 갭 없음 + 장애물X → 목표 유지
+    안전 보정(측면 반발력)은 모든 분기에서 항상 가산.
     """
-    # 1. 레이어 처리
+    global _last_direction, prev_desired_heading
+
+    # ── 1. 레이어 처리 ──────────────────────────────────────────────────────
     layer_results = []
     for layer in LAYERS:
         r = process_layer(scan_points, layer)
@@ -825,135 +885,128 @@ def find_vw_layered(scan_points, heading_deg):
                   f"f={r['rep_fwd']:.0f}  w={r['weight']:.2f} u={r['urgency']:.2f}{v_str}  "
                   f"pL={r['push_left']:.0f} pR={r['push_right']:.0f}")
 
-    # 활성 레이어 없으면 직진
-    if not layer_results:
-        if DEBUG_FINAL:
-            print(f"  [FINAL] no active layers -> v={FORWARD_SPEED:.2f} w=0.00")
-        return FORWARD_SPEED, 0.0
-
-    # 2. gap 너비 계산 (가장 가까운 레이어의 대표점 기준)
-    closest = min(layer_results, key=lambda r: r['rep_horiz'])
-    ref_angle = closest['rep_angle']
-    ref_dist  = math.sqrt(closest['rep_horiz']**2 + closest['rep_fwd']**2)
-
-    gap_L = get_gap_width(scan_points, ref_angle, ref_dist, is_left=True)
-    gap_R = get_gap_width(scan_points, ref_angle, ref_dist, is_left=False)
-
-    # 2-2. 전방 통과 가능 갭 탐색 (에지→선분 기반)
-    front_gaps = get_front_passable_gaps(scan_points)
-    best_fg = front_gaps[0] if front_gaps else None
-
-    gap_bonus_L = 0.0
-    gap_bonus_R = 0.0
-    if best_fg is not None:
-        norm = ((best_fg['width'] / STOP_ESCAPE_MIN_GAP) *
-                (best_fg['depth'] / FRONT_GAP_MIN_DEPTH))
-        bonus = SCORE_GAP_FRONT * norm
-        if best_fg['center_angle'] < 0:
-            gap_bonus_L = bonus
-        else:
-            gap_bonus_R = bonus
-
-    if DEBUG_DIR:
-        print(f"  [FRONT_GAP] {len(front_gaps)} passable gap(s) found  "
-              f"(min_w={STOP_ESCAPE_MIN_GAP}mm min_d={FRONT_GAP_MIN_DEPTH}mm)")
-        for g in front_gaps:
-            chosen = " ← best" if g is best_fg else ""
-            print(f"    ca={g['center_angle']:+.1f}° w={g['width']:.0f}mm "
-                  f"d={g['depth']:.0f}mm score={g['score']:.0f}{chosen}")
-        if best_fg is not None:
-            side = "LEFT" if best_fg['center_angle'] < 0 else "RIGHT"
-            print(f"  [FRONT_GAP] bonus → {side}  +{gap_bonus_L or gap_bonus_R:.0f}")
-        else:
-            print(f"  [FRONT_GAP] no passable gap → no bonus")
-
-    # 3. 좌우 점수 통합
-    sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
-    sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
-
-    # 3-2. [추가] 가상 장애물 척력 (통과 불가 갭) — 레이어별 max 취합
-    #   레이어 경계 중복 가산 없음. STOP 피봇 중에는 비활성화.
-    virt_push_L_total = 0.0
-    virt_push_R_total = 0.0
-    for layer in LAYERS:
-        vpl, vpr = get_narrow_gap_pushes(
-            scan_points, layer,
-            in_stop=(stop_phase == 2)
-        )
-        virt_push_L_total = max(virt_push_L_total, vpl)
-        virt_push_R_total = max(virt_push_R_total, vpr)
-
-    # ── 이중 반응 안전망: max(실제, 가상) → 더 강한 신호 하나만 적용 ─────────
-    #   sum_pR / virt_push_R_total : 오른쪽 장애물·불통과 갭 → 둘 다 score_L 기여
-    #   같은 방향 신호이므로 합산 대신 max() 사용
-    effective_push_R = max(sum_pR, virt_push_R_total)
-    effective_push_L = max(sum_pL, virt_push_L_total)
-
-    # 측방 레이어 방향 기여 (방향 결정 주도)
-    side_left_push, side_right_push = get_side_layer_push(scan_points)
-
-    term_gap_L    = SCORE_ALPHA * gap_L
-    term_gap_R    = SCORE_ALPHA * gap_R
-    term_push_L   = SCORE_BETA  * effective_push_R
-    term_push_R   = SCORE_BETA  * effective_push_L
-    term_side_L   = SCORE_SIDE  * side_right_push
-    term_side_R   = SCORE_SIDE  * side_left_push
-    term_head_L   = max(0.0, -heading_deg) * HEADING_WEIGHT_MM
-    term_head_R   = max(0.0,  heading_deg) * HEADING_WEIGHT_MM
-
-    score_L = term_gap_L + term_push_L + term_side_L + term_head_L + gap_bonus_L
-    score_R = term_gap_R + term_push_R + term_side_R + term_head_R + gap_bonus_R
-
-    if DEBUG_DIR:
-        print(f"  [GAP_W] L={gap_L:.0f}mm R={gap_R:.0f}mm  "
-              f"(ref={ref_angle:+.1f}°/{ref_dist:.0f}mm from {closest['name']})")
-        print(f"  [SCORE] L={score_L:.0f}  R={score_R:.0f}")
-        print(f"    gap   αL={term_gap_L:.0f} / αR={term_gap_R:.0f}")
-        print(f"    push  βL={term_push_L:.0f} / βR={term_push_R:.0f}  "
-              f"[real {SCORE_BETA*sum_pR:.0f}/{SCORE_BETA*sum_pL:.0f}  "
-              f"virt {SCORE_BETA*virt_push_R_total:.0f}/{SCORE_BETA*virt_push_L_total:.0f}]")
-        print(f"    side  γL={term_side_L:.0f} / γR={term_side_R:.0f}")
-        print(f"    head  hL={term_head_L:.0f} / hR={term_head_R:.0f}")
-        print(f"    fgap  fL={gap_bonus_L:.0f} / fR={gap_bonus_R:.0f}")
-
-    # 4. 방향 결정 (히스테리시스: 점수 차가 DIRECTION_HYSTERESIS 미만이면 직전 방향 유지)
-    global _last_direction
-    score_diff = score_L - score_R  # 양수 = 왼쪽 유리, 음수 = 오른쪽 유리
-    if _last_direction > 0:
-        direction = 1.0 if score_diff > -DIRECTION_HYSTERESIS else -1.0
-    else:
-        direction = -1.0 if score_diff < DIRECTION_HYSTERESIS else 1.0
-    if DEBUG_DIR:
-        switched = "SWITCH" if direction != _last_direction else "HOLD"
-        print(f"  [DIR] {'LEFT' if direction > 0 else 'RIGHT'} (diff={score_diff:+.0f} hyst=±{DIRECTION_HYSTERESIS:.0f} {switched})")
-    _last_direction = direction
-
-    # 5. v 계산: affects_v 레이어 v_proposal의 가중 평균
+    # ── 2. v 계산 (direction 무관 → 분기 앞) ───────────────────────────────
     v_layers = [r for r in layer_results if r['v_proposal'] is not None]
     if v_layers:
-        total_w = sum(r['weight'] for r in v_layers)
-        v = sum(r['weight'] * r['v_proposal'] for r in v_layers) / total_w
+        total_w_v = sum(r['weight'] for r in v_layers)
+        v = sum(r['weight'] * r['v_proposal'] for r in v_layers) / total_w_v
     else:
-        v = FORWARD_SPEED   # L5/L6만 활성 → 최대 속도
+        v = FORWARD_SPEED
 
-    # 6. w 크기: 모든 활성 레이어 urgency 가중 평균
-    total_w_all = sum(r['weight'] for r in layer_results)
-    w_mag = sum(r['weight'] * r['urgency'] for r in layer_results) / total_w_all
-    w_mag = max(min(w_mag, MAX_W), W_MIN_DANGER)
+    # ── 3. 전방 통과 갭 탐색 + 목표 방향 막힘 판정 ─────────────────────────
+    front_gaps = get_front_passable_gaps(scan_points)
+    chosen_gap = choose_target_gap(front_gaps, target_bearing, prev_desired_heading)
+    blocked    = is_target_blocked(scan_points, target_bearing)
+    print(f"[BRANCH] tb={target_bearing:+.0f} gaps={len(front_gaps)} "
+      f"chosen_ca={chosen_gap['center_angle'] if chosen_gap else None} "
+      f"layers={len(layer_results)} blocked={blocked}")
 
-    w = direction * w_mag
+    # 측방 레이어 push — fallback 점수 계산 & 안전 보정 공용
+    side_left_push, side_right_push = get_side_layer_push(scan_points)
 
-    # 측방 레이어 거리 기반 w 크기 보정 (부호 있는 net delta)
-    side_w_delta = (side_right_push - side_left_push) * SIDE_W_BOOST_GAIN
-    w = w + side_w_delta
+    # ── 4. 4-way 분기: w 결정 ───────────────────────────────────────────────
+    if not blocked:
+        # ① 목표 방향이 비어있음 → 목표로 직진 (갭 무시)
+        desired_heading      = target_bearing
+        prev_desired_heading = desired_heading
+        w = - KP_GOAL * desired_heading
 
-    # 측면 반발력 합산
+        # 목표 정렬도에 따라 v 조정
+        # 정렬됨(0°) → FORWARD_SPEED / 많이 벗어남(≥TARGET_ALIGN_ANGLE) → MIN_SPEED
+        align_factor = max(0.0, 1.0 - abs(desired_heading) / TARGET_ALIGN_ANGLE)
+        v = MIN_SPEED + (FORWARD_SPEED - MIN_SPEED) * align_factor
+
+        if DEBUG_DIR:
+            print(f"  [TARGET] clear -> head to target {target_bearing:+.1f}deg "
+                  f"w={w:+.3f} v={v:.2f} align={align_factor:.2f}")
+
+    elif chosen_gap is not None:
+        # ② 목표 막힘 → 통과 갭 중 목표 최근접으로 우회 (gap-following)
+        desired_heading      = chosen_gap['center_angle']
+        prev_desired_heading = desired_heading
+        w = - KP_GOAL * desired_heading
+        if DEBUG_DIR:
+            print(f"  [GAP_FOLLOW] {len(front_gaps)} gap(s) → chosen={desired_heading:+.1f}° "
+                  f"target={target_bearing:+.1f}° w={w:+.3f}")
+
+    elif layer_results:
+        # ③ 막힘 + 통과 갭 없음 + 장애물 → 기존 score 기반 회피 (fallback)
+        closest   = min(layer_results, key=lambda r: r['rep_horiz'])
+        ref_angle = closest['rep_angle']
+        ref_dist  = math.sqrt(closest['rep_horiz']**2 + closest['rep_fwd']**2)
+
+        gap_L = get_gap_width(scan_points, ref_angle, ref_dist, is_left=True)
+        gap_R = get_gap_width(scan_points, ref_angle, ref_dist, is_left=False)
+
+        sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
+        sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
+
+        virt_push_L_total = 0.0
+        virt_push_R_total = 0.0
+        for layer in LAYERS:
+            vpl, vpr = get_narrow_gap_pushes(
+                scan_points, layer, in_stop=(stop_phase == 2))
+            virt_push_L_total = max(virt_push_L_total, vpl)
+            virt_push_R_total = max(virt_push_R_total, vpr)
+
+        effective_push_R = max(sum_pR, virt_push_R_total)
+        effective_push_L = max(sum_pL, virt_push_L_total)
+
+        term_gap_L  = SCORE_ALPHA * gap_L
+        term_gap_R  = SCORE_ALPHA * gap_R
+        term_push_L = SCORE_BETA  * effective_push_R
+        term_push_R = SCORE_BETA  * effective_push_L
+        term_side_L = SCORE_SIDE  * side_right_push
+        term_side_R = SCORE_SIDE  * side_left_push
+        term_head_L = max(0.0, -heading_deg) * HEADING_WEIGHT_MM
+        term_head_R = max(0.0,  heading_deg) * HEADING_WEIGHT_MM
+
+        score_L = term_gap_L + term_push_L + term_side_L + term_head_L
+        score_R = term_gap_R + term_push_R + term_side_R + term_head_R
+
+        if DEBUG_DIR:
+            print(f"  [FALLBACK] no passable gap → score-based avoidance")
+            print(f"  [GAP_W] L={gap_L:.0f}mm R={gap_R:.0f}mm  "
+                  f"(ref={ref_angle:+.1f}°/{ref_dist:.0f}mm from {closest['name']})")
+            print(f"  [SCORE] L={score_L:.0f}  R={score_R:.0f}")
+            print(f"    gap   αL={term_gap_L:.0f} / αR={term_gap_R:.0f}")
+            print(f"    push  βL={term_push_L:.0f} / βR={term_push_R:.0f}  "
+                  f"[real {SCORE_BETA*sum_pR:.0f}/{SCORE_BETA*sum_pL:.0f}  "
+                  f"virt {SCORE_BETA*virt_push_R_total:.0f}/{SCORE_BETA*virt_push_L_total:.0f}]")
+            print(f"    side  γL={term_side_L:.0f} / γR={term_side_R:.0f}")
+            print(f"    head  hL={term_head_L:.0f} / hR={term_head_R:.0f}")
+
+        score_diff = score_L - score_R
+        if _last_direction > 0:
+            direction = 1.0 if score_diff > -DIRECTION_HYSTERESIS else -1.0
+        else:
+            direction = -1.0 if score_diff < DIRECTION_HYSTERESIS else 1.0
+        if DEBUG_DIR:
+            switched = "SWITCH" if direction != _last_direction else "HOLD"
+            print(f"  [DIR] {'LEFT' if direction > 0 else 'RIGHT'} "
+                  f"(diff={score_diff:+.0f} hyst=±{DIRECTION_HYSTERESIS:.0f} {switched})")
+        _last_direction = direction
+
+        total_w_all = sum(r['weight'] for r in layer_results)
+        w_mag = sum(r['weight'] * r['urgency'] for r in layer_results) / total_w_all
+        w_mag = max(min(w_mag, MAX_W), W_MIN_DANGER)
+        w = direction * w_mag
+
+    else:
+        # ④ 막힘인데 갭도 장애물도 없음(드묾) → 목표 유지
+        desired_heading      = target_bearing
+        prev_desired_heading = desired_heading
+        w = - KP_GOAL * target_bearing
+        if DEBUG_FINAL:
+            print(f"  [CLEAR] no obstacles → target={target_bearing:+.1f}° w={w:+.3f}")
+
+    # ── 5. 안전 보정 (항상 가산) ────────────────────────────────────────────
+    w += (side_right_push - side_left_push) * SIDE_W_BOOST_GAIN
     side_dw, _, _ = get_side_repulsion(scan_points)
     w = max(min(w + side_dw, MAX_W), -MAX_W)
 
     if DEBUG_FINAL:
-        print(f"  [FINAL] v={v:.2f} w={w:+.2f} dir={'L' if direction > 0 else 'R'} "
-              f"side_boost={side_w_delta:+.3f}")
+        print(f"  [FINAL] v={v:.2f} w={w:+.2f} target={target_bearing:+.1f}°")
 
     return v, w
 
@@ -985,7 +1038,7 @@ def _stop_set_pivot(heading_deg, target, gap_width):
         stop_pivot_w = -MAX_W if abs(target) < 5 else -math.copysign(MAX_W, target)
 
 
-def find_vw_command(scan_points, heading_deg):
+def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
     """STOP zone 우선 검사 → 활성 시 피봇 탈출, 아니면 계층형 처리.
 
     상태 (stop_phase):
@@ -1003,14 +1056,14 @@ def find_vw_command(scan_points, heading_deg):
                 err = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
                 print(f"  [STOP] zone cleared (heading err={err:.1f}°) -> layered")
             _stop_reset()
-            return find_vw_layered(scan_points, heading_deg)
+            return find_vw_layered(scan_points, heading_deg, target_bearing)
 
         stop_cycle_count += 1
         if stop_cycle_count >= STOP_MAX_CYCLES:
             if DEBUG_STOP:
                 print(f"  [STOP] max pivot cycles ({STOP_MAX_CYCLES}) -> force layered")
             _stop_reset()
-            return find_vw_layered(scan_points, heading_deg)
+            return find_vw_layered(scan_points, heading_deg, target_bearing)
 
         err   = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
         scale = min(1.0, err / STOP_PIVOT_SLOW_DEG)
@@ -1042,7 +1095,7 @@ def find_vw_command(scan_points, heading_deg):
                   f"global={stop_locked_global_heading:.1f}° event saved {_fname}")
         return 0.0, stop_pivot_w
 
-    return find_vw_layered(scan_points, heading_deg)
+    return find_vw_layered(scan_points, heading_deg, target_bearing)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1089,21 +1142,59 @@ def _lidar_reader(lidar):
 def _motor_controller(arduino):
     """모터 제어 전용 스레드.
     SEND_INTERVAL마다 독립적으로 명령 송신 — 라이다 지연과 무관."""
-    global prev_w
+    global prev_w, _close_target_x, _close_target_y
     last_cmd_str = ""
     while not _shutdown.is_set():
         read_arduino(arduino)
         with _scan_lock:
             pts = [(a, d) for a, d in _latest_scan if d > 0]
         if pts:
-            v, w = find_vw_command(pts, arduino_heading_deg)
+            # ── 상태 1: DWELL / DONE → 정지 ────────────────────────────────
+            if camera_tracker.is_done() or camera_tracker.is_dwelling():
+                v, w = 0.0, 0.0
+                _close_target_x = _close_target_y = None
+
+            # ── 상태 2: CLOSE → 오도메트리 위치 제어 ───────────────────────
+            elif camera_tracker.is_close():
+                if _close_target_x is None:
+                    _close_target_x, _close_target_y = _compute_close_target()
+
+                ex = _close_target_x - arduino_x_mm
+                ey = _close_target_y - arduino_y_mm
+                dist_err = math.sqrt(ex ** 2 + ey ** 2)
+
+                if dist_err < CLOSE_ARRIVE_MM:
+                    # 추정 좌표 도달 → 색지 위에 바퀴가 들어온 것으로 판정, 정지
+                    # _close_target_x 유지: 다음 사이클도 재계산 없이 dist_err < 150mm → 정지 유지
+                    v, w = 0.0, 0.0
+                    print(f"[CLOSE] 도달 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) → 정지")
+                else:
+                    target_hdg = math.degrees(math.atan2(ex, ey))
+                    hdg_err    = normalize_angle(arduino_heading_deg - target_hdg)
+
+                    w = max(min(-KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
+                    v = min(CLOSE_SPEED_MAX, max(MIN_SPEED, 0.001 * dist_err))
+
+                    print(f"[CLOSE] pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
+                          f"tgt=({_close_target_x:.0f},{_close_target_y:.0f}) "
+                          f"dist={dist_err:.0f}mm hdg_err={hdg_err:+.1f}° "
+                          f"v={v:.2f} w={w:+.2f}")
+
+            # ── 상태 3: SEEK → 카메라 bearing + 라이다 회피 ────────────────
+            else:
+                _close_target_x = _close_target_y = None
+                bearing = camera_tracker.get_bearing()
+                tb = bearing if bearing is not None else 0.0
+                v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=tb)
+
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
             prev_w = w
             cmd = f"{v:.2f} {w:.2f}\n"
             arduino.write(cmd.encode())
             if cmd != last_cmd_str:
                 print(f"[SEND] v={v:.2f}  w={w:+.2f}  "
-                      f"heading={arduino_heading_deg:.1f}deg")
+                      f"pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f})mm  "
+                      f"hdg={arduino_heading_deg:.1f}°")
                 last_cmd_str = cmd
         time.sleep(SEND_INTERVAL)
 
@@ -1151,6 +1242,7 @@ def main():
     t_motor = threading.Thread(target=_motor_controller,  args=(arduino,), daemon=True, name="motor")
 
     try:
+        camera_tracker.start()
         t_lidar.start()
         t_motor.start()
         while not _shutdown.is_set():
@@ -1159,6 +1251,7 @@ def main():
         print("\nShutting down...")
     finally:
         _shutdown.set()
+        camera_tracker.stop()
         t_lidar.join(timeout=2.0)
         t_motor.join(timeout=2.0)
         lidar.write(bytes([0xA5, 0x25]))

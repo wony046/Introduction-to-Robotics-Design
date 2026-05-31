@@ -103,7 +103,7 @@ DIRECTION_HYSTERESIS = 300.0
 GAP_TARGET_WEIGHT = 1.0           # 갭 선택: 목표 방향 추종 강도 (주 항)
 GAP_SMOOTH_WEIGHT = 0.3           # 갭 선택: 직전 방향 유지 강도 (떨림 억제)
 KP_GOAL            = MAX_W / 45.0  # 비례 조향 게인 (45° → MAX_W)
-TARGET_ALIGN_ANGLE = 28.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
+TARGET_ALIGN_ANGLE = 60.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
 TARGET_CLEAR_CONE  = 18           # deg: 목표 방향 ± 이 각도 범위를 막힘 검사 대상으로
 TARGET_BLOCK_DIST = 600           # mm: 이 거리 이내 장애물이 있으면 "목표 방향 막힘"
 
@@ -164,9 +164,9 @@ prev_w                = 0.0
 # ── CLOSE 접근 제어 ───────────────────────────────────────────────────────────
 _close_target_x   = None   # 색지 추정 x 좌표 (mm)
 _close_target_y   = None   # 색지 추정 y 좌표 (mm)
-KP_CLOSE_HDG      = 1.5    # 헤딩 오차(deg) → w 게인
+KP_CLOSE_HDG      = 0.06   # 헤딩 오차(deg) → w 게인  (포화: ±30° → MAX_W)
 CLOSE_SPEED_MAX   = 0.13   # CLOSE 모드 최대 전진 속도 (m/s)
-CLOSE_ARRIVE_MM   = 50    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
+CLOSE_ARRIVE_MM   = 150    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터
@@ -1176,6 +1176,7 @@ def _motor_controller(arduino):
 
                     w = max(min(-KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
                     v = min(CLOSE_SPEED_MAX, max(MIN_SPEED, 0.001 * dist_err))
+                    prev_w = w   # CLOSE 진입 시 스무딩 관성 리셋
 
                     print(f"[CLOSE] pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
                           f"tgt=({_close_target_x:.0f},{_close_target_y:.0f}) "

@@ -27,6 +27,7 @@ HFOV_DEG          = 38.6
 CAM_POLAR_EPSILON = 0.05
 CLOSE_ROI_BOTTOM  = 0.3
 CLOSE_ROI_FILL    = 0.5
+SMOOTH_ALPHA      = 0.5      # 저역통과 필터 계수 (camera_tracker.py와 동일)
 
 COLOR_RANGES = {
     'RED':    [((134, 70,  75),  (179, 188, 255))],
@@ -169,7 +170,8 @@ def _draw_cam_panel(frame, centroid, color_name, is_close, b_seek, b_close_val):
 # ── 다이어그램 패널 ──────────────────────────────────────────────────────────
 
 def _draw_diag_panel(centroid, is_close, b_seek, b_close_val, lateral, forward,
-                     roi_fill_close, color_name):
+                     roi_fill_close, color_name,
+                     raw_centroid=None, filter_on=True):
     img = np.zeros((DIAG_H, DIAG_W, 3), dtype=np.uint8)
     img[:] = (25, 25, 25)
 
@@ -229,16 +231,26 @@ def _draw_diag_panel(centroid, is_close, b_seek, b_close_val, lateral, forward,
 
     if centroid is not None:
         cx, cy_val = centroid
-        row("cx / cy",      f"{cx} / {cy_val}")
+        # raw centroid 표시 (필터 켜진 경우)
+        if filter_on and raw_centroid is not None:
+            rcx, rcy = raw_centroid
+            row("raw cx/cy",   f"{rcx} / {rcy}",     (100, 100, 100))
+            row("filt cx/cy",  f"{cx} / {cy_val}",   C_GREEN)
+        else:
+            row("cx / cy",     f"{cx} / {cy_val}")
         row("f_px",         f"{_f_px():.1f} px")
         row("lateral",      f"{lateral:+.4f}")
         row("forward",      f"{forward:.4f}",
-            C_ORANGE if forward < 0.1 else C_WHITE)   # forward 작으면 경고색
+            C_ORANGE if forward < 0.1 else C_WHITE)
         row("SEEK bearing",  f"{b_seek:+.2f} deg",  C_CYAN)
         row("CLOSE bearing", f"{b_close_val:+.2f} deg", C_ORANGE)
         diff = abs(b_close_val - b_seek)
         row("차이 |CL-SK|",  f"{diff:.2f} deg",
             (60, 60, 240) if diff > 10 else C_GREEN)
+        # 필터 상태 표시
+        fstr = f"FILTER ON  (α={SMOOTH_ALPHA})" if filter_on else "FILTER OFF"
+        fcol = C_GREEN if filter_on else (100, 100, 100)
+        row("필터",  fstr, fcol)
     else:
         _put(img, "미감지", (DIAG_W//2 - 30, y + 20), scale=0.80, color=(100, 100, 100))
 
@@ -283,8 +295,12 @@ def main():
     print("1=RED  2=YELLOW  3=BLUE  q=종료")
 
     color_idx  = 0
+    filter_on  = True
+    smooth_cx  = None
+    smooth_cy  = None
     win        = 'Bearing Test'
     cv2.namedWindow(win)
+    print("f=필터 ON/OFF")
 
     while True:
         ret, frame = cap.read()
@@ -293,10 +309,27 @@ def main():
         if FRAME_ROTATE is not None:
             frame = cv2.rotate(frame, FRAME_ROTATE)
 
-        color_name = COLOR_KEYS[color_idx]
-        centroid, area = _detect(frame, color_name)
-        roi_fill_close = _roi_fill(frame, color_name, CLOSE_ROI_BOTTOM)
-        is_close       = (roi_fill_close >= CLOSE_ROI_FILL)
+        color_name    = COLOR_KEYS[color_idx]
+        raw_centroid, area = _detect(frame, color_name)
+        roi_fill_close     = _roi_fill(frame, color_name, CLOSE_ROI_BOTTOM)
+        is_close           = (roi_fill_close >= CLOSE_ROI_FILL)
+
+        # ── 저역통과 필터 ──────────────────────────────────────────────────
+        if raw_centroid is not None:
+            rx, ry = raw_centroid
+            if filter_on:
+                if smooth_cx is None:
+                    smooth_cx, smooth_cy = float(rx), float(ry)
+                else:
+                    smooth_cx = SMOOTH_ALPHA * rx + (1.0 - SMOOTH_ALPHA) * smooth_cx
+                    smooth_cy = SMOOTH_ALPHA * ry + (1.0 - SMOOTH_ALPHA) * smooth_cy
+                centroid = (int(smooth_cx), int(smooth_cy))
+            else:
+                smooth_cx, smooth_cy = None, None   # 필터 꺼지면 상태 초기화
+                centroid = raw_centroid
+        else:
+            smooth_cx, smooth_cy = None, None
+            centroid = None
 
         b_seek      = 0.0
         b_close_val = 0.0
@@ -312,7 +345,8 @@ def main():
         cam_panel  = _draw_cam_panel(frame, centroid, color_name, is_close,
                                      b_seek, b_close_val)
         diag_panel = _draw_diag_panel(centroid, is_close, b_seek, b_close_val,
-                                      lateral, forward_val, roi_fill_close, color_name)
+                                      lateral, forward_val, roi_fill_close, color_name,
+                                      raw_centroid=raw_centroid, filter_on=filter_on)
 
         # 높이 맞추기
         ch = cam_panel.shape[0]
@@ -339,6 +373,10 @@ def main():
         elif key == ord('3'):
             color_idx = 2
             print(f"[색상] BLUE 선택")
+        elif key == ord('f'):
+            filter_on = not filter_on
+            smooth_cx = smooth_cy = None   # 토글 시 필터 상태 초기화
+            print(f"[필터] {'ON' if filter_on else 'OFF'}  (α={SMOOTH_ALPHA})")
 
     cap.release()
     cv2.destroyAllWindows()

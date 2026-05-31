@@ -34,6 +34,7 @@ CAM_HEIGHT_MM      = 420.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm
 CAM_TILT_DEG       = 34.5    # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
                                #   수평=0°, 아래로 내려다볼수록 +
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
+SMOOTH_ALPHA       = 0.5      # centroid 저역통과 필터 계수 (0=완전평활 ~ 1=원본)
 
 # ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
 # 실내 조명 조건에서 반드시 튜닝 필요
@@ -71,6 +72,8 @@ _roi_peaked          = False   # 카메라 스레드 전용: ROI 점유율이 pe
 _close               = False   # CLOSE 모드 (blob 크기 > 임계)
 _last_stable_bearing = 0.0     # 클리핑 전 마지막 유효 bearing (deg)
 _last_cy             = None    # 마지막 centroid y (기하 거리 추정용)
+_smooth_cx           = None    # 저역통과 필터링된 centroid x (카메라 스레드 전용)
+_smooth_cy           = None    # 저역통과 필터링된 centroid y (카메라 스레드 전용)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -161,6 +164,7 @@ def _camera_loop():
     global _target_bearing, _color_detected
     global _mission_idx, _dwell_start, _dwelling, _done
     global _close, _last_stable_bearing, _last_cy
+    global _smooth_cx, _smooth_cy
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
@@ -204,7 +208,15 @@ def _camera_loop():
 
         # bearing 계산: SEEK=atan2 / CLOSE=원근보정, 클리핑 시 마지막 안정값 유지
         if centroid is not None:
-            cx, cy = centroid
+            cx_raw, cy_raw = centroid
+            # ── 저역통과 필터 ───────────────────────────────────────────────
+            if _smooth_cx is None:
+                _smooth_cx, _smooth_cy = float(cx_raw), float(cy_raw)
+            else:
+                _smooth_cx = SMOOTH_ALPHA * cx_raw + (1.0 - SMOOTH_ALPHA) * _smooth_cx
+                _smooth_cy = SMOOTH_ALPHA * cy_raw + (1.0 - SMOOTH_ALPHA) * _smooth_cy
+            cx, cy = int(_smooth_cx), int(_smooth_cy)
+
             clipped = clip_l or clip_r
             if is_close_now:
                 if clipped:
@@ -215,9 +227,9 @@ def _camera_loop():
                 bearing = _to_bearing_seek(cx)
                 if not clipped:
                     _last_stable_bearing = bearing   # 안정 구간에서만 갱신
-            _last_cy = cy
+            _last_cy = cy   # 필터링된 cy → 거리 추정에 사용
         else:
-            bearing    = None
+            bearing      = None
             is_close_now = False
 
         # peaked/drop 도착 판정
@@ -256,6 +268,8 @@ def _camera_loop():
                     _roi_peaked           = False
                     _close                = False
                     _last_stable_bearing  = 0.0
+                    _smooth_cx            = None   # 다음 색지용 필터 초기화
+                    _smooth_cy            = None
                     if _mission_idx >= len(MISSION_ORDER):
                         _done = True
                         print("DONE (완주)")
