@@ -178,7 +178,7 @@ _close_target_x   = None   # 색지 추정 x 좌표 (mm)
 _close_target_y   = None   # 색지 추정 y 좌표 (mm)
 KP_CLOSE_HDG      = 0.1   # 헤딩 오차(deg) → w 게인  (포화: ±18° → MAX_W)
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
-CLOSE_ARRIVE_MM   = 50    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
+CLOSE_ARRIVE_MM   = 200    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 CLOSE_ALIGN_DEG   = 20.0  # 헤딩 오차 이 각도 이상이면 v=MIN_SPEED (곡선 접근용)
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
