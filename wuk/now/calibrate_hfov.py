@@ -53,9 +53,12 @@ _freeze_until = 0.0
 
 def _mouse_cb(event, x, y, flags, param):
     global _mouse_pos
-    _mouse_pos = (x, y)
+    # 축소 화면 좌표 → 원본 이미지 좌표로 역변환
+    ix = int(x / DISPLAY_SCALE)
+    iy = int(y / DISPLAY_SCALE)
+    _mouse_pos = (ix, iy)
     if event == cv2.EVENT_LBUTTONDOWN and len(_clicks) < 2:
-        _clicks.append((x, y))
+        _clicks.append((ix, iy))
 
 
 def _compute(p1, p2, D_mm, W_mm):
