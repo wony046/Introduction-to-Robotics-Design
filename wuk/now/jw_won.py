@@ -103,7 +103,7 @@ DIRECTION_HYSTERESIS = 300.0
 GAP_TARGET_WEIGHT = 1.0           # 갭 선택: 목표 방향 추종 강도 (주 항)
 GAP_SMOOTH_WEIGHT = 0.3           # 갭 선택: 직전 방향 유지 강도 (떨림 억제)
 KP_GOAL            = MAX_W / 45.0  # 비례 조향 게인 (45° → MAX_W)
-TARGET_ALIGN_ANGLE = 20.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
+TARGET_ALIGN_ANGLE = 28.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
 TARGET_CLEAR_CONE  = 18           # deg: 목표 방향 ± 이 각도 범위를 막힘 검사 대상으로
 TARGET_BLOCK_DIST = 600           # mm: 이 거리 이내 장애물이 있으면 "목표 방향 막힘"
 
@@ -157,7 +157,16 @@ DEBUG_VIRTUAL = True    # [추가] 가상 장애물 디버그
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
+arduino_x_mm          = 0.0   # 오도메트리 x 위치 (mm, 우측 +)
+arduino_y_mm          = 0.0   # 오도메트리 y 위치 (mm, 전방 +)
 prev_w                = 0.0
+
+# ── CLOSE 접근 제어 ───────────────────────────────────────────────────────────
+_close_target_x   = None   # 색지 추정 x 좌표 (mm)
+_close_target_y   = None   # 색지 추정 y 좌표 (mm)
+KP_CLOSE_HDG      = 1.5    # 헤딩 오차(deg) → w 게인
+CLOSE_SPEED_MAX   = 0.13   # CLOSE 모드 최대 전진 속도 (m/s)
+CLOSE_ARRIVE_MM   = 150    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터
@@ -230,12 +239,31 @@ def parse_packet(data):
     return (angle_q6 / 64.0), (distance_q2 / 4.0)
 
 def read_arduino(arduino):
-    global arduino_heading_deg
+    global arduino_heading_deg, arduino_x_mm, arduino_y_mm
     while arduino.in_waiting > 0:
         try:
             line = arduino.readline().decode('utf-8', errors='ignore').strip()
-            if line.startswith('H:'): arduino_heading_deg = float(line[2:])
+            if line.startswith('O:'):
+                parts = line[2:].split(',')
+                if len(parts) == 3:
+                    arduino_x_mm        = float(parts[0])
+                    arduino_y_mm        = float(parts[1])
+                    arduino_heading_deg = float(parts[2])
+            elif line.startswith('H:'):   # 구버전 아두이노 호환
+                arduino_heading_deg = float(line[2:])
         except Exception: pass
+
+
+def _compute_close_target():
+    """CLOSE 진입 시 색지 추정 좌표 계산. (x_mm, y_mm) 반환."""
+    bearing_global_deg = arduino_heading_deg + camera_tracker.get_last_stable_bearing()
+    dist_mm            = camera_tracker.get_estimated_distance_mm()
+    hdg_rad            = math.radians(bearing_global_deg)
+    x_t = arduino_x_mm + dist_mm * math.sin(hdg_rad)
+    y_t = arduino_y_mm + dist_mm * math.cos(hdg_rad)
+    print(f"[CLOSE] 목표 좌표: ({x_t:.0f}, {y_t:.0f})mm  "
+          f"dist={dist_mm:.0f}mm  global_bearing={bearing_global_deg:.1f}°")
+    return x_t, y_t
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1114,26 +1142,59 @@ def _lidar_reader(lidar):
 def _motor_controller(arduino):
     """모터 제어 전용 스레드.
     SEND_INTERVAL마다 독립적으로 명령 송신 — 라이다 지연과 무관."""
-    global prev_w
+    global prev_w, _close_target_x, _close_target_y
     last_cmd_str = ""
     while not _shutdown.is_set():
         read_arduino(arduino)
         with _scan_lock:
             pts = [(a, d) for a, d in _latest_scan if d > 0]
         if pts:
+            # ── 상태 1: DWELL / DONE → 정지 ────────────────────────────────
             if camera_tracker.is_done() or camera_tracker.is_dwelling():
                 v, w = 0.0, 0.0
+                _close_target_x = _close_target_y = None
+
+            # ── 상태 2: CLOSE → 오도메트리 위치 제어 ───────────────────────
+            elif camera_tracker.is_close():
+                if _close_target_x is None:
+                    _close_target_x, _close_target_y = _compute_close_target()
+
+                ex = _close_target_x - arduino_x_mm
+                ey = _close_target_y - arduino_y_mm
+                dist_err = math.sqrt(ex ** 2 + ey ** 2)
+
+                if dist_err < CLOSE_ARRIVE_MM:
+                    # 추정 좌표 도달 → 색지 위에 바퀴가 들어온 것으로 판정, 정지
+                    # _close_target_x 유지: 다음 사이클도 재계산 없이 dist_err < 150mm → 정지 유지
+                    v, w = 0.0, 0.0
+                    print(f"[CLOSE] 도달 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) → 정지")
+                else:
+                    target_hdg = math.degrees(math.atan2(ex, ey))
+                    hdg_err    = normalize_angle(arduino_heading_deg - target_hdg)
+
+                    w = max(min(-KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
+                    v = min(CLOSE_SPEED_MAX, max(MIN_SPEED, 0.001 * dist_err))
+
+                    print(f"[CLOSE] pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
+                          f"tgt=({_close_target_x:.0f},{_close_target_y:.0f}) "
+                          f"dist={dist_err:.0f}mm hdg_err={hdg_err:+.1f}° "
+                          f"v={v:.2f} w={w:+.2f}")
+
+            # ── 상태 3: SEEK → 카메라 bearing + 라이다 회피 ────────────────
             else:
+                _close_target_x = _close_target_y = None
                 bearing = camera_tracker.get_bearing()
                 tb = bearing if bearing is not None else 0.0
                 v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=tb)
+
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
             prev_w = w
             cmd = f"{v:.2f} {w:.2f}\n"
             arduino.write(cmd.encode())
             if cmd != last_cmd_str:
                 print(f"[SEND] v={v:.2f}  w={w:+.2f}  "
-                      f"heading={arduino_heading_deg:.1f}deg")
+                      f"pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f})mm  "
+                      f"hdg={arduino_heading_deg:.1f}°")
                 last_cmd_str = cmd
         time.sleep(SEND_INTERVAL)
 

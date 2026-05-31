@@ -35,6 +35,8 @@ volatile long encLeft  = 0;
 volatile long encRight = 0;
 long  prevL = 0, prevR = 0;
 float heading = 0.0f;
+float odom_x  = 0.0f;   // m 단위 (전방 +Y, 우측 +X)
+float odom_y  = 0.0f;
 
 const float WHEEL_RATIO = 0.00568f;
 const float MPP_L = (1.0f / 4795.0f) * (1.0f - WHEEL_RATIO / 2.0f);
@@ -123,7 +125,10 @@ void updateOdometry() {
   float dsL = (safeL - prevL) * MPP_L;
   float dsR = (safeR - prevR) * MPP_R;
   prevL = safeL; prevR = safeR;
-  heading += (dsR - dsL) / WHEEL_BASE;
+  float ds  = (dsL + dsR) * 0.5f;
+  heading  += (dsR - dsL) / WHEEL_BASE;
+  odom_x   += ds * sinf(heading);
+  odom_y   += ds * cosf(heading);
 }
 
 
@@ -168,7 +173,11 @@ void loop() {
 
   // ── 헤딩 전송 (50ms) ─────────────────────────────────────────────────────
   if (millis() - lastHeadingSend >= HEADING_SEND_MS) {
-    Serial1.print(F("H:"));
+    Serial1.print(F("O:"));
+    Serial1.print(odom_x * 1000.0f, 0);   // m → mm
+    Serial1.print(F(","));
+    Serial1.print(odom_y * 1000.0f, 0);
+    Serial1.print(F(","));
     Serial1.println(heading * 57.2958f, 1);
     lastHeadingSend = millis();
   }
@@ -188,7 +197,7 @@ void loop() {
     cmd.trim();
     if      (cmd == "CAL" || cmd == "cal") { stopMotors(); autoCalibrateMotors(); saveCalibToEEPROM(); checkCalQuality(); checkFFHoldout(); }
     else if (cmd == "chk" || cmd == "CHK") { checkCalQuality(); checkFFHoldout(); }
-    else if (cmd == "R"   || cmd == "r")   { heading = 0.0f; Serial.println(F("[R] 헤딩 리셋")); }
+    else if (cmd == "R"   || cmd == "r")   { heading = 0.0f; odom_x = 0.0f; odom_y = 0.0f; Serial.println(F("[R] 헤딩+위치 리셋")); }
     else if (cmd == "H"   || cmd == "h")   { Serial.print(F("[H] ")); Serial.print(heading * 57.3f, 1); Serial.println(F("°")); }
   }
 
@@ -203,8 +212,8 @@ void loop() {
 
     // ── 헤딩 리셋 명령 (라즈베리파이 시작 시 자동 전송) ─────────────────
     if (input == "R" || input == "r") {
-      heading = 0.0f;
-      Serial.println(F("[R] 헤딩 리셋 (from RPi)"));
+      heading = 0.0f; odom_x = 0.0f; odom_y = 0.0f;
+      Serial.println(F("[R] 헤딩+위치 리셋 (from RPi)"));
       return;
     }
 
