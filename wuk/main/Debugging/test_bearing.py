@@ -25,9 +25,9 @@ else:
 
 HFOV_DEG          = 38.6
 CAM_POLAR_EPSILON = 0.05
-CLOSE_ROI_BOTTOM  = 0.3
-CLOSE_ROI_FILL    = 0.5
-SMOOTH_ALPHA      = 0.5      # 저역통과 필터 계수 (camera_tracker.py와 동일)
+CLOSE_ROI_BOTTOM  = 0.5
+CLOSE_ROI_FILL    = 0.25
+SMOOTH_ALPHA      = 1.0      # 저역통과 필터 계수 (camera_tracker.py와 동일)
 
 COLOR_RANGES = {
     'RED':    [((134, 70,  75),  (179, 188, 255))],
