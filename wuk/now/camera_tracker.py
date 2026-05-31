@@ -20,9 +20,9 @@ else:
     _EFF_W, _EFF_H = FRAME_W, FRAME_H
 
 # ── 도착 판정 ────────────────────────────────────────────────────────
-ARRIVE_AREA_MIN   = 12000     # px²: blob 최소 면적 (색지 위 판정 기준) — 튜닝값
-ARRIVE_Y_RATIO    = 0.5       # centroid y > H × 이 값 → 화면 하단 = 가까움 — 튜닝값
 ARRIVE_HOLD_SEC   = 1.2       # 연속 감지 유지 시간 (sec), 1초 인정 기준보다 0.2s 여유
+ARRIVE_ROI_BOTTOM = 0.1       # 하단 ROI 비율 (회전 후 화면 세로의 하단 10%)
+ARRIVE_ROI_FILL   = 0.9       # ROI 내 목표 색 점유율 >= 이 값이면 도착 판정
 
 # ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
 # 실내 조명 조건에서 반드시 튜닝 필요
@@ -31,7 +31,7 @@ COLOR_RANGES = {
         ((163, 84, 161), (179, 255, 255)),   # 실측값
     ],
     'YELLOW': [
-        ((16, 30, 200), (58, 157, 255)),   # 실측값
+        ((16, 95, 155), (59, 183, 255)),   # 실측값
     ],
     'BLUE': [
         ((64, 46, 138), (125, 160, 247)),   # 실측값
@@ -106,15 +106,21 @@ def _to_bearing(cx):
     return offset * (HFOV_DEG / _EFF_W)
 
 
-def _check_arrival(centroid, area):
+def _check_arrival(frame, color_name):
     """
     색지 위에 올라섰는지 판정.
-    조건: blob 면적 >= ARRIVE_AREA_MIN AND centroid가 화면 하단
+    조건: 회전 후 화면 하단 10% ROI에서 목표 색 점유율 >= ARRIVE_ROI_FILL(90%)
     """
-    if centroid is None or area < ARRIVE_AREA_MIN:
+    roi_start = int(_EFF_H * (1.0 - ARRIVE_ROI_BOTTOM))
+    roi = frame[roi_start:, :]
+    roi_total = roi.shape[0] * roi.shape[1]
+    if roi_total == 0:
         return False
-    _, cy = centroid
-    return cy > _EFF_H * ARRIVE_Y_RATIO
+    hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    for lo, hi in COLOR_RANGES[color_name]:
+        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+    return cv2.countNonZero(mask) / roi_total >= ARRIVE_ROI_FILL
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -157,7 +163,7 @@ def _camera_loop():
 
         target_color   = MISSION_ORDER[idx]
         centroid, area = _detect_color(frame, target_color)   # CV 연산은 lock 밖
-        arrived        = _check_arrival(centroid, area)
+        arrived        = _check_arrival(frame, target_color)
 
         with _lock:
             if centroid is not None:
