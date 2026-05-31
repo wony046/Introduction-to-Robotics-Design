@@ -24,7 +24,7 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 
 ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
 
-FORWARD_SPEED    = 0.2
+FORWARD_SPEED    = 0.3
 MIN_SPEED        = 0.12
 MAX_W            = 1.8
 W_MIN_DANGER     = 0.5   # rad/s: 위험 시 최소 회전
@@ -39,11 +39,11 @@ LAYERS = [
     # L1: 가장 가까움, 동적 가중치, weight_cap=7.5, v_max=0.22
     {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':140,
      'w_gain':2.8, 'weight_base':0.8, 'weight_cap':7.5, 'weight_dynamic':True,
-     'v_max':0.22, 'affects_v':True},
+     'v_max':0.2, 'affects_v':True},
     # L2: 가까움, 동적 가중치, weight_cap=4.5, v_max=0.38
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':120,
      'w_gain':2.5, 'weight_base':0.6, 'weight_cap':5.0, 'weight_dynamic':True,
-     'v_max':0.38, 'affects_v':True},
+     'v_max':0.25, 'affects_v':True},
     # L3: 중간, 동적 가중치, weight_cap=2.5, v_max=FORWARD_SPEED
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':120,
      'w_gain':2.0, 'weight_base':0.4, 'weight_cap':4.5, 'weight_dynamic':True, 'affects_v':True},
@@ -166,7 +166,7 @@ _close_target_x   = None   # 색지 추정 x 좌표 (mm)
 _close_target_y   = None   # 색지 추정 y 좌표 (mm)
 KP_CLOSE_HDG      = 1.5    # 헤딩 오차(deg) → w 게인
 CLOSE_SPEED_MAX   = 0.13   # CLOSE 모드 최대 전진 속도 (m/s)
-CLOSE_ARRIVE_MM   = 150    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
+CLOSE_ARRIVE_MM   = 50    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터
@@ -1103,9 +1103,11 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _dedup_scan(pts):
-    """1° 단위 버킷화, 중복 각도는 가장 가까운 거리만 유지."""
+    """1° 단위 버킷화, 중복 각도는 가장 가까운 유효 거리만 유지."""
     angle_map = {}
     for angle, dist in pts:
+        if dist == 0:          # 무효 패킷이 유효 거리를 덮어쓰는 것 방지
+            continue
         bucket = round(angle)
         if bucket not in angle_map or dist < angle_map[bucket]:
             angle_map[bucket] = dist
