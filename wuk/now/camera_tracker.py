@@ -6,9 +6,10 @@ import numpy as np
 
 # ── 카메라 설정 ─────────────────────────────────────────────────────
 CAMERA_INDEX      = 0         # 인식 안 되면 1로 변경 시도
-FRAME_W           = 1280
-FRAME_H           = 720
-HFOV_DEG          = 35.2      # ★ 보정 후 화면 가로(_EFF_W=720) 기준 실측값
+FRAME_W           = 640
+FRAME_H           = 480
+HFOV_DEG          = 23.9      # ★ 보정 후 화면 가로(_EFF_W=480) 기준 실측값
+                               #   f_px=1135 실측 → 2×atan(240/1135)=23.9°
 # 카메라가 90° 회전 마운트된 경우 설정. None=정방향
 # CW 회전 마운트 → ROTATE_90_COUNTERCLOCKWISE, CCW 회전 마운트 → ROTATE_90_CLOCKWISE
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
