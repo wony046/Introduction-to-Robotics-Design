@@ -468,7 +468,7 @@ def _camera_processor():
                 
                 # 2. 사다리꼴 수평 기울기 각도 구하기 (안전한 정렬용)
                 rect = cv2.minAreaRect(c)
-                box = np.int0(cv2.boxPoints(rect))
+                box = np.int32(cv2.boxPoints(rect))
                 pts_y_sorted = sorted(box, key=lambda p: p[1])
                 top_2 = pts_y_sorted[:2]
                 tl, tr = sorted(top_2, key=lambda p: p[0])
