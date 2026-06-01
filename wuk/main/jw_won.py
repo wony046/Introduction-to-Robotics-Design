@@ -179,7 +179,7 @@ _close_target_x    = None   # 색지 추정 x 좌표 (mm)
 _close_target_y    = None   # 색지 추정 y 좌표 (mm)
 _close_initial_dist = None  # CLOSE 진입 시 초기 거리 (진행률 계산용)
 _close_observe_start = None # CLOSE 정지 관측 시작 시각
-KP_CLOSE_HDG      = 0.2   # 헤딩 오차(deg) → w 게인  (포화: ±° → MAX_W)
+KP_CLOSE_HDG      = 0.04  # 헤딩 오차(deg) → w 게인  (포화: ±° → MAX_W)
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 CLOSE_OBSERVE_SEC = 1.0   # CLOSE 진입 후 정지 관측 시간 (sec)
@@ -1218,7 +1218,7 @@ def _motor_controller(arduino):
                     target_hdg = math.degrees(math.atan2(ex, ey))
                     hdg_err    = normalize_angle(target_hdg - arduino_heading_deg)
 
-                    w = max(min(KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
+                    w = max(min(-KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
                     v = CLOSE_SPEED_MAX
 
                     prev_w = w   # CLOSE 모드 내 스무딩 관성 제거
