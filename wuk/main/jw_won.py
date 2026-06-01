@@ -127,7 +127,7 @@ SIDE_EXP_K        = 2.0   # 지수 계수: 클수록 근접 시 반발력이 급
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SIDE_LAYER_ANG_START = 15   # deg: 정면 레이어와 경계
 SIDE_LAYER_ANG_END   = 75   # deg: 측방 레이어 바깥 경계
-SIDE_LAYER_DIST_MAX  = 600  # mm: 측방 감지 최대 거리
+SIDE_LAYER_DIST_MAX  = 350  # mm: 측방 감지 최대 거리
 SIDE_W_BOOST_GAIN    = 1.5  # rad/s: 측방 레이어 w 크기 기여 계수 (우측 push → +w, 좌측 push → -w)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -178,7 +178,7 @@ prev_w                = 0.0
 _close_target_x    = None   # 색지 추정 x 좌표 (mm)
 _close_target_y    = None   # 색지 추정 y 좌표 (mm)
 _close_initial_dist = None  # CLOSE 진입 시 초기 거리 (진행률 계산용)
-KP_CLOSE_HDG      = 0.4   # 헤딩 오차(deg) → w 게인  (포화: ±° → MAX_W)
+KP_CLOSE_HDG      = 0.2   # 헤딩 오차(deg) → w 게인  (포화: ±° → MAX_W)
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
