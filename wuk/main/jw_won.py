@@ -174,22 +174,15 @@ arduino_x_mm          = 0.0   # 오도메트리 x 위치 (mm, 우측 +)
 arduino_y_mm          = 0.0   # 오도메트리 y 위치 (mm, 전방 +)
 prev_w                = 0.0
 
-# ── CLOSE 접근 제어 (회전→직진 FSM) ──────────────────────────────────────────
-CLOSE_SPEED_MAX    = 0.2    # CLOSE DRIVE 최대 전진 속도 (m/s)
-CLOSE_OBSERVE_SEC  = 1.0    # CLOSE 진입 후 정지 관측 시간 (sec)
-ROTATE_MODE        = 'odom' # 'odom'=측정각만큼 회전(개루프) / 'camera'=β→0까지 회전(폐루프)
-CLOSE_ROT_TOL_DEG  = 2.0    # 회전 완료 허용 오차 (deg)
-CLOSE_ROT_W        = 0.9    # 회전 최대 각속도 (rad/s)
-CLOSE_ROT_W_MIN    = 0.5    # 목표 근처 최소 각속도 (정지 방지)
-CLOSE_ROT_SLOW_DEG = 15.0   # 이 이내부터 선형 감속
-CLOSE_HOLD_KP      = 0.03   # DRIVE 중 헤딩 유지 게인 (deg→w)
-
-# ── CLOSE FSM 전역 상태 ───────────────────────────────────────────────────────
-_close_phase        = None  # None / 'OBSERVE' / 'ROTATE' / 'DRIVE'
-_close_target_hdg   = None  # 회전 목표 헤딩 (deg)
-_close_target_dist  = None  # 직진 목표 거리 (mm)
-_close_drive_origin = None  # DRIVE 시작 위치 (x, y)
-_close_observe_start = None # 관측 시작 시각
+# ── CLOSE 접근 제어 ───────────────────────────────────────────────────────────
+_close_target_x    = None   # 색지 추정 x 좌표 (mm)
+_close_target_y    = None   # 색지 추정 y 좌표 (mm)
+_close_initial_dist = None  # CLOSE 진입 시 초기 거리 (진행률 계산용)
+_close_observe_start = None # CLOSE 정지 관측 시작 시각
+KP_CLOSE_HDG      = 0.2   # 헤딩 오차(deg) → w 게인  (포화: ±° → MAX_W)
+CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
+CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
+CLOSE_OBSERVE_SEC = 1.0   # CLOSE 진입 후 정지 관측 시간 (sec)
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터
@@ -276,6 +269,18 @@ def read_arduino(arduino):
                 arduino_heading_deg = float(line[2:])
         except Exception: pass
 
+
+def _compute_close_target():
+    """CLOSE 진입 시 색지 추정 좌표 계산. (x_mm, y_mm) 반환."""
+    bearing_global_deg = arduino_heading_deg - camera_tracker.get_last_stable_bearing()
+    dist_mm            = camera_tracker.get_estimated_distance_mm()
+    hdg_rad            = math.radians(bearing_global_deg)
+    x_t = arduino_x_mm + dist_mm * math.sin(hdg_rad)
+    y_t = arduino_y_mm + dist_mm * math.cos(hdg_rad)
+    if DEBUG_CLOSE_INIT:
+        print(f"[CLOSE] 목표 좌표: ({x_t:.0f}, {y_t:.0f})mm  "
+              f"dist={dist_mm:.0f}mm  global_bearing={bearing_global_deg:.1f}°")
+    return x_t, y_t
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1158,8 +1163,7 @@ def _lidar_reader(lidar):
 def _motor_controller(arduino):
     """모터 제어 전용 스레드.
     SEND_INTERVAL마다 독립적으로 명령 송신 — 라이다 지연과 무관."""
-    global prev_w, _close_phase, _close_target_hdg, _close_target_dist, \
-           _close_drive_origin, _close_observe_start
+    global prev_w, _close_target_x, _close_target_y, _close_initial_dist, _close_observe_start
     last_cmd_str = ""
     while not _shutdown.is_set():
         read_arduino(arduino)
@@ -1170,88 +1174,81 @@ def _motor_controller(arduino):
             if camera_tracker.is_done() or camera_tracker.is_dwelling():
                 v, w = 0.0, 0.0
                 prev_w = 0.0
-                _close_phase = _close_target_hdg = _close_target_dist = \
-                    _close_drive_origin = _close_observe_start = None
+                _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
 
-            # ── 상태 2: CLOSE → 회전 → 직진 FSM ────────────────────────────
-            elif camera_tracker.is_close() or _close_phase is not None:
-                if _close_phase is None:
-                    _close_phase = 'OBSERVE'
-                    _close_observe_start = time.time()
-                    print(f"[CLOSE] 관측 시작 — {CLOSE_OBSERVE_SEC:.1f}s 정지")
-
-                if _close_phase == 'OBSERVE':
-                    elapsed   = time.time() - _close_observe_start
+            # ── 상태 2: CLOSE → 정지 관측 후 오도메트리 위치 제어 ──────────
+            # _close_target_x가 이미 세팅돼 있으면 카메라 미감지 시에도 CLOSE 유지
+            elif camera_tracker.is_close() or _close_target_x is not None:
+                # ── 2a: 관측 단계 (CLOSE_OBSERVE_SEC 동안 정지) ─────────────
+                if _close_target_x is None:
+                    if _close_observe_start is None:
+                        _close_observe_start = time.time()
+                        print(f"[CLOSE] 관측 시작 — {CLOSE_OBSERVE_SEC:.1f}s 정지")
+                    elapsed = time.time() - _close_observe_start
                     remaining = CLOSE_OBSERVE_SEC - elapsed
                     if remaining > 0:
                         v, w = 0.0, 0.0
+                        prev_w = 0.0
                         print(f"[CLOSE] 관측 중 ... {remaining:.1f}s 남음")
-                    else:
-                        beta               = camera_tracker.get_last_stable_bearing()
-                        dist               = camera_tracker.get_estimated_distance_mm()
-                        _close_target_hdg  = arduino_heading_deg - beta
-                        _close_target_dist = dist
-                        _close_phase       = 'ROTATE'
-                        if DEBUG_CLOSE_INIT:
-                            print(f"[CLOSE] OBSERVE 종료 → beta={beta:.1f}° "
-                                  f"dist={dist:.0f}mm  target_hdg={_close_target_hdg:.1f}°")
-                        v, w = 0.0, 0.0
+                        # 모터 명령 전송 후 다음 사이클로
+                        w_smooth = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
+                        cmd = f"{v:.2f} {w_smooth:.2f}\n"
+                        arduino.write(cmd.encode())
+                        time.sleep(SEND_INTERVAL)
+                        continue
+                    # 관측 완료 → 목표 좌표 확정
+                    _close_target_x, _close_target_y = _compute_close_target()
+                    _close_initial_dist = None  # 첫 dist_err 계산 후 세팅
 
-                elif _close_phase == 'ROTATE':
-                    if ROTATE_MODE == 'camera':
-                        raw_b = camera_tracker.get_bearing()
-                        err   = raw_b if raw_b is not None \
-                                else camera_tracker.get_last_stable_bearing()
-                    else:
-                        err = normalize_angle(arduino_heading_deg - _close_target_hdg)
+                ex = _close_target_x - arduino_x_mm
+                ey = _close_target_y - arduino_y_mm
+                dist_err = math.sqrt(ex ** 2 + ey ** 2)
+                if _close_initial_dist is None:
+                    _close_initial_dist = max(dist_err, 1.0)  # 0 나눔 방지
 
-                    abs_err = abs(err)
-                    if abs_err < CLOSE_ROT_TOL_DEG:
-                        _close_drive_origin = (arduino_x_mm, arduino_y_mm)
-                        _close_phase        = 'DRIVE'
-                        v, w = 0.0, 0.0
-                    else:
-                        scale = min(1.0, abs_err / CLOSE_ROT_SLOW_DEG)
-                        w_mag = CLOSE_ROT_W_MIN + (CLOSE_ROT_W - CLOSE_ROT_W_MIN) * scale
-                        w = -math.copysign(w_mag, err)
-                        v = 0.0
-                        if DEBUG_CLOSE_HDG:
-                            print(f"[CLOSE/ROTATE] heading={arduino_heading_deg:+.1f}° "
-                                  f"target={_close_target_hdg:+.1f}° "
-                                  f"err={err:+.1f}°  w={w:+.2f}")
-
-                elif _close_phase == 'DRIVE':
-                    ox, oy   = _close_drive_origin
-                    traveled = math.sqrt((arduino_x_mm - ox)**2 + (arduino_y_mm - oy)**2)
-                    hold_w   = max(min(
-                        -CLOSE_HOLD_KP * normalize_angle(arduino_heading_deg - _close_target_hdg),
-                        MAX_W), -MAX_W)
-
-                    if traveled >= _close_target_dist:
-                        v, w = 0.0, 0.0
-                        camera_tracker.signal_arrival()
-                        _close_phase = None
-                        if DEBUG_CLOSE_DONE:
-                            print(f"[CLOSE] 도달 → 정지")
-                    else:
-                        v = CLOSE_SPEED_MAX
-                        w = hold_w
-                        if DEBUG_CLOSE_REMAIN:
-                            print(f"[CLOSE/DRIVE] traveled={traveled:.0f}mm / "
-                                  f"{_close_target_dist:.0f}mm  hold_w={hold_w:+.3f}")
-
-                else:
+                if dist_err < CLOSE_ARRIVE_MM:
+                    # 추정 좌표 도달 → 색지 위에 바퀴가 들어온 것으로 판정, 정지
+                    # _close_target_x 유지: 다음 사이클도 재계산 없이 dist_err < threshold → 정지 유지
                     v, w = 0.0, 0.0
+                    prev_w = 0.0
+                    camera_tracker.signal_arrival()   # 카메라 peaked→drop이 막혀도 미션 진행
+                    if DEBUG_CLOSE_DONE:
+                        print(f"[CLOSE] 도달 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) → 정지")
+                else:
+                    target_hdg = math.degrees(math.atan2(ex, ey))
+                    hdg_err    = normalize_angle(target_hdg - arduino_heading_deg)
+
+                    w = max(min(KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
+                    v = CLOSE_SPEED_MAX
+
+                    prev_w = w   # CLOSE 모드 내 스무딩 관성 제거
+
+                    if DEBUG_CLOSE_REMAIN:
+                        done_pct = (1.0 - dist_err / _close_initial_dist) * 100.0
+                        bar_len  = 20
+                        filled   = int(bar_len * done_pct / 100.0)
+                        bar      = '█' * filled + '░' * (bar_len - filled)
+                        print(f"[CLOSE_REMAIN] [{bar}] {done_pct:5.1f}%  "
+                              f"remain={dist_err:.0f}mm / {_close_initial_dist:.0f}mm  "
+                              f"pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f})  "
+                              f"tgt=({_close_target_x:.0f},{_close_target_y:.0f})")
+                    if DEBUG_CLOSE_POS:
+                        print(f"[CLOSE_POS] pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
+                              f"tgt=({_close_target_x:.0f},{_close_target_y:.0f}) "
+                              f"dist={dist_err:.0f}mm  v={v:.2f}")
+                    if DEBUG_CLOSE_HDG:
+                        print(f"[CLOSE_HDG] arduino={arduino_heading_deg:+.1f}° "
+                              f"target_hdg={target_hdg:+.1f}° "
+                              f"hdg_err={hdg_err:+.1f}°  w={w:+.2f}")
 
             # ── 상태 3: SEEK → 카메라 bearing + 라이다 회피 ────────────────
             else:
-                if _close_phase is not None:
+                if _close_target_x is not None:
                     print(f"[STATE] CLOSE → SEEK  "
                           f"is_close={camera_tracker.is_close()}  "
                           f"is_done={camera_tracker.is_done()}  "
                           f"is_dwelling={camera_tracker.is_dwelling()}")
-                _close_phase = _close_target_hdg = _close_target_dist = \
-                    _close_drive_origin = _close_observe_start = None
+                _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
                 bearing = camera_tracker.get_bearing()
                 tb = bearing if bearing is not None else camera_tracker.get_last_stable_bearing()
                 v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=tb)
