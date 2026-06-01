@@ -285,56 +285,52 @@ def _set_boundary_center():
               f"반경={BOUNDARY_RADIUS:.0f}mm")
 
 
-def _apply_boundary_force(v, w):
+def _get_boundary_correction():
     """
-    경계 초과 시 중심 방향 인력을 블렌딩하여 v, w 보정.
+    경계 초과 시 장애물 회피 시스템에 전달할 중심 방향 상대 베어링과
+    v 감속 비율을 반환.
 
-    경계 내 (dist ≤ BOUNDARY_RADIUS):
-        v, w 변화 없음.
+    핵심 설계 의도:
+        w를 직접 덮어쓰지 않고, 중심 방향을 target_bearing으로
+        find_vw_command()에 전달한다.
+        → 기존 갭 추종·레이어 회피가 장애물을 우회하면서 중심으로 복귀.
+        → 경계 인력 방향에 장애물이 있어도 충돌 없이 돌아올 수 있음.
 
-    경계 초과 (dist > BOUNDARY_RADIUS):
-        excess  = dist − BOUNDARY_RADIUS
-        blend   = min(excess / BOUNDARY_BLEND_DIST, 1.0)   [0.0 ~ 1.0]
+    경계 내부:  rel_bearing=0.0, v_scale=1.0  (변화 없음)
+    경계 초과:
+        excess = dist − BOUNDARY_RADIUS
+        blend  = min(excess / BOUNDARY_BLEND_DIST, 1.0)   [0.0 ~ 1.0]
+        rel_bearing: 중심 방향 로봇 상대 베어링 (°)
+        v_scale = BOUNDARY_V_MIN + (1−BOUNDARY_V_MIN)*(1−blend)
+                  (blend=0: 감속 없음 / blend=1: v × BOUNDARY_V_MIN)
 
-        w 보정: 기존 w → 중심 방향 인력 w 선형 보간
-            w_new = w*(1−blend) + w_attract*blend
-            (blend=0: 완전히 기존 / blend=1: 완전히 인력)
-
-        v 감속: 경계 초과 정도에 따라 최대 50%까지 감속
-            v_new = v * (BOUNDARY_V_MIN + (1−BOUNDARY_V_MIN)*(1−blend))
-            (blend=0: 감속 없음 / blend=1: v × BOUNDARY_V_MIN)
-
-    반환: (v_new, w_new)
+    반환: (rel_bearing_deg, v_scale)
     """
     if _boundary_center_x is None:
-        return v, w
+        return 0.0, 1.0
 
     dx   = _boundary_center_x - arduino_x_mm
     dy   = _boundary_center_y - arduino_y_mm
     dist = math.sqrt(dx**2 + dy**2)
 
     if dist <= BOUNDARY_RADIUS:
-        return v, w
+        return 0.0, 1.0
 
     excess = dist - BOUNDARY_RADIUS
     blend  = min(excess / BOUNDARY_BLEND_DIST, 1.0)
 
     # 중심 방향 글로벌 베어링 → 로봇 프레임 상대 베어링
-    bearing_to_center = math.degrees(math.atan2(dx, dy))   # navigation: 0=북, 우측=+
+    bearing_to_center = math.degrees(math.atan2(dx, dy))
     rel_bearing       = normalize_angle(bearing_to_center - arduino_heading_deg)
 
-    # 인력 w (SEEK 모드와 동일한 KP_GOAL 공식)
-    w_attract = max(min(-KP_GOAL * rel_bearing, MAX_W), -MAX_W)
-
-    w_new = w * (1.0 - blend) + w_attract * blend
-    v_new = v * (BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend))
+    # v 감속 비율 (w는 장애물 회피 시스템이 담당)
+    v_scale = BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend)
 
     if DEBUG_BOUNDARY:
         print(f"  [BOUNDARY] dist={dist:.0f}mm excess={excess:.0f}mm "
-              f"blend={blend:.2f} rel_b={rel_bearing:+.1f}° "
-              f"w: {w:+.3f}→{w_new:+.3f}  v: {v:.2f}→{v_new:.2f}")
+              f"blend={blend:.2f} target_b={rel_bearing:+.1f}° v_scale={v_scale:.2f}")
 
-    return v_new, w_new
+    return rel_bearing, v_scale
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1073,18 +1069,18 @@ def _motor_controller(arduino):
             else:
                 _close_target_x = _close_target_y = None
                 bearing = camera_tracker.get_bearing()
-                tb = bearing if bearing is not None else 0.0
 
-                # ★ 색 미감지 시 경계 원 중심 최초 설정
-                if bearing is None:
+                if bearing is not None:
+                    # 색 감지: 목표 방향으로 장애물 회피 주행
+                    v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=bearing)
+                else:
+                    # 색 미감지: 경계 중심 방향을 target_bearing으로 전달
+                    # → 장애물 회피(갭 추종)가 장애물을 우회하면서 중심으로 복귀
+                    # → w를 직접 덮어쓰지 않으므로 장애물 회피 기능 완전 보존
                     _set_boundary_center()
-
-                v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=tb)
-
-                # ★ 경계 인력: 색 미감지 시에만 적용
-                # 색이 보이면 인력을 해제 → 경계 밖으로 우회해서 접근 가능
-                if bearing is None:
-                    v, w = _apply_boundary_force(v, w)
+                    boundary_tb, v_scale = _get_boundary_correction()
+                    v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=boundary_tb)
+                    v *= v_scale   # v만 감속, w는 장애물 회피 시스템이 결정
 
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
             prev_w = w
