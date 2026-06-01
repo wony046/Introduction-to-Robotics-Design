@@ -1216,7 +1216,7 @@ def _motor_controller(arduino):
                         print(f"[CLOSE] 도달 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) → 정지")
                 else:
                     target_hdg = math.degrees(math.atan2(ex, ey))
-                    hdg_err    = normalize_angle(arduino_heading_deg - target_hdg)
+                    hdg_err    = normalize_angle(target_hdg - arduino_heading_deg)
 
                     w = max(min(KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
                     v = CLOSE_SPEED_MAX
