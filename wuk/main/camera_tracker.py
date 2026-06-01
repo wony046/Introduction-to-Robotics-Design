@@ -34,6 +34,7 @@ CAM_HEIGHT_MM      = 430.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm
 CAM_TILT_DEG       = 34.5    # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
                                #   수평=0°, 아래로 내려다볼수록 +
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
+USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
 
 # ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
 # 실내 조명 조건에서 반드시 튜닝 필요
@@ -193,16 +194,17 @@ def _camera_loop():
             time.sleep(0.03)
             continue
 
-        target_color                    = MISSION_ORDER[idx]
-        centroid, area, clip_l, clip_r  = _detect_color(frame, target_color)
+        target_color                       = MISSION_ORDER[idx]
+        centroid, area, clip_l, clip_r     = _detect_color(frame, target_color)
         roi_fill                        = _get_roi_fill(frame, target_color)
 
         # ── 근접 / 클리핑 판정 (lock 밖, 카메라 스레드 전용) ──────────────
         global _roi_peaked
 
-        # bearing 계산: SEEK=atan2 / CLOSE=원근보정, 클리핑 시 마지막 안정값 유지
+        # bearing 계산: SEEK=atan2 / CLOSE=원근보정
         if centroid is not None:
-            cx, cy = centroid
+            cx, cy   = centroid
+            clipped  = clip_l or clip_r
 
             # ── 거리 기반 CLOSE 판정 ────────────────────────────────────────
             f_px_v     = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
@@ -212,20 +214,16 @@ def _camera_loop():
                           if depression > 1.0 else 5000.0)
             is_close_now = (cam_dist < CLOSE_ENTER_MM)
 
-            clipped = clip_l or clip_r
-            # seek 베어링은 항상 계산해서 last_stable_bearing 갱신 (CLOSE 중 관측 시도 포함)
             bearing_seek = _to_bearing_seek(cx)
-            if not clipped:
+            if not (USE_CLIPPING_GUARD and clipped):
                 _last_stable_bearing = bearing_seek
 
             if is_close_now:
-                if clipped:
-                    bearing = _last_stable_bearing   # 잘린 경우 마지막 유효값 재사용
-                else:
-                    bearing = _to_bearing_close(cx, cy)
+                bearing = _last_stable_bearing if (USE_CLIPPING_GUARD and clipped) \
+                          else _to_bearing_close(cx, cy)
             else:
-                bearing = bearing_seek
-            _last_cy = cy   # 필터링된 cy → 거리 추정에 사용
+                bearing = _last_stable_bearing
+            _last_cy = cy
         else:
             bearing      = None
             is_close_now = False
