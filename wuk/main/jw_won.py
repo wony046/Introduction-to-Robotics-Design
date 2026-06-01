@@ -127,7 +127,7 @@ SIDE_EXP_K        = 2.0   # 지수 계수: 클수록 근접 시 반발력이 급
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SIDE_LAYER_ANG_START = 15   # deg: 정면 레이어와 경계
 SIDE_LAYER_ANG_END   = 75   # deg: 측방 레이어 바깥 경계
-SIDE_LAYER_DIST_MAX  = 350  # mm: 측방 감지 최대 거리
+SIDE_LAYER_DIST_MAX  = 800  # mm: 측방 감지 최대 거리
 SIDE_W_BOOST_GAIN    = 1.5  # rad/s: 측방 레이어 w 크기 기여 계수 (우측 push → +w, 좌측 push → -w)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
