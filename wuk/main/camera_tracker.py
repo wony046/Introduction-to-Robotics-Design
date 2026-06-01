@@ -124,7 +124,7 @@ def _detect_color(frame, color_name):
 def _to_bearing_seek(cx):
     """SEEK 모드: atan2 정확 모델 — cx만 사용, 거리 무관."""
     f_px = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
-    return math.degrees(math.atan2(cx - _EFF_W / 2.0, f_px))
+    return -math.degrees(math.atan2(cx - _EFF_W / 2.0, f_px))
 
 
 def _to_bearing_close(cx, cy):
@@ -138,7 +138,7 @@ def _to_bearing_close(cx, cy):
     f_px    = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
     lateral = (cx - _EFF_W / 2.0) / f_px
     forward = (_EFF_H - cy) / _EFF_H + CAM_POLAR_EPSILON
-    return math.degrees(math.atan2(lateral, forward))
+    return -math.degrees(math.atan2(lateral, forward))
 
 
 def _get_roi_fill(frame, color_name, bottom_ratio=None):

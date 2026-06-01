@@ -268,7 +268,7 @@ def read_arduino(arduino):
 
 def _compute_close_target():
     """CLOSE 진입 시 색지 추정 좌표 계산. (x_mm, y_mm) 반환."""
-    bearing_global_deg = arduino_heading_deg + camera_tracker.get_last_stable_bearing()
+    bearing_global_deg = arduino_heading_deg - camera_tracker.get_last_stable_bearing()
     dist_mm            = camera_tracker.get_estimated_distance_mm()
     hdg_rad            = math.radians(bearing_global_deg)
     x_t = arduino_x_mm + dist_mm * math.sin(hdg_rad)
@@ -923,7 +923,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         # ① 목표 방향이 비어있음 → 목표로 직진 (갭 무시)
         desired_heading      = target_bearing
         prev_desired_heading = desired_heading
-        w = - KP_GOAL * desired_heading
+        w = KP_GOAL * desired_heading
 
         # 목표 정렬도에 따라 v 조정
         # 정렬됨(0°) → FORWARD_SPEED / 많이 벗어남(≥TARGET_ALIGN_ANGLE) → MIN_SPEED
@@ -938,7 +938,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         # ② 목표 막힘 → 통과 갭 중 목표 최근접으로 우회 (gap-following)
         desired_heading      = chosen_gap['center_angle']
         prev_desired_heading = desired_heading
-        w = - KP_GOAL * desired_heading
+        w = KP_GOAL * desired_heading
         if DEBUG_GAP:
             print(f"  [GAP_FOLLOW] {len(front_gaps)} gap(s) → chosen={desired_heading:+.1f}° "
                   f"target={target_bearing:+.1f}° w={w:+.3f}")
@@ -1011,7 +1011,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         # ④ 막힘인데 갭도 장애물도 없음(드묾) → 목표 유지
         desired_heading      = target_bearing
         prev_desired_heading = desired_heading
-        w = - KP_GOAL * target_bearing
+        w = KP_GOAL * target_bearing
         if DEBUG_CLEAR:
             print(f"  [CLEAR] no obstacles → target={target_bearing:+.1f}° w={w:+.3f}")
 
@@ -1191,7 +1191,7 @@ def _motor_controller(arduino):
                     target_hdg = math.degrees(math.atan2(ex, ey))
                     hdg_err    = normalize_angle(target_hdg - arduino_heading_deg)
 
-                    w = max(min(-KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
+                    w = max(min(KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
                     v = CLOSE_SPEED_MAX
 
                     prev_w = w   # CLOSE 모드 내 스무딩 관성 제거
