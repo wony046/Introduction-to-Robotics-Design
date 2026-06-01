@@ -1191,7 +1191,7 @@ def _motor_controller(arduino):
                     target_hdg = math.degrees(math.atan2(ex, ey))
                     hdg_err    = normalize_angle(target_hdg - arduino_heading_deg)
 
-                    w = max(min(-KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
+                    w = max(min(KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
                     v = CLOSE_SPEED_MAX
 
                     prev_w = w   # CLOSE 모드 내 스무딩 관성 제거
