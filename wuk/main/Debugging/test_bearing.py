@@ -69,16 +69,16 @@ def _f_px():
 
 
 def _bearing_seek(cx):
-    """camera_tracker._to_bearing_seek 와 동일 (음수 부호 포함)."""
-    return -math.degrees(math.atan2(cx - _EFF_W / 2.0, _f_px()))
+    """시각화 전용: 오른쪽=+, 왼쪽=- (camera_tracker와 부호 반대)."""
+    return math.degrees(math.atan2(cx - _EFF_W / 2.0, _f_px()))
 
 
 def _bearing_close(cx, cy):
-    """camera_tracker._to_bearing_close 와 동일 (음수 부호 포함)."""
+    """시각화 전용: 오른쪽=+, 왼쪽=- (camera_tracker와 부호 반대)."""
     f       = _f_px()
     lateral = (cx - _EFF_W / 2.0) / f
     forward = (_EFF_H - cy) / _EFF_H + CAM_POLAR_EPSILON
-    return -math.degrees(math.atan2(lateral, forward)), lateral, forward
+    return math.degrees(math.atan2(lateral, forward)), lateral, forward
 
 
 def _estimate_dist(cy):
