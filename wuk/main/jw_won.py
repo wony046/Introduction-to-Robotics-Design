@@ -199,7 +199,7 @@ _shutdown    = threading.Event()  # 종료 신호
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def normalize_angle(angle):
-    return angle - 360 if angle > 180 else angle
+    return ((angle + 180) % 360) - 180
 
 def is_in_front_90(a):
     return -90 <= a <= 90
@@ -1169,6 +1169,7 @@ def _motor_controller(arduino):
             # ── 상태 1: DWELL / DONE → 정지 ────────────────────────────────
             if camera_tracker.is_done() or camera_tracker.is_dwelling():
                 v, w = 0.0, 0.0
+                prev_w = 0.0
                 _close_target_x = _close_target_y = None
 
             # ── 상태 2: CLOSE → 오도메트리 위치 제어 ───────────────────────
@@ -1184,6 +1185,7 @@ def _motor_controller(arduino):
                     # 추정 좌표 도달 → 색지 위에 바퀴가 들어온 것으로 판정, 정지
                     # _close_target_x 유지: 다음 사이클도 재계산 없이 dist_err < threshold → 정지 유지
                     v, w = 0.0, 0.0
+                    prev_w = 0.0
                     camera_tracker.signal_arrival()   # 카메라 peaked→drop이 막혀도 미션 진행
                     if DEBUG_CLOSE_DONE:
                         print(f"[CLOSE] 도달 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) → 정지")
