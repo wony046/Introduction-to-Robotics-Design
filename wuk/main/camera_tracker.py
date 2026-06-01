@@ -224,15 +224,18 @@ def _camera_loop():
             is_close_now = (cam_dist < CLOSE_ENTER_MM)
 
             clipped = clip_l or clip_r
+            # seek 베어링은 항상 계산해서 last_stable_bearing 갱신 (CLOSE 중 관측 시도 포함)
+            bearing_seek = _to_bearing_seek(cx)
+            if not clipped:
+                _last_stable_bearing = bearing_seek
+
             if is_close_now:
                 if clipped:
                     bearing = _last_stable_bearing   # 잘린 경우 마지막 유효값 재사용
                 else:
                     bearing = _to_bearing_close(cx, cy)
             else:
-                bearing = _to_bearing_seek(cx)
-                if not clipped:
-                    _last_stable_bearing = bearing   # 안정 구간에서만 갱신
+                bearing = bearing_seek
             _last_cy = cy   # 필터링된 cy → 거리 추정에 사용
         else:
             bearing      = None
