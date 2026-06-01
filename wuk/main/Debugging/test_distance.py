@@ -29,14 +29,14 @@ FRAME_ROTATE   = cv2.ROTATE_90_COUNTERCLOCKWISE
 HFOV_DEG       = 38.6     # 실측값
 CAM_HEIGHT_MM  = 430.0    # ★ 실측 필요 (바닥~카메라 수직 높이 mm)
 CAM_TILT_DEG   = 34.5     # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
-CLOSE_ENTER_MM = 350.0    # 이 거리 이내 → CLOSE 모드 진입 (camera_tracker.py와 동일)
+CLOSE_ENTER_MM = 610.0    # 이 거리 이내 → CLOSE 모드 진입 (camera_tracker.py와 동일)
 
 TARGET_COLOR   = 'RED'    # 테스트할 색상
 
 COLOR_RANGES = {
-    'RED':    [((134, 70,  75), (179, 188, 255))],
-    'YELLOW': [((16,  95, 155), (59,  183, 255))],
-    'BLUE':   [((64,  46, 138), (125, 160, 247))],
+    'RED':    [((118, 104, 136), (179, 255, 255))],
+    'YELLOW': [((9,   90,  64), (41,  194, 255))],
+    'BLUE':   [((107,  93, 109), (127, 182, 180))],
 }
 
 DISPLAY_SCALE  = 0.6
