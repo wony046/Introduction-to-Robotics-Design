@@ -1175,7 +1175,8 @@ def _motor_controller(arduino):
                 _close_target_x = _close_target_y = _close_initial_dist = None
 
             # ── 상태 2: CLOSE → 오도메트리 위치 제어 ───────────────────────
-            elif camera_tracker.is_close():
+            # _close_target_x가 이미 세팅돼 있으면 카메라 미감지 시에도 CLOSE 유지
+            elif camera_tracker.is_close() or _close_target_x is not None:
                 if _close_target_x is None:
                     _close_target_x, _close_target_y = _compute_close_target()
                     _close_initial_dist = None  # 첫 dist_err 계산 후 세팅
@@ -1223,6 +1224,11 @@ def _motor_controller(arduino):
 
             # ── 상태 3: SEEK → 카메라 bearing + 라이다 회피 ────────────────
             else:
+                if _close_target_x is not None:
+                    print(f"[STATE] CLOSE → SEEK  "
+                          f"is_close={camera_tracker.is_close()}  "
+                          f"is_done={camera_tracker.is_done()}  "
+                          f"is_dwelling={camera_tracker.is_dwelling()}")
                 _close_target_x = _close_target_y = _close_initial_dist = None
                 bearing = camera_tracker.get_bearing()
                 tb = bearing if bearing is not None else camera_tracker.get_last_stable_bearing()
