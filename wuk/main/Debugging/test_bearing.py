@@ -1,10 +1,12 @@
 """
-Bearing 시각화 도구
+Bearing 시각화 도구 v2
 ─────────────────────────────────────────────────────
-SEEK bearing vs CLOSE bearing 비교 + 각도 다이어그램
+_last_stable_bearing 추적 · 거리 추정 · CLOSE 거리 기반 판정
 
 조작:
   1 / 2 / 3  : 색상 선택 (RED / YELLOW / BLUE)
+  f          : 필터 ON/OFF
+  r          : _last_stable_bearing 수동 초기화 (→ 0°)
   q          : 종료
 """
 
@@ -12,49 +14,49 @@ import cv2
 import math
 import numpy as np
 
-# ── camera_tracker.py 와 동일한 상수 ──────────────────────────────────────────
-CAMERA_INDEX     = 0
-FRAME_W          = 640
-FRAME_H          = 480
-FRAME_ROTATE     = cv2.ROTATE_90_COUNTERCLOCKWISE
+# ── camera_tracker.py 와 동일한 상수 ─────────────────────────────────────────
+CAMERA_INDEX      = 0
+FRAME_W           = 640
+FRAME_H           = 480
+FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
 
 if FRAME_ROTATE in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
-    _EFF_W, _EFF_H = FRAME_H, FRAME_W   # 480 × 640
+    _EFF_W, _EFF_H = FRAME_H, FRAME_W          # 480 × 640
 else:
     _EFF_W, _EFF_H = FRAME_W, FRAME_H
 
 HFOV_DEG          = 38.6
 CAM_POLAR_EPSILON = 0.05
-CLOSE_ROI_BOTTOM  = 0.5
-CLOSE_ROI_FILL    = 0.25
-SMOOTH_ALPHA      = 1.0      # 저역통과 필터 계수 (camera_tracker.py와 동일)
-
+CAM_HEIGHT_MM     = 430.0
+CAM_TILT_DEG      = 34.5
+CLOSE_ENTER_MM    = 400.0
 COLOR_RANGES = {
-    'RED':    [((134, 70,  75),  (179, 188, 255))],
-    'YELLOW': [((16,  95, 155),  (59,  183, 255))],
-    'BLUE':   [((64,  46, 138),  (125, 160, 247))],
+    'RED':    [((118, 104, 136), (179, 255, 255))],
+    'YELLOW': [((9,   90,  64),  (41,  194, 255))],
+    'BLUE':   [((107, 93,  109), (127, 182, 180))],
 }
 COLOR_KEYS = ['RED', 'YELLOW', 'BLUE']
 
-# ── 색상 상수 (BGR) ───────────────────────────────────────────────────────────
+# ── 표시 배율 150% ────────────────────────────────────────────────────────────
+SC             = 1.5
+DISPLAY_SCALE  = 0.65 * SC          # ≈ 0.975 (카메라 패널 배율)
+DIAG_W         = int(420 * SC)      # 630px
+DIAG_H         = int(_EFF_H * DISPLAY_SCALE)   # ≈ 624px
+
+# ── BGR 색상 ─────────────────────────────────────────────────────────────────
 C_WHITE  = (255, 255, 255)
 C_BLACK  = (0,   0,   0  )
 C_GRAY   = (160, 160, 160)
 C_GREEN  = (50,  230, 50 )
 C_CYAN   = (255, 220, 0  )
 C_ORANGE = (0,   165, 255)
-C_RED    = (60,  60,  240)
-C_YELLOW_B = (0, 220, 220)
-C_BLUE_B   = (220, 100, 50)
-
-DISPLAY_SCALE  = 0.65   # 카메라 패널 축소 비율
-DIAG_W         = 420    # 다이어그램 패널 너비
-DIAG_H         = int(_EFF_H * DISPLAY_SCALE)
+C_RED_B  = (60,  60,  240)
+C_STABLE = (0,   220, 255)          # _last_stable_bearing 전용
 
 
-# ── 유틸 ────────────────────────────────────────────────────────────────────
+# ── 유틸 ─────────────────────────────────────────────────────────────────────
 
-def _put(img, text, pos, scale=0.70, color=C_WHITE, thickness=1):
+def _put(img, text, pos, scale=0.70 * SC, color=C_WHITE, thickness=1):
     x, y = pos
     cv2.putText(img, text, (x+1, y+1), cv2.FONT_HERSHEY_SIMPLEX,
                 scale, C_BLACK, thickness + 2, cv2.LINE_AA)
@@ -67,18 +69,32 @@ def _f_px():
 
 
 def _bearing_seek(cx):
-    f = _f_px()
-    return math.degrees(math.atan2(cx - _EFF_W / 2.0, f))
+    """camera_tracker._to_bearing_seek 와 동일 (음수 부호 포함)."""
+    return -math.degrees(math.atan2(cx - _EFF_W / 2.0, _f_px()))
 
 
 def _bearing_close(cx, cy):
+    """camera_tracker._to_bearing_close 와 동일 (음수 부호 포함)."""
     f       = _f_px()
     lateral = (cx - _EFF_W / 2.0) / f
     forward = (_EFF_H - cy) / _EFF_H + CAM_POLAR_EPSILON
-    return math.degrees(math.atan2(lateral, forward)), lateral, forward
+    return -math.degrees(math.atan2(lateral, forward)), lateral, forward
+
+
+def _estimate_dist(cy):
+    """camera_tracker.get_estimated_distance_mm 와 동일 로직."""
+    delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, _f_px()))
+    depression = CAM_TILT_DEG + delta_v
+    if depression <= 1.0:
+        return 5000.0
+    return max(CAM_HEIGHT_MM / math.tan(math.radians(depression)), 50.0)
 
 
 def _detect(frame, color_name):
+    """
+    camera_tracker._detect_color 와 동일.
+    반환: (centroid, area, clipped_l, clipped_r)
+    """
     hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for lo, hi in COLOR_RANGES[color_name]:
@@ -88,190 +104,222 @@ def _detect(frame, color_name):
     mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return None, 0.0
+        return None, 0.0, False, False
     largest = max(contours, key=cv2.contourArea)
     area    = cv2.contourArea(largest)
-    if area < 300:
-        return None, 0.0
+    if area < 500:
+        return None, 0.0, False, False
     M = cv2.moments(largest)
     if M['m00'] == 0:
-        return None, 0.0
+        return None, 0.0, False, False
     cx = int(M['m10'] / M['m00'])
     cy = int(M['m01'] / M['m00'])
-    return (cx, cy), area
+    bx, _, bw, _ = cv2.boundingRect(largest)
+    clipped_l = (bx <= 1)
+    clipped_r = (bx + bw >= _EFF_W - 1)
+    return (cx, cy), area, clipped_l, clipped_r
 
 
-def _roi_fill(frame, color_name, ratio):
-    start = int(_EFF_H * (1.0 - ratio))
-    roi   = frame[start:, :]
-    total = roi.shape[0] * roi.shape[1]
-    if total == 0:
-        return 0.0
-    hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-    for lo, hi in COLOR_RANGES[color_name]:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
-    return cv2.countNonZero(mask) / total
+# ── 카메라 패널 ───────────────────────────────────────────────────────────────
 
-
-# ── 카메라 패널 그리기 ────────────────────────────────────────────────────────
-
-def _draw_cam_panel(frame, centroid, color_name, is_close, b_seek, b_close_val):
-    disp = cv2.resize(frame,
-                      (int(_EFF_W * DISPLAY_SCALE), int(_EFF_H * DISPLAY_SCALE)))
+def _draw_cam_panel(frame, centroid, color_name, is_close,
+                    b_seek, b_close_val, last_stable, clip_l, clip_r):
+    disp = cv2.resize(frame, (int(_EFF_W * DISPLAY_SCALE),
+                               int(_EFF_H * DISPLAY_SCALE)))
     sw, sh = disp.shape[1], disp.shape[0]
-
-    cx_mid_disp = int(_EFF_W / 2 * DISPLAY_SCALE)
+    cx_mid = int(_EFF_W / 2 * DISPLAY_SCALE)
 
     # 중심 수직선
-    cv2.line(disp, (cx_mid_disp, 0), (cx_mid_disp, sh), C_GRAY, 1)
+    cv2.line(disp, (cx_mid, 0), (cx_mid, sh), C_GRAY, 1)
 
-    # CLOSE ROI 하단 영역 표시
-    roi_y = int(sh * (1.0 - CLOSE_ROI_BOTTOM))
-    overlay = disp.copy()
-    cv2.rectangle(overlay, (0, roi_y), (sw, sh), (40, 80, 40), -1)
-    cv2.addWeighted(overlay, 0.25, disp, 0.75, 0, disp)
-    cv2.line(disp, (0, roi_y), (sw, roi_y), (60, 160, 60), 1)
-    _put(disp, f"CLOSE ROI ({int(CLOSE_ROI_BOTTOM*100)}%)",
-         (4, roi_y - 8), scale=0.50, color=(60, 200, 60))
+    # 클리핑 경계 빨간 테두리
+    if clip_l:
+        cv2.rectangle(disp, (0, 0), (int(6*SC), sh), (0, 0, 220), -1)
+    if clip_r:
+        cv2.rectangle(disp, (sw - int(6*SC), 0), (sw, sh), (0, 0, 220), -1)
 
     if centroid is not None:
         cx, cy = centroid
         dx = int(cx * DISPLAY_SCALE)
         dy = int(cy * DISPLAY_SCALE)
+        arrow = int(80 * SC)
+        cy_center = sh // 2
 
         # centroid 마커
-        cv2.circle(disp, (dx, dy), 12, C_GREEN,  2)
-        cv2.circle(disp, (dx, dy),  3, C_GREEN, -1)
-        _put(disp, f"({cx},{cy})", (dx + 14, dy + 6), scale=0.55, color=C_GREEN)
+        cv2.circle(disp, (dx, dy), int(12 * SC), C_GREEN, 2)
+        cv2.circle(disp, (dx, dy), 3, C_GREEN, -1)
+        _put(disp, f"({cx},{cy})",
+             (dx + int(14*SC), dy + int(6*SC)), scale=0.50*SC, color=C_GREEN)
 
         # cy 수평선
-        cv2.line(disp, (0, dy), (sw, dy), (0, 180, 180), 1)
+        cv2.line(disp, (0, dy), (sw, dy), (0, 160, 160), 1)
 
-        # bearing 화살표 (화면 중심에서 centroid 방향으로)
-        bearing = b_close_val if is_close else b_seek
-        arrow_len = 80
-        ax = int(cx_mid_disp + arrow_len * math.sin(math.radians(bearing)))
-        ay = int(sh * 0.5   - arrow_len * math.cos(math.radians(bearing)))
-        col = C_ORANGE if is_close else C_CYAN
-        cv2.arrowedLine(disp, (cx_mid_disp, sh // 2), (ax, ay), col, 2, tipLength=0.25)
+        def _arrow(bearing, color, width=2):
+            ax = int(cx_mid + arrow * math.sin(math.radians(bearing)))
+            ay = int(cy_center - arrow * math.cos(math.radians(bearing)))
+            cv2.arrowedLine(disp, (cx_mid, cy_center), (ax, ay),
+                            color, width, tipLength=0.22)
 
-    # 모드 표시 (좌상단)
+        _arrow(b_seek,      C_CYAN,   2)
+        _arrow(b_close_val, C_ORANGE, 2)
+        _arrow(last_stable, C_STABLE, 3)   # _last_stable_bearing: 굵게
+
+    # 모드 (좌상단)
     mode_str = "[ CLOSE ]" if is_close else "[ SEEK  ]"
-    mode_col = C_ORANGE if is_close else C_CYAN
-    _put(disp, mode_str, (6, 26), scale=0.80, color=mode_col, thickness=2)
+    mode_col = C_ORANGE    if is_close else C_CYAN
+    _put(disp, mode_str, (6, int(32*SC)), scale=0.80*SC, color=mode_col, thickness=2)
 
-    # 색상 표시 (우상단)
-    _put(disp, color_name, (sw - 100, 26), scale=0.75, color=C_WHITE)
+    # 클리핑 경고
+    clip_tag = ("L" if clip_l else "") + ("R" if clip_r else "")
+    if clip_tag:
+        _put(disp, f"CLIPPED {clip_tag}  stable 고정",
+             (6, int(62*SC)), scale=0.60*SC, color=C_RED_B)
+
+    # 색상명 (우상단)
+    _put(disp, color_name,
+         (sw - int(110*SC), int(32*SC)), scale=0.75*SC, color=C_WHITE)
+
+    # 범례 (우하단)
+    legend_y = sh - int(80*SC)
+    for text, col in [("SK=SEEK", C_CYAN), ("CL=CLOSE", C_ORANGE),
+                      ("STB=_last_stable", C_STABLE)]:
+        _put(disp, text, (int(6*SC), legend_y), scale=0.45*SC, color=col)
+        legend_y += int(22*SC)
 
     return disp
 
 
-# ── 다이어그램 패널 ──────────────────────────────────────────────────────────
+# ── 다이어그램 패널 ───────────────────────────────────────────────────────────
 
-def _draw_diag_panel(centroid, is_close, b_seek, b_close_val, lateral, forward,
-                     roi_fill_close, color_name,
-                     raw_centroid=None, filter_on=True):
+def _draw_diag_panel(centroid, is_close, b_seek, b_close_val,
+                     last_stable, dist_mm,
+                     clip_l=False, clip_r=False):
     img = np.zeros((DIAG_H, DIAG_W, 3), dtype=np.uint8)
     img[:] = (25, 25, 25)
 
-    # ── 상단: bearing 다이어그램 ───────────────────────────────────────────
+    # ── 상단: bearing 다이어그램 ──────────────────────────────────────────────
     cx_d = DIAG_W // 2
-    cy_d = int(DIAG_H * 0.40)
-    r    = 110
+    cy_d = int(DIAG_H * 0.36)
+    r    = int(110 * SC)
 
-    # 원
     cv2.circle(img, (cx_d, cy_d), r, (60, 60, 60), 1)
     cv2.circle(img, (cx_d, cy_d), 3, C_GRAY, -1)
 
-    # 각도 눈금 (-90° ~ +90°)
     for deg in range(-90, 91, 30):
         ex = int(cx_d + r * math.sin(math.radians(deg)))
         ey = int(cy_d - r * math.cos(math.radians(deg)))
-        cv2.line(img, (cx_d, cy_d), (ex, ey), (45, 45, 45), 1)
-        if deg % 30 == 0 and deg != 0:
-            lx = int(cx_d + (r + 18) * math.sin(math.radians(deg)))
-            ly = int(cy_d - (r + 18) * math.cos(math.radians(deg)))
-            _put(img, f"{deg:+d}", (lx - 20, ly + 5), scale=0.45, color=(100, 100, 100))
+        cv2.line(img, (cx_d, cy_d), (ex, ey), (40, 40, 40), 1)
+        if deg != 0:
+            lx = int(cx_d + (r + int(20*SC)) * math.sin(math.radians(deg)))
+            ly = int(cy_d - (r + int(20*SC)) * math.cos(math.radians(deg)))
+            _put(img, f"{deg:+d}",
+                 (lx - int(18*SC), ly + int(5*SC)), scale=0.42*SC,
+                 color=(90, 90, 90))
 
-    # 전방 0° 선
-    cv2.line(img, (cx_d, cy_d), (cx_d, cy_d - r), (80, 80, 80), 1)
-    _put(img, "0°", (cx_d + 4, cy_d - r - 8), scale=0.45, color=(100, 100, 100))
+    cv2.line(img, (cx_d, cy_d), (cx_d, cy_d - r), (70, 70, 70), 1)
+    _put(img, "0°", (cx_d + 4, cy_d - r - int(10*SC)),
+         scale=0.42*SC, color=(90, 90, 90))
 
-    def _draw_arrow(bearing, color, label, inner=0.35):
+    def _diag_arrow(bearing, color, label, inner=0.30, thickness=2):
         ex = int(cx_d + r * math.sin(math.radians(bearing)))
         ey = int(cy_d - r * math.cos(math.radians(bearing)))
         sx = int(cx_d + r * inner * math.sin(math.radians(bearing)))
         sy = int(cy_d - r * inner * math.cos(math.radians(bearing)))
-        cv2.arrowedLine(img, (sx, sy), (ex, ey), color, 2, tipLength=0.20)
-        lx = int(cx_d + (r + 26) * math.sin(math.radians(bearing)))
-        ly = int(cy_d - (r + 26) * math.cos(math.radians(bearing)))
-        _put(img, f"{label}:{bearing:+.1f}", (lx - 55, ly + 5), scale=0.50, color=color)
+        cv2.arrowedLine(img, (sx, sy), (ex, ey), color, thickness, tipLength=0.20)
+        lx = int(cx_d + (r + int(28*SC)) * math.sin(math.radians(bearing)))
+        ly = int(cy_d - (r + int(28*SC)) * math.cos(math.radians(bearing)))
+        _put(img, f"{label}:{bearing:+.1f}",
+             (lx - int(52*SC), ly + int(5*SC)), scale=0.48*SC, color=color)
 
     if centroid is not None:
-        _draw_arrow(b_seek,      C_CYAN,   "SK")
-        _draw_arrow(b_close_val, C_ORANGE, "CL")
+        _diag_arrow(b_seek,      C_CYAN,   "SK")
+        _diag_arrow(b_close_val, C_ORANGE, "CL")
 
-    # 현재 사용 중인 bearing 강조
+    # _last_stable_bearing 항상 표시 (굵게)
+    _diag_arrow(last_stable, C_STABLE, "STB", inner=0.15, thickness=3)
+
+    # 활성 bearing 강조선
     active_b = b_close_val if is_close else b_seek
     active_c = C_ORANGE    if is_close else C_CYAN
-    ex = int(cx_d + r * math.sin(math.radians(active_b)))
-    ey = int(cy_d - r * math.cos(math.radians(active_b)))
-    cv2.line(img, (cx_d, cy_d), (ex, ey), active_c, 3)
+    cv2.line(img,
+             (cx_d, cy_d),
+             (int(cx_d + r * math.sin(math.radians(active_b))),
+              int(cy_d - r * math.cos(math.radians(active_b)))),
+             active_c, 3)
 
-    # ── 중간: 수치 정보 ──────────────────────────────────────────────────
-    y = int(DIAG_H * 0.65)
-    line_h = 28
+    # ── 수치 정보 ─────────────────────────────────────────────────────────────
+    y      = int(DIAG_H * 0.60)
+    line_h = int(30 * SC)
 
-    def row(label, value, color=C_WHITE):
+    def row(label, value, color=C_WHITE, bold=False):
         nonlocal y
-        _put(img, label, (14,        y), scale=0.60, color=(140, 140, 140))
-        _put(img, value, (DIAG_W//2, y), scale=0.60, color=color)
+        lscale = 0.58 * SC
+        vscale = 0.62 * SC if bold else 0.58 * SC
+        _put(img, label, (int(14),          y), scale=lscale, color=(130, 130, 130))
+        _put(img, value, (int(DIAG_W * 0.48), y), scale=vscale, color=color,
+             thickness=2 if bold else 1)
         y += line_h
 
     if centroid is not None:
-        cx, cy_val = centroid
-        # raw centroid 표시 (필터 켜진 경우)
-        if filter_on and raw_centroid is not None:
-            rcx, rcy = raw_centroid
-            row("raw cx/cy",   f"{rcx} / {rcy}",     (100, 100, 100))
-            row("filt cx/cy",  f"{cx} / {cy_val}",   C_GREEN)
-        else:
-            row("cx / cy",     f"{cx} / {cy_val}")
-        row("f_px",         f"{_f_px():.1f} px")
-        row("lateral",      f"{lateral:+.4f}")
-        row("forward",      f"{forward:.4f}",
-            C_ORANGE if forward < 0.1 else C_WHITE)
-        row("SEEK bearing",  f"{b_seek:+.2f} deg",  C_CYAN)
+        cx_v, cy_v = centroid
+        row("cx / cy", f"{cx_v} / {cy_v}")
+
+        row("SEEK bearing",  f"{b_seek:+.2f} deg",     C_CYAN)
         row("CLOSE bearing", f"{b_close_val:+.2f} deg", C_ORANGE)
-        diff = abs(b_close_val - b_seek)
-        row("차이 |CL-SK|",  f"{diff:.2f} deg",
-            (60, 60, 240) if diff > 10 else C_GREEN)
-        # 필터 상태 표시
-        fstr = f"FILTER ON  (α={SMOOTH_ALPHA})" if filter_on else "FILTER OFF"
-        fcol = C_GREEN if filter_on else (100, 100, 100)
-        row("필터",  fstr, fcol)
+
+        # ── _last_stable_bearing 강조 ──────────────────────────────────────
+        clipped   = clip_l or clip_r
+        stb_note  = "[클리핑-고정]" if clipped else "[갱신중]"
+        stb_color = (0, 140, 200) if clipped else C_STABLE
+        row("STABLE bearing", f"{last_stable:+.2f} deg  {stb_note}",
+            stb_color, bold=True)
+
+        row("|CL - SK|",
+            f"{abs(b_close_val - b_seek):.2f} deg",
+            C_RED_B if abs(b_close_val - b_seek) > 10 else C_GREEN)
+
+        row("dist estimate",
+            f"{dist_mm:.0f} mm",
+            C_ORANGE if dist_mm < CLOSE_ENTER_MM else C_WHITE)
+        row("CLOSE mode",
+            f"{'YES' if is_close else 'NO'}  (< {CLOSE_ENTER_MM:.0f} mm)",
+            C_ORANGE if is_close else C_CYAN)
+
     else:
-        _put(img, "미감지", (DIAG_W//2 - 30, y + 20), scale=0.80, color=(100, 100, 100))
+        _put(img, "미감지",
+             (DIAG_W//2 - int(30*SC), y + int(20*SC)),
+             scale=0.80*SC, color=(100, 100, 100))
+        y += int(55*SC)
+        row("STABLE bearing", f"{last_stable:+.2f} deg  [마지막값]",
+            C_STABLE, bold=True)
 
-    # ── 하단: ROI 바 ──────────────────────────────────────────────────────
-    bar_y  = DIAG_H - 46
-    bar_x0 = 14
-    bar_w  = DIAG_W - 28
-    bar_h  = 18
+    # ── 하단: 거리 바 (CLOSE 진입 기준) ──────────────────────────────────────
+    bar_y  = DIAG_H - int(50*SC)
+    bar_x0 = int(14)
+    bar_w  = DIAG_W - int(28)
+    bar_h  = int(18 * SC)
 
-    cv2.rectangle(img, (bar_x0, bar_y), (bar_x0 + bar_w, bar_y + bar_h),
-                  (50, 50, 50), -1)
-    fill_w = int(bar_w * min(1.0, roi_fill_close))
-    bar_col = C_ORANGE if roi_fill_close >= CLOSE_ROI_FILL else C_GREEN
+    cv2.rectangle(img, (bar_x0, bar_y),
+                  (bar_x0 + bar_w, bar_y + bar_h), (50, 50, 50), -1)
+
+    DIST_MAX = 1500.0
+    fill_ratio = max(0.0, min(1.0, 1.0 - (dist_mm - 0) / DIST_MAX))
+    fill_w     = int(bar_w * fill_ratio)
+    bar_col    = C_ORANGE if is_close else C_GREEN
     if fill_w > 0:
         cv2.rectangle(img, (bar_x0, bar_y),
                       (bar_x0 + fill_w, bar_y + bar_h), bar_col, -1)
-    thresh_x = int(bar_x0 + bar_w * CLOSE_ROI_FILL)
-    cv2.line(img, (thresh_x, bar_y - 4), (thresh_x, bar_y + bar_h + 4), C_WHITE, 2)
-    _put(img, f"CLOSE ROI fill: {roi_fill_close:.2f}  "
-              f"(thr={CLOSE_ROI_FILL})  {'← CLOSE' if roi_fill_close >= CLOSE_ROI_FILL else '← SEEK'}",
-         (bar_x0, bar_y - 10), scale=0.50, color=bar_col)
+
+    thresh_ratio = 1.0 - CLOSE_ENTER_MM / DIST_MAX
+    thresh_x     = int(bar_x0 + bar_w * thresh_ratio)
+    cv2.line(img, (thresh_x, bar_y - int(5*SC)),
+             (thresh_x, bar_y + bar_h + int(5*SC)), C_WHITE, 2)
+
+    dist_str = f"{dist_mm:.0f}mm" if dist_mm < 4999 else "---"
+    _put(img,
+         f"dist: {dist_str}  CLOSE <{CLOSE_ENTER_MM:.0f}mm  "
+         f"{'← CLOSE' if is_close else '← SEEK'}",
+         (bar_x0, bar_y - int(12*SC)), scale=0.50*SC, color=bar_col)
 
     return img
 
@@ -290,17 +338,16 @@ def main():
     actual_h = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     print(f"[카메라] 요청: {FRAME_W}x{FRAME_H}  실제: {actual_w}x{actual_h}")
     print(f"[유효 해상도] _EFF_W={_EFF_W}  _EFF_H={_EFF_H}")
-    print(f"[f_px] {_f_px():.1f} px")
+    print(f"[f_px] {_f_px():.1f} px  HFOV={HFOV_DEG}°")
+    print(f"[거리 추정] CAM_H={CAM_HEIGHT_MM}mm  TILT={CAM_TILT_DEG}°  "
+          f"CLOSE < {CLOSE_ENTER_MM}mm")
     print()
-    print("1=RED  2=YELLOW  3=BLUE  q=종료")
+    print("1=RED  2=YELLOW  3=BLUE  r=stable초기화  q=종료")
 
-    color_idx  = 0
-    filter_on  = True
-    smooth_cx  = None
-    smooth_cy  = None
-    win        = 'Bearing Test'
-    cv2.namedWindow(win)
-    print("f=필터 ON/OFF")
+    color_idx   = 0
+    last_stable = 0.0       # _last_stable_bearing 재현
+
+    cv2.namedWindow('Bearing Test')
 
     while True:
         ret, frame = cap.read()
@@ -309,74 +356,60 @@ def main():
         if FRAME_ROTATE is not None:
             frame = cv2.rotate(frame, FRAME_ROTATE)
 
-        color_name    = COLOR_KEYS[color_idx]
-        raw_centroid, area = _detect(frame, color_name)
-        roi_fill_close     = _roi_fill(frame, color_name, CLOSE_ROI_BOTTOM)
-        is_close           = (roi_fill_close >= CLOSE_ROI_FILL)
-
-        # ── 저역통과 필터 ──────────────────────────────────────────────────
-        if raw_centroid is not None:
-            rx, ry = raw_centroid
-            if filter_on:
-                if smooth_cx is None:
-                    smooth_cx, smooth_cy = float(rx), float(ry)
-                else:
-                    smooth_cx = SMOOTH_ALPHA * rx + (1.0 - SMOOTH_ALPHA) * smooth_cx
-                    smooth_cy = SMOOTH_ALPHA * ry + (1.0 - SMOOTH_ALPHA) * smooth_cy
-                centroid = (int(smooth_cx), int(smooth_cy))
-            else:
-                smooth_cx, smooth_cy = None, None   # 필터 꺼지면 상태 초기화
-                centroid = raw_centroid
-        else:
-            smooth_cx, smooth_cy = None, None
-            centroid = None
+        color_name = COLOR_KEYS[color_idx]
+        centroid, _, clip_l, clip_r = _detect(frame, color_name)
 
         b_seek      = 0.0
         b_close_val = 0.0
-        lateral     = 0.0
-        forward_val = CAM_POLAR_EPSILON
+        dist_mm     = 5000.0
+        is_close    = False
 
         if centroid is not None:
-            cx, cy = centroid
-            b_seek              = _bearing_seek(cx)
-            b_close_val, lateral, forward_val = _bearing_close(cx, cy)
+            cx, cy      = centroid
+            b_seek      = _bearing_seek(cx)
+            b_close_val, _, _ = _bearing_close(cx, cy)
+            dist_mm     = _estimate_dist(cy)
+            is_close    = (dist_mm < CLOSE_ENTER_MM)
 
-        # 패널 합성
-        cam_panel  = _draw_cam_panel(frame, centroid, color_name, is_close,
-                                     b_seek, b_close_val)
-        diag_panel = _draw_diag_panel(centroid, is_close, b_seek, b_close_val,
-                                      lateral, forward_val, roi_fill_close, color_name,
-                                      raw_centroid=raw_centroid, filter_on=filter_on)
+            # camera_tracker._last_stable_bearing 재현:
+            # 클리핑 없을 때만 bearing_seek 으로 갱신
+            if not (clip_l or clip_r):
+                last_stable = b_seek
+
+        cam_panel  = _draw_cam_panel(
+            frame, centroid, color_name, is_close,
+            b_seek, b_close_val, last_stable, clip_l, clip_r)
+        diag_panel = _draw_diag_panel(
+            centroid, is_close, b_seek, b_close_val,
+            last_stable, dist_mm,
+            clip_l=clip_l, clip_r=clip_r)
 
         # 높이 맞추기
-        ch = cam_panel.shape[0]
-        dh = diag_panel.shape[0]
+        ch, dh = cam_panel.shape[0], diag_panel.shape[0]
         if ch < dh:
-            cam_panel  = cv2.copyMakeBorder(cam_panel,  0, dh - ch, 0, 0,
+            cam_panel  = cv2.copyMakeBorder(cam_panel,  0, dh-ch, 0, 0,
                                              cv2.BORDER_CONSTANT, value=(20, 20, 20))
         elif dh < ch:
-            diag_panel = cv2.copyMakeBorder(diag_panel, 0, ch - dh, 0, 0,
+            diag_panel = cv2.copyMakeBorder(diag_panel, 0, ch-dh, 0, 0,
                                              cv2.BORDER_CONSTANT, value=(20, 20, 20))
 
-        combined = np.hstack([cam_panel, diag_panel])
-        cv2.imshow(win, combined)
+        cv2.imshow('Bearing Test', np.hstack([cam_panel, diag_panel]))
 
         key = cv2.waitKey(1) & 0xFF
         if key == ord('q'):
             break
         elif key == ord('1'):
-            color_idx = 0
-            print(f"[색상] RED 선택")
+            color_idx = 0; last_stable = 0.0
+            print("[색상] RED")
         elif key == ord('2'):
-            color_idx = 1
-            print(f"[색상] YELLOW 선택")
+            color_idx = 1; last_stable = 0.0
+            print("[색상] YELLOW")
         elif key == ord('3'):
-            color_idx = 2
-            print(f"[색상] BLUE 선택")
-        elif key == ord('f'):
-            filter_on = not filter_on
-            smooth_cx = smooth_cy = None   # 토글 시 필터 상태 초기화
-            print(f"[필터] {'ON' if filter_on else 'OFF'}  (α={SMOOTH_ALPHA})")
+            color_idx = 2; last_stable = 0.0
+            print("[색상] BLUE")
+        elif key == ord('r'):
+            last_stable = 0.0
+            print("[STABLE] _last_stable_bearing 초기화 → 0.0°")
 
     cap.release()
     cv2.destroyAllWindows()
