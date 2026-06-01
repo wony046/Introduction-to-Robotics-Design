@@ -161,10 +161,11 @@ DEBUG_FINAL       = 0   # [FINAL] 최종 v, w
 DEBUG_SIDE        = 0   # [SIDE] 측면 반발력
 DEBUG_SIDE_LAYER  = 0   # [SIDE_LAYER] 측방 레이어
 DEBUG_VIRTUAL     = 0   # [VIRTUAL] 가상 장애물
-DEBUG_CLOSE_INIT  = 1   # [CLOSE] 목표 좌표 계산 (진입 1회)
-DEBUG_CLOSE_POS   = 1   # [CLOSE] 접근 중 위치/거리
-DEBUG_CLOSE_HDG   = 1   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
-DEBUG_CLOSE_DONE  = 1   # [CLOSE] 도달 판정
+DEBUG_CLOSE_INIT   = 1   # [CLOSE] 목표 좌표 계산 (진입 1회)
+DEBUG_CLOSE_POS    = 0   # [CLOSE] 접근 중 위치/거리
+DEBUG_CLOSE_HDG    = 0   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
+DEBUG_CLOSE_DONE   = 1   # [CLOSE] 도달 판정
+DEBUG_CLOSE_REMAIN = 1   # [CLOSE] 남은 거리 / 진행률 (매 사이클)
 DEBUG_SEND        = 0   # [SEND] 모터 명령 전송
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
@@ -174,8 +175,9 @@ arduino_y_mm          = 0.0   # 오도메트리 y 위치 (mm, 전방 +)
 prev_w                = 0.0
 
 # ── CLOSE 접근 제어 ───────────────────────────────────────────────────────────
-_close_target_x   = None   # 색지 추정 x 좌표 (mm)
-_close_target_y   = None   # 색지 추정 y 좌표 (mm)
+_close_target_x    = None   # 색지 추정 x 좌표 (mm)
+_close_target_y    = None   # 색지 추정 y 좌표 (mm)
+_close_initial_dist = None  # CLOSE 진입 시 초기 거리 (진행률 계산용)
 KP_CLOSE_HDG      = 0.1   # 헤딩 오차(deg) → w 게인  (포화: ±18° → MAX_W)
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
@@ -1159,7 +1161,7 @@ def _lidar_reader(lidar):
 def _motor_controller(arduino):
     """모터 제어 전용 스레드.
     SEND_INTERVAL마다 독립적으로 명령 송신 — 라이다 지연과 무관."""
-    global prev_w, _close_target_x, _close_target_y
+    global prev_w, _close_target_x, _close_target_y, _close_initial_dist
     last_cmd_str = ""
     while not _shutdown.is_set():
         read_arduino(arduino)
@@ -1170,16 +1172,19 @@ def _motor_controller(arduino):
             if camera_tracker.is_done() or camera_tracker.is_dwelling():
                 v, w = 0.0, 0.0
                 prev_w = 0.0
-                _close_target_x = _close_target_y = None
+                _close_target_x = _close_target_y = _close_initial_dist = None
 
             # ── 상태 2: CLOSE → 오도메트리 위치 제어 ───────────────────────
             elif camera_tracker.is_close():
                 if _close_target_x is None:
                     _close_target_x, _close_target_y = _compute_close_target()
+                    _close_initial_dist = None  # 첫 dist_err 계산 후 세팅
 
                 ex = _close_target_x - arduino_x_mm
                 ey = _close_target_y - arduino_y_mm
                 dist_err = math.sqrt(ex ** 2 + ey ** 2)
+                if _close_initial_dist is None:
+                    _close_initial_dist = max(dist_err, 1.0)  # 0 나눔 방지
 
                 if dist_err < CLOSE_ARRIVE_MM:
                     # 추정 좌표 도달 → 색지 위에 바퀴가 들어온 것으로 판정, 정지
@@ -1198,6 +1203,13 @@ def _motor_controller(arduino):
 
                     prev_w = w   # CLOSE 모드 내 스무딩 관성 제거
 
+                    if DEBUG_CLOSE_REMAIN:
+                        done_pct = (1.0 - dist_err / _close_initial_dist) * 100.0
+                        bar_len  = 20
+                        filled   = int(bar_len * done_pct / 100.0)
+                        bar      = '█' * filled + '░' * (bar_len - filled)
+                        print(f"[CLOSE_REMAIN] [{bar}] {done_pct:5.1f}%  "
+                              f"remain={dist_err:.0f}mm / {_close_initial_dist:.0f}mm")
                     if DEBUG_CLOSE_POS:
                         print(f"[CLOSE_POS] pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
                               f"tgt=({_close_target_x:.0f},{_close_target_y:.0f}) "
@@ -1209,7 +1221,7 @@ def _motor_controller(arduino):
 
             # ── 상태 3: SEEK → 카메라 bearing + 라이다 회피 ────────────────
             else:
-                _close_target_x = _close_target_y = None
+                _close_target_x = _close_target_y = _close_initial_dist = None
                 bearing = camera_tracker.get_bearing()
                 tb = bearing if bearing is not None else camera_tracker.get_last_stable_bearing()
                 v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=tb)
