@@ -157,7 +157,7 @@ DEBUG_FALLBACK    = 0   # [FALLBACK] 점수 기반 회피 요약
 DEBUG_SCORE       = 0   # [SCORE] 점수 상세 (FALLBACK 하위)
 DEBUG_DIR         = 0   # [DIR] 방향 결정 결과
 DEBUG_CLEAR       = 0   # [CLEAR] 장애물 없음
-DEBUG_FINAL       = 0   # [FINAL] 최종 v, w
+DEBUG_FINAL       = 1   # [FINAL] 최종 v, w
 DEBUG_SIDE        = 0   # [SIDE] 측면 반발력
 DEBUG_SIDE_LAYER  = 0   # [SIDE_LAYER] 측방 레이어
 DEBUG_VIRTUAL     = 0   # [VIRTUAL] 가상 장애물
@@ -165,7 +165,7 @@ DEBUG_CLOSE_INIT  = 1   # [CLOSE] 목표 좌표 계산 (진입 1회)
 DEBUG_CLOSE_POS   = 1   # [CLOSE] 접근 중 위치/거리
 DEBUG_CLOSE_HDG   = 1   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
 DEBUG_CLOSE_DONE  = 1   # [CLOSE] 도달 판정
-DEBUG_SEND        = 0   # [SEND] 모터 명령 전송
+DEBUG_SEND        = 1   # [SEND] 모터 명령 전송
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
@@ -178,7 +178,7 @@ _close_target_x   = None   # 색지 추정 x 좌표 (mm)
 _close_target_y   = None   # 색지 추정 y 좌표 (mm)
 KP_CLOSE_HDG      = 0.1   # 헤딩 오차(deg) → w 게인  (포화: ±18° → MAX_W)
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
-CLOSE_ARRIVE_MM   = 200    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
+CLOSE_ARRIVE_MM   = 100    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터

@@ -28,9 +28,8 @@ ARRIVE_ROI_DROP   = 0.5       # peaked 후 이 값 미만으로 떨어지면 도
 USE_ROI_ARRIVE    = 1         # 1=ROI peaked→drop 도착 판정 활성 / 0=비활성 (오도메트리만 사용)
 
 # ── 근접 접근 제어 ────────────────────────────────────────────────────────
-CLOSE_ROI_BOTTOM   = 0.5      # CLOSE 판정 ROI 비율 (하단 50%)
-CLOSE_ROI_FILL     = 0.25     # 하단 50% ROI에서 목표색 점유율 >= 이 값 → CLOSE 전환
-CAM_HEIGHT_MM      = 420.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측 필요
+CLOSE_ENTER_MM     = 350.0    # 이 거리(mm) 이내로 들어오면 CLOSE 모드 전환
+CAM_HEIGHT_MM      = 430.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측 필요
                                #   = 바퀴 반지름 + 바퀴축~카메라 높이(500mm)
 CAM_TILT_DEG       = 34.5    # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
                                #   수평=0°, 아래로 내려다볼수록 +
@@ -201,12 +200,9 @@ def _camera_loop():
         target_color                    = MISSION_ORDER[idx]
         centroid, area, clip_l, clip_r  = _detect_color(frame, target_color)
         roi_fill                        = _get_roi_fill(frame, target_color)
-        close_roi_fill                  = _get_roi_fill(frame, target_color,
-                                                        bottom_ratio=CLOSE_ROI_BOTTOM)
 
         # ── 근접 / 클리핑 판정 (lock 밖, 카메라 스레드 전용) ──────────────
         global _roi_peaked
-        is_close_now = (close_roi_fill >= CLOSE_ROI_FILL)
 
         # bearing 계산: SEEK=atan2 / CLOSE=원근보정, 클리핑 시 마지막 안정값 유지
         if centroid is not None:
@@ -218,6 +214,14 @@ def _camera_loop():
                 _smooth_cx = SMOOTH_ALPHA * cx_raw + (1.0 - SMOOTH_ALPHA) * _smooth_cx
                 _smooth_cy = SMOOTH_ALPHA * cy_raw + (1.0 - SMOOTH_ALPHA) * _smooth_cy
             cx, cy = int(_smooth_cx), int(_smooth_cy)
+
+            # ── 거리 기반 CLOSE 판정 ────────────────────────────────────────
+            f_px_v     = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
+            delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, f_px_v))
+            depression = CAM_TILT_DEG + delta_v
+            cam_dist   = (CAM_HEIGHT_MM / math.tan(math.radians(depression))
+                          if depression > 1.0 else 5000.0)
+            is_close_now = (cam_dist < CLOSE_ENTER_MM)
 
             clipped = clip_l or clip_r
             if is_close_now:
@@ -233,6 +237,7 @@ def _camera_loop():
         else:
             bearing      = None
             is_close_now = False
+            cam_dist     = 5000.0
 
         # 도착 판정 (3가지 중 하나라도 충족 시 arrived=True)
         if USE_ROI_ARRIVE:
@@ -258,7 +263,7 @@ def _camera_loop():
                 clip_str = ('L' if clip_l else '') + ('R' if clip_r else '') or '-'
                 print(f"[CAMERA] {target_color} area={area:.0f} "
                       f"clip={clip_str} close={is_close_now} "
-                      f"bearing={bearing:+.1f}° fill={roi_fill:.2f} "
+                      f"bearing={bearing:+.1f}° dist={cam_dist:.0f}mm fill={roi_fill:.2f} "
                       f"peaked={_roi_peaked}" if bearing is not None else
                       f"[CAMERA] {target_color} 미감지 fill={roi_fill:.2f}")
 

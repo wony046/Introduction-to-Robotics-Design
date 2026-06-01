@@ -29,6 +29,7 @@ FRAME_ROTATE   = cv2.ROTATE_90_COUNTERCLOCKWISE
 HFOV_DEG       = 38.6     # 실측값
 CAM_HEIGHT_MM  = 430.0    # ★ 실측 필요 (바닥~카메라 수직 높이 mm)
 CAM_TILT_DEG   = 34.5     # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
+CLOSE_ENTER_MM = 350.0    # 이 거리 이내 → CLOSE 모드 진입 (camera_tracker.py와 동일)
 
 TARGET_COLOR   = 'RED'    # 테스트할 색상
 
@@ -97,6 +98,18 @@ def estimate_distance(cy):
         return None, delta_v, depression
     d = CAM_HEIGHT_MM / math.tan(math.radians(depression))
     return max(d, 50.0), delta_v, depression
+
+
+def dist_to_cy(d_mm):
+    """거리(mm) → 해당 cy 픽셀 역산. CLOSE 임계선 표시에 사용."""
+    f_px       = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
+    depression = math.degrees(math.atan(CAM_HEIGHT_MM / d_mm))
+    delta_v    = depression - CAM_TILT_DEG
+    return int(_EFF_H / 2.0 + f_px * math.tan(math.radians(delta_v)))
+
+
+# CLOSE 진입 임계선 cy (매 프레임 재계산 불필요)
+_CLOSE_CY = dist_to_cy(CLOSE_ENTER_MM)
 
 
 def _put(img, text, pos, scale=0.78, color=C_WHITE, thickness=2):
@@ -211,6 +224,12 @@ def build_display(frame, centroid, contour, est_dist, delta_v, depression,
     # 중심 수직선
     cv2.line(vis, (cam_w//2, 0), (cam_w//2, cam_h), C_GRAY, 1)
 
+    # CLOSE 진입 임계선 (350mm)
+    if 0 <= _CLOSE_CY < cam_h:
+        cv2.line(vis, (0, _CLOSE_CY), (cam_w, _CLOSE_CY), C_GREEN, 2)
+        _put(vis, f"CLOSE {CLOSE_ENTER_MM:.0f}mm", (6, _CLOSE_CY - 8),
+             scale=0.58, color=C_GREEN)
+
     if centroid is not None:
         cx, cy = centroid
         # cy 수평선 (거리 계산에 사용되는 줄)
@@ -232,7 +251,7 @@ def build_display(frame, centroid, contour, est_dist, delta_v, depression,
     # 거리 크게 표시
     if est_dist is not None:
         dist_str = f"{est_dist:.0f} mm"
-        color_dist = C_GREEN if est_dist < 600 else C_ORANGE
+        color_dist = C_GREEN if est_dist < CLOSE_ENTER_MM else C_ORANGE
         _put(vis, dist_str, (cam_w//2 - 60, 50), scale=1.2,
              color=color_dist, thickness=2)
         _put(vis, "est. dist", (cam_w//2 - 48, 80), scale=0.60, color=C_GRAY)
