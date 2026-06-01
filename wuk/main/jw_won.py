@@ -923,7 +923,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         # ① 목표 방향이 비어있음 → 목표로 직진 (갭 무시)
         desired_heading      = target_bearing
         prev_desired_heading = desired_heading
-        w = - KP_GOAL * desired_heading
+        w = KP_GOAL * desired_heading
 
         # 목표 정렬도에 따라 v 조정
         # 정렬됨(0°) → FORWARD_SPEED / 많이 벗어남(≥TARGET_ALIGN_ANGLE) → MIN_SPEED
@@ -938,7 +938,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         # ② 목표 막힘 → 통과 갭 중 목표 최근접으로 우회 (gap-following)
         desired_heading      = chosen_gap['center_angle']
         prev_desired_heading = desired_heading
-        w = - KP_GOAL * desired_heading
+        w = KP_GOAL * desired_heading
         if DEBUG_GAP:
             print(f"  [GAP_FOLLOW] {len(front_gaps)} gap(s) → chosen={desired_heading:+.1f}° "
                   f"target={target_bearing:+.1f}° w={w:+.3f}")
@@ -1011,7 +1011,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         # ④ 막힘인데 갭도 장애물도 없음(드묾) → 목표 유지
         desired_heading      = target_bearing
         prev_desired_heading = desired_heading
-        w = - KP_GOAL * target_bearing
+        w = KP_GOAL * target_bearing
         if DEBUG_CLEAR:
             print(f"  [CLEAR] no obstacles → target={target_bearing:+.1f}° w={w:+.3f}")
 
