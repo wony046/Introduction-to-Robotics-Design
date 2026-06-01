@@ -12,15 +12,15 @@ import numpy as np
 CAMERA_INDEX = 0
 FRAME_WIDTH = 320   # 연산 속도를 위해 해상도 축소
 FRAME_HEIGHT = 240
-SHOW_CV_WINDOW = True # 테스트 시 화면 출력 (실전에서는 False 권장)
+SHOW_CV_WINDOW = True # 테스트 시 화면 출력
 
-MIN_CONTOUR_AREA = 500  # 노이즈를 무시할 최소 픽셀 덩어리 크기
+MIN_CONTOUR_AREA = 500       # 노이즈를 무시할 최소 픽셀 덩어리 크기
 ARRIVE_FILL_RATIO = 0.80     # 화면 하단 10% 영역이 목표 색상으로 80% 채워져야 함
 TOP_EMPTY_LIMIT = 0.05       # 화면 상단 90% 영역은 목표 색상이 5% 미만이어야 함 (노이즈 허용)
 
-# 타겟 색상 (빨 -> 노 -> 파)
+# 타겟 색상 (빨 -> 노 -> 파 순서 적용)
 MISSION_COLORS = ['RED', 'YELLOW', 'BLUE']
-# 조명에 맞게 반드시 튜닝해야 하는 HSV 임계값
+# 조명에 맞게 튜닝해야 하는 HSV 임계값
 COLOR_HSV_RANGES = {
     'RED':    [(0, 100, 100), (10, 255, 255), (160, 100, 100), (180, 255, 255)],
     'YELLOW': [(20, 100, 100), (35, 255, 255)],
@@ -29,8 +29,8 @@ COLOR_HSV_RANGES = {
 
 # 🎯 비전 주행 가중치 점수
 SCORE_COLOR_TARGET = 5000.0  # 색지 발견 시 목표 방향으로 끌어당기는 압도적 점수
-SCORE_EXPLORE_BIAS = 600.0   # 색지가 없을 때 완만하게 회전하며 탐색(벽타기)하게 만드는 점수
-SCORE_ALIGN = 80.0           # [수평 정렬] 종이와 나란히 서기 위해 몸을 비트는 점수 (부드럽게)
+SCORE_EXPLORE_BIAS = 600.0   # 색지가 없을 때 완만하게 회전하며 탐색하게 만드는 점수
+SCORE_ALIGN = 80.0           # [수평 정렬] 종이와 나란히 서기 위해 몸을 비트는 점수
 
 # ── 전역 비전 상태 (스레드 공유) ─────────────────────────
 _cam_lock = threading.Lock()
@@ -128,7 +128,7 @@ _latest_scan = []
 _shutdown    = threading.Event() 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# [3] 유틸리티 및 라이다 연산 (기존 동일)
+# [3] 유틸리티 및 라이다 연산
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def normalize_angle(angle): return angle - 360 if angle > 180 else angle
 def is_in_front_90(a): return -90 <= a <= 90
@@ -291,23 +291,25 @@ def get_narrow_gap_pushes(scan_points, layer, in_stop=False):
     return vl, vr
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# [4] 비전 통합 주행 제어 (V/W 산출)
+# [4] 비전 통합 주행 제어 (V/W 산출) - 🚨 완벽 수정판
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def find_vw_layered(scan_points, heading_deg):
     global is_color_visible, camera_target_error_x, _last_direction
     
     layer_results = [r for l in LAYERS if (r := process_layer(scan_points, l)) is not None]
-    if not layer_results: return FORWARD_SPEED, 0.0
-
-    closest = min(layer_results, key=lambda r: r['rep_horiz'])
-    ref_a = closest['rep_angle']
-    ref_d = math.sqrt(closest['rep_horiz']**2 + closest['rep_fwd']**2)
-
-    gap_L = get_gap_width(scan_points, ref_a, ref_d, True)
-    gap_R = get_gap_width(scan_points, ref_a, ref_d, False)
     
-    sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
-    sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
+    # 전방 라이다 장애물이 없어도 카메라 방향 유도를 위해 일찍 종료하지 않음
+    if layer_results:
+        closest = min(layer_results, key=lambda r: r['rep_horiz'])
+        ref_a = closest['rep_angle']
+        ref_d = math.sqrt(closest['rep_horiz']**2 + closest['rep_fwd']**2)
+        gap_L = get_gap_width(scan_points, ref_a, ref_d, True)
+        gap_R = get_gap_width(scan_points, ref_a, ref_d, False)
+        sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
+        sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
+    else:
+        # 장애물이 없으면 라이다 점수는 모두 0으로 초기화
+        gap_L, gap_R, sum_pR, sum_pL = 0.0, 0.0, 0.0, 0.0
 
     vR_tot, vL_tot = 0.0, 0.0
     for l in LAYERS:
@@ -336,20 +338,24 @@ def find_vw_layered(scan_points, heading_deg):
         cam_err_x = camera_target_error_x
         align_angle = color_align_angle
 
+    # 카메라 유도에 의한 회전 속도 강도 변수
+    vision_w_mag = 0.0
+
     if visible:
         # 1. 색지 중앙으로 돌격
         if cam_err_x < 0: term_color_L = SCORE_COLOR_TARGET * abs(cam_err_x)
         else:             term_color_R = SCORE_COLOR_TARGET * abs(cam_err_x)
         
         # 2. 색지 윗변과 평행 맞추기 (align_angle 보정)
-        # 기울기가 +면 로봇이 너무 왼쪽을 보고 있음 -> 오른쪽으로 틀어라 (term_align_R)
-        if align_angle > 0:
-            term_align_R = SCORE_ALIGN * align_angle
-        elif align_angle < 0:
-            term_align_L = SCORE_ALIGN * abs(align_angle)
+        if align_angle > 0: term_align_R = SCORE_ALIGN * align_angle
+        elif align_angle < 0: term_align_L = SCORE_ALIGN * abs(align_angle)
+        
+        # 3. 색지가 중심에서 멀어질수록 모터 회전(꺾임) 강도 상승
+        vision_w_mag = abs(cam_err_x) * MAX_W * 1.5 
     else:
-        # 색지가 없을 때는 왼쪽으로 살짝 치우쳐 원형 탐색
+        # 색지가 없을 때는 왼쪽으로 살짝 치우쳐 탐색 주행
         term_explore_L = SCORE_EXPLORE_BIAS
+        vision_w_mag = 0.8  # 탐색 시 꺾는 기본 속도
 
     score_L = t_gL + t_pL + t_sL + t_hL + term_color_L + term_align_L + term_explore_L
     score_R = t_gR + t_pR + t_sR + t_hR + term_color_R + term_align_R + term_explore_R
@@ -359,11 +365,18 @@ def find_vw_layered(scan_points, heading_deg):
     else: direction = -1.0 if s_diff < DIRECTION_HYSTERESIS else 1.0
     _last_direction = direction
 
-    v_layers = [r for r in layer_results if r['v_proposal'] is not None]
-    if v_layers: v = sum(r['weight'] * r['v_proposal'] for r in v_layers) / sum(r['weight'] for r in v_layers)
-    else: v = FORWARD_SPEED
+    # 장애물 유무에 따른 v, w 계산
+    if layer_results:
+        v_layers = [r for r in layer_results if r['v_proposal'] is not None]
+        if v_layers: v = sum(r['weight'] * r['v_proposal'] for r in v_layers) / sum(r['weight'] for r in v_layers)
+        else: v = FORWARD_SPEED
+        w_mag = sum(r['weight'] * r['urgency'] for r in layer_results) / sum(r['weight'] for r in layer_results)
+    else:
+        v = FORWARD_SPEED
+        w_mag = 0.0
 
-    w_mag = sum(r['weight'] * r['urgency'] for r in layer_results) / sum(r['weight'] for r in layer_results)
+    # 라이다의 장애물 회피 회전력(w_mag)과 카메라의 추적 회전력(vision_w_mag) 중 더 강한 값을 채택!
+    w_mag = max(w_mag, vision_w_mag)
     w_mag = max(min(w_mag, MAX_W), W_MIN_DANGER)
     
     w = direction * w_mag + (side_r_push - side_l_push) * SIDE_W_BOOST_GAIN
@@ -381,7 +394,7 @@ def find_vw_command(scan_points, heading_deg):
 
     # 미션 달성 (정지 대기 중)
     if mission_phase == 1:
-        if time.time() - arrive_time > 2.0:
+        if time.time() - arrive_time > 2.0: # 2초 대기 후 다음 색상으로
             current_color_idx += 1          
             mission_phase = 0               
             print(f"[MISSION] Next Target: {MISSION_COLORS[current_color_idx % len(MISSION_COLORS)]}")
@@ -392,7 +405,7 @@ def find_vw_command(scan_points, heading_deg):
         top_fill_ratio = color_top_fill_ratio
         visible = is_color_visible
     
-    # 🎯 도착 판정: 색지가 하단에 꽉 찼고, 상단에서는 보이지 않을 때
+    # 🎯 도착 판정: 색지가 하단에 80% 찼고, 상단 90%에서는 거의 보이지 않을 때
     if visible and (fill_ratio >= ARRIVE_FILL_RATIO) and (top_fill_ratio < TOP_EMPTY_LIMIT):
         print(f"[MISSION] ARRIVED at {MISSION_COLORS[current_color_idx % len(MISSION_COLORS)]}!")
         print(f" -> Bot Fill: {fill_ratio*100:.1f}%, Top Fill: {top_fill_ratio*100:.1f}%")
@@ -420,7 +433,7 @@ def find_vw_command(scan_points, heading_deg):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# [5] 스레드: 비전(수평/회전/분할 처리), 라이다, 모터
+# [5] 스레드: 비전(np.int32 적용완료), 라이다, 모터
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _camera_processor():
     global is_color_visible, camera_target_error_x, color_bottom_y, current_color_idx
@@ -468,6 +481,7 @@ def _camera_processor():
                 
                 # 2. 사다리꼴 수평 기울기 각도 구하기 (안전한 정렬용)
                 rect = cv2.minAreaRect(c)
+                # 🚨 np.int32로 수정 완료 🚨
                 box = np.int32(cv2.boxPoints(rect))
                 pts_y_sorted = sorted(box, key=lambda p: p[1])
                 top_2 = pts_y_sorted[:2]
@@ -558,7 +572,7 @@ def _motor_controller(arduino):
 # [6] 메인 실행
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def main():
-    print("=== Robot Navigation + Vision Parking (Final Prototype) ===")
+    print("=== Robot Navigation + Vision Parking (Final Ver) ===")
     
     try:
         lidar   = serial.Serial(LIDAR_PORT,   BAUDRATE_LIDAR,   timeout=1)
