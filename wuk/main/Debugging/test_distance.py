@@ -27,7 +27,7 @@ FRAME_H        = 480
 FRAME_ROTATE   = cv2.ROTATE_90_COUNTERCLOCKWISE
 
 HFOV_DEG       = 38.6     # 실측값
-CAM_HEIGHT_MM  = 420.0    # ★ 실측 필요 (바닥~카메라 수직 높이 mm)
+CAM_HEIGHT_MM  = 430.0    # ★ 실측 필요 (바닥~카메라 수직 높이 mm)
 CAM_TILT_DEG   = 34.5     # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
 
 TARGET_COLOR   = 'RED'    # 테스트할 색상
