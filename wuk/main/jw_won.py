@@ -165,7 +165,7 @@ DEBUG_CLOSE_INIT  = 1   # [CLOSE] 목표 좌표 계산 (진입 1회)
 DEBUG_CLOSE_POS   = 1   # [CLOSE] 접근 중 위치/거리
 DEBUG_CLOSE_HDG   = 1   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
 DEBUG_CLOSE_DONE  = 1   # [CLOSE] 도달 판정
-DEBUG_SEND        = 1   # [SEND] 모터 명령 전송
+DEBUG_SEND        = 0   # [SEND] 모터 명령 전송
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
