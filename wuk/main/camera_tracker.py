@@ -69,6 +69,7 @@ _dwell_start         = None    # 도착 판정 시작 시각 (time.time())
 _dwelling            = False   # True 동안 모터 정지
 _done                = False   # BLUE 완료 → 영구 정지
 _shutdown            = threading.Event()
+_arrival_signal      = threading.Event()   # 외부(오도메트리 등)에서 도착 신호
 _roi_peaked          = False   # 카메라 스레드 전용: ROI 점유율이 peak를 찍었는지
 _close               = False   # CLOSE 모드 (blob 크기 > 임계)
 _last_stable_bearing = 0.0     # 클리핑 전 마지막 유효 bearing (deg)
@@ -233,15 +234,20 @@ def _camera_loop():
             bearing      = None
             is_close_now = False
 
-        # peaked/drop 도착 판정
+        # 도착 판정 (3가지 중 하나라도 충족 시 arrived=True)
         if USE_ROI_ARRIVE:
             if roi_fill >= ARRIVE_ROI_PEAK:
                 if not _roi_peaked and DEBUG_CAMERA:
                     print(f"[CAMERA] {target_color} ROI peak! fill={roi_fill:.2f}")
                 _roi_peaked = True
-            arrived = _roi_peaked and roi_fill < ARRIVE_ROI_DROP
+            # ① fill 높음 유지 (색지 위 정지)
+            # ② peaked 후 drop (색지 통과)
+            # ③ 오도메트리 외부 신호
+            arrived = (roi_fill >= ARRIVE_ROI_PEAK
+                       or (_roi_peaked and roi_fill < ARRIVE_ROI_DROP)
+                       or _arrival_signal.is_set())
         else:
-            arrived = False
+            arrived = _arrival_signal.is_set()   # USE_ROI_ARRIVE=0이면 오도메트리만
 
         with _lock:
             _target_bearing = bearing
@@ -274,6 +280,7 @@ def _camera_loop():
                     _last_stable_bearing  = 0.0
                     _smooth_cx            = None   # 다음 색지용 필터 초기화
                     _smooth_cy            = None
+                    _arrival_signal.clear()        # 외부 도착 신호 초기화
                     if _mission_idx >= len(MISSION_ORDER):
                         _done = True
                         print("DONE (완주)")
@@ -384,6 +391,12 @@ def get_estimated_distance_mm():
 
     d = CAM_HEIGHT_MM / math.tan(math.radians(depression))
     return max(d, 50.0)   # 최소 50mm 클램프
+
+
+def signal_arrival():
+    """오도메트리 등 외부 시스템이 도착을 알릴 때 호출.
+    카메라의 peaked→drop 판정이 막혀 있어도 미션이 진행된다."""
+    _arrival_signal.set()
 
 
 def get_state():
