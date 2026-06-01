@@ -163,6 +163,7 @@ DEBUG_SIDE_LAYER  = 0   # [SIDE_LAYER] 측방 레이어
 DEBUG_VIRTUAL     = 0   # [VIRTUAL] 가상 장애물
 DEBUG_CLOSE_INIT  = 1   # [CLOSE] 목표 좌표 계산 (진입 1회)
 DEBUG_CLOSE_POS   = 1   # [CLOSE] 접근 중 위치/거리
+DEBUG_CLOSE_HDG   = 1   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
 DEBUG_CLOSE_DONE  = 1   # [CLOSE] 도달 판정
 DEBUG_SEND        = 0   # [SEND] 모터 명령 전송
 
@@ -1188,7 +1189,7 @@ def _motor_controller(arduino):
                         print(f"[CLOSE] 도달 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) → 정지")
                 else:
                     target_hdg = math.degrees(math.atan2(ex, ey))
-                    hdg_err    = normalize_angle(arduino_heading_deg - target_hdg)
+                    hdg_err    = normalize_angle(target_hdg - arduino_heading_deg)
 
                     w = max(min(-KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
                     v = CLOSE_SPEED_MAX
@@ -1196,10 +1197,13 @@ def _motor_controller(arduino):
                     prev_w = w   # CLOSE 모드 내 스무딩 관성 제거
 
                     if DEBUG_CLOSE_POS:
-                        print(f"[CLOSE] pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
+                        print(f"[CLOSE_POS] pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
                               f"tgt=({_close_target_x:.0f},{_close_target_y:.0f}) "
-                              f"dist={dist_err:.0f}mm hdg_err={hdg_err:+.1f}° "
-                              f"v={v:.2f} w={w:+.2f}")
+                              f"dist={dist_err:.0f}mm  v={v:.2f}")
+                    if DEBUG_CLOSE_HDG:
+                        print(f"[CLOSE_HDG] arduino={arduino_heading_deg:+.1f}° "
+                              f"target_hdg={target_hdg:+.1f}° "
+                              f"hdg_err={hdg_err:+.1f}°  w={w:+.2f}")
 
             # ── 상태 3: SEEK → 카메라 bearing + 라이다 회피 ────────────────
             else:
