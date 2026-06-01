@@ -163,7 +163,7 @@ DEBUG_SIDE_LAYER  = 0   # [SIDE_LAYER] 측방 레이어
 DEBUG_VIRTUAL     = 0   # [VIRTUAL] 가상 장애물
 DEBUG_CLOSE_INIT   = 1   # [CLOSE] 목표 좌표 계산 (진입 1회)
 DEBUG_CLOSE_POS    = 0   # [CLOSE] 접근 중 위치/거리
-DEBUG_CLOSE_HDG    = 0   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
+DEBUG_CLOSE_HDG    = 1   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
 DEBUG_CLOSE_DONE   = 1   # [CLOSE] 도달 판정
 DEBUG_CLOSE_REMAIN = 1   # [CLOSE] 남은 거리 / 진행률 (매 사이클)
 DEBUG_SEND        = 0   # [SEND] 모터 명령 전송
@@ -1216,7 +1216,7 @@ def _motor_controller(arduino):
                         print(f"[CLOSE] 도달 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) → 정지")
                 else:
                     target_hdg = math.degrees(math.atan2(ex, ey))
-                    hdg_err    = normalize_angle(target_hdg - arduino_heading_deg)
+                    hdg_err    = normalize_angle(arduino_heading_deg - target_hdg)
 
                     w = max(min(KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
                     v = CLOSE_SPEED_MAX
