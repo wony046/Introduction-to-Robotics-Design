@@ -1209,7 +1209,9 @@ def _motor_controller(arduino):
                         filled   = int(bar_len * done_pct / 100.0)
                         bar      = '█' * filled + '░' * (bar_len - filled)
                         print(f"[CLOSE_REMAIN] [{bar}] {done_pct:5.1f}%  "
-                              f"remain={dist_err:.0f}mm / {_close_initial_dist:.0f}mm")
+                              f"remain={dist_err:.0f}mm / {_close_initial_dist:.0f}mm  "
+                              f"pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f})  "
+                              f"tgt=({_close_target_x:.0f},{_close_target_y:.0f})")
                     if DEBUG_CLOSE_POS:
                         print(f"[CLOSE_POS] pos=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
                               f"tgt=({_close_target_x:.0f},{_close_target_y:.0f}) "
