@@ -1191,7 +1191,7 @@ def _motor_controller(arduino):
                     target_hdg = math.degrees(math.atan2(ex, ey))
                     hdg_err    = normalize_angle(target_hdg - arduino_heading_deg)
 
-                    w = max(min(KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
+                    w = max(min(-KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
                     v = CLOSE_SPEED_MAX
 
                     prev_w = w   # CLOSE 모드 내 스무딩 관성 제거
@@ -1209,7 +1209,7 @@ def _motor_controller(arduino):
             else:
                 _close_target_x = _close_target_y = None
                 bearing = camera_tracker.get_bearing()
-                tb = bearing if bearing is not None else 0.0
+                tb = bearing if bearing is not None else camera_tracker.get_last_stable_bearing()
                 v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=tb)
 
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
