@@ -81,6 +81,7 @@ FGM_MIN_ANG_DEG      = 3     # deg: 이 이상 각도 공백이면 갭으로 인
 FGM_MIN_DEPTH_MM     = 250   # mm: 갭 너머 최소 깊이 (얕은 함몰부 제외)
 FGM_MAX_RANGE_MM     = 500   # mm: FGM 갭 탐색 최대 거리 (이 이상 포인트 무시)
 FGM_RATIO_THRES      = 1.2   # 인접 포인트 거리 비율 이상이면 갭 경계로 인식 (벽 끝 완만 전환)
+FGM_REAR_EXCLUDE_DEG = 20    # deg: 후방 카메라 거치대 제거 (±180° 기준 좌우 각 20°, 총 40°)
 
 # 전방 갭 탐색 (기본 주행 방향 결정용)
 FRONT_GAP_MIN_DEPTH  = 300   # mm: 전방 갭 최소 깊이 (이 미만 탈락)
@@ -315,7 +316,8 @@ def find_all_gaps(scan_points):
     """
     pts = sorted(
         [(a, d) for a, d in scan_points
-         if LIDAR_MIN_VALID < d < FGM_MAX_RANGE_MM],
+         if LIDAR_MIN_VALID < d < FGM_MAX_RANGE_MM
+         and abs(a) <= 180 - FGM_REAR_EXCLUDE_DEG],
         key=lambda p: p[0]
     )
     if len(pts) < 2:
@@ -1101,7 +1103,7 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
 
     # ── Phase 0: 정상 → STOP 감지 시 즉시 피봇 ──────────────────────────────
     if detect_stop_zone(scan_points):
-        target, gap_width, gap_info = find_stop_escape_direction(scan_points, heading_deg)
+        target, gap_width, gap_info = find_stop_escape_direction(scan_points, target_bearing)
         _stop_set_pivot(heading_deg, target, gap_width)
         stop_cycle_count = 0
         stop_phase       = 2
@@ -1272,7 +1274,11 @@ def _motor_controller(arduino):
                     ex = _landmark_x - arduino_x_mm
                     ey = _landmark_y - arduino_y_mm
                     dist_to_lm = math.sqrt(ex ** 2 + ey ** 2)
-                    tb = -math.degrees(math.atan2(ex, ey))
+                    # world 변위 → 로봇 로컬 bearing 변환 (헤딩 보정 필수)
+                    H = math.radians(arduino_heading_deg)
+                    fwd = -ex * math.sin(H) + ey * math.cos(H)
+                    lat =  ex * math.cos(H) + ey * math.sin(H)
+                    tb = math.degrees(math.atan2(-lat, fwd))
                     if DEBUG_LANDMARK:
                         print(f"[LANDMARK] 추적 → ({_landmark_x:.0f},{_landmark_y:.0f})  "
                               f"dist={dist_to_lm:.0f}mm  tb={tb:+.1f}°")
