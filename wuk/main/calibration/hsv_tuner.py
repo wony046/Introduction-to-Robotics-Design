@@ -17,7 +17,7 @@ CAMERA_INDEX  = 0
 FRAME_W       = 640
 FRAME_H       = 480
 FRAME_ROTATE  = cv2.ROTATE_90_COUNTERCLOCKWISE   # camera_tracker.py 와 동일
-DISPLAY_SCALE = 2.0                               # 표시 배율 (2.0 = 200%)
+DISPLAY_SCALE = 1.5                               # 표시 배율 (1.5 = 150%)
 
 if FRAME_ROTATE in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
     EFF_W, EFF_H = FRAME_H, FRAME_W
