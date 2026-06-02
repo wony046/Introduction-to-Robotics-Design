@@ -179,6 +179,11 @@ _close_target_x    = None   # 색지 추정 x 좌표 (mm)
 _close_target_y    = None   # 색지 추정 y 좌표 (mm)
 _close_initial_dist = None  # CLOSE 진입 시 초기 거리 (진행률 계산용)
 _close_observe_start = None # CLOSE 정지 관측 시작 시각
+
+# ── 랜드마크 (카메라 미감지 시 월드 좌표 추적) ──────────────────────────────
+_landmark_x = None   # 현재 타겟 색지 월드 x (mm)
+_landmark_y = None   # 현재 타겟 색지 월드 y (mm)
+DEBUG_LANDMARK = 1   # [LANDMARK] 갱신/추적 로그
 KP_CLOSE_HDG      = 0.1  # 헤딩 오차(deg) → w 게인  (포화: ±° → MAX_W)
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
@@ -1164,6 +1169,7 @@ def _motor_controller(arduino):
     """모터 제어 전용 스레드.
     SEND_INTERVAL마다 독립적으로 명령 송신 — 라이다 지연과 무관."""
     global prev_w, _close_target_x, _close_target_y, _close_initial_dist, _close_observe_start
+    global _landmark_x, _landmark_y
     last_cmd_str = ""
     while not _shutdown.is_set():
         read_arduino(arduino)
@@ -1175,6 +1181,7 @@ def _motor_controller(arduino):
                 v, w = 0.0, 0.0
                 prev_w = 0.0
                 _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
+                _landmark_x = _landmark_y = None
 
             # ── 상태 2: CLOSE → 정지 관측 후 오도메트리 위치 제어 ──────────
             # _close_target_x가 이미 세팅돼 있으면 카메라 미감지 시에도 CLOSE 유지
@@ -1250,7 +1257,28 @@ def _motor_controller(arduino):
                           f"is_dwelling={camera_tracker.is_dwelling()}")
                 _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
                 bearing = camera_tracker.get_bearing()
-                tb = bearing if bearing is not None else camera_tracker.get_last_stable_bearing()
+                if bearing is not None:
+                    # 카메라 감지 → 랜드마크 갱신
+                    dist_mm      = camera_tracker.get_estimated_distance_mm()
+                    b_global_rad = math.radians(arduino_heading_deg + bearing)
+                    _landmark_x  = arduino_x_mm - dist_mm * math.sin(b_global_rad)
+                    _landmark_y  = arduino_y_mm + dist_mm * math.cos(b_global_rad)
+                    tb = bearing
+                    if DEBUG_LANDMARK:
+                        print(f"[LANDMARK] 갱신 ({_landmark_x:.0f},{_landmark_y:.0f})mm  "
+                              f"dist={dist_mm:.0f}mm  bearing={bearing:+.1f}°")
+                elif _landmark_x is not None:
+                    # 카메라 미감지 + 랜드마크 있음 → 저장 좌표 방향으로 추적
+                    ex = _landmark_x - arduino_x_mm
+                    ey = _landmark_y - arduino_y_mm
+                    dist_to_lm = math.sqrt(ex ** 2 + ey ** 2)
+                    tb = -math.degrees(math.atan2(ex, ey))
+                    if DEBUG_LANDMARK:
+                        print(f"[LANDMARK] 추적 → ({_landmark_x:.0f},{_landmark_y:.0f})  "
+                              f"dist={dist_to_lm:.0f}mm  tb={tb:+.1f}°")
+                else:
+                    # 랜드마크도 없음 → 마지막 안정 bearing 유지
+                    tb = camera_tracker.get_last_stable_bearing()
                 v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=tb)
 
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
