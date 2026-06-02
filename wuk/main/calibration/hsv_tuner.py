@@ -13,9 +13,19 @@ HSV Tuner — 카메라 색상 범위 실시간 캘리브레이션 도구
 import cv2
 import numpy as np
 
-CAMERA_INDEX = 0
-FRAME_W      = 1280
-FRAME_H      = 720
+CAMERA_INDEX  = 0
+FRAME_W       = 640
+FRAME_H       = 480
+FRAME_ROTATE  = cv2.ROTATE_90_COUNTERCLOCKWISE   # camera_tracker.py 와 동일
+DISPLAY_SCALE = 2.0                               # 표시 배율 (2.0 = 200%)
+
+if FRAME_ROTATE in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
+    EFF_W, EFF_H = FRAME_H, FRAME_W
+else:
+    EFF_W, EFF_H = FRAME_W, FRAME_H
+
+DISP_W = int(EFF_W * DISPLAY_SCALE)
+DISP_H = int(EFF_H * DISPLAY_SCALE)
 
 
 def nothing(_):
@@ -33,7 +43,7 @@ def main():
 
     win = 'HSV Tuner'
     cv2.namedWindow(win, cv2.WINDOW_NORMAL)
-    cv2.resizeWindow(win, 1280, 400)
+    cv2.resizeWindow(win, DISP_W * 2, DISP_H)
 
     cv2.createTrackbar('H_lo', win,   0, 179, nothing)
     cv2.createTrackbar('H_hi', win, 179, 179, nothing)
@@ -42,12 +52,16 @@ def main():
     cv2.createTrackbar('V_lo', win,  80, 255, nothing)
     cv2.createTrackbar('V_hi', win, 255, 255, nothing)
 
-    print("HSV Tuner 시작.  'p' = 범위 출력,  'q' = 종료")
+    print(f"HSV Tuner 시작.  EFF={EFF_W}x{EFF_H}  display={DISP_W}x{DISP_H}")
+    print("'p' = 범위 출력,  'q' = 종료")
 
     while True:
         ret, frame = cap.read()
         if not ret:
             continue
+
+        if FRAME_ROTATE is not None:
+            frame = cv2.rotate(frame, FRAME_ROTATE)
 
         h_lo = cv2.getTrackbarPos('H_lo', win)
         h_hi = cv2.getTrackbarPos('H_hi', win)
@@ -79,20 +93,20 @@ def main():
                 cy = int(M['m01'] / M['m00'])
                 cv2.circle(overlay, (cx, cy), 8, (0, 0, 255), -1)
                 cv2.putText(overlay, f"area={area:.0f}  cx={cx}",
-                            (cx + 12, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                            (cx + 12, cy), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-        # 중심선 표시
-        cv2.line(overlay, (FRAME_W // 2, 0), (FRAME_W // 2, FRAME_H), (180, 180, 180), 1)
+        # 중심선 (회전 후 기준)
+        cv2.line(overlay, (EFF_W // 2, 0), (EFF_W // 2, EFF_H), (180, 180, 180), 1)
 
         mask_bgr = cv2.cvtColor(mask, cv2.COLOR_GRAY2BGR)
-        left     = cv2.resize(overlay,  (640, 360))
-        right    = cv2.resize(mask_bgr, (640, 360))
+        left     = cv2.resize(overlay,  (DISP_W, DISP_H))
+        right    = cv2.resize(mask_bgr, (DISP_W, DISP_H))
         combined = np.hstack([left, right])
 
         label = (f"H:[{h_lo},{h_hi}]  S:[{s_lo},{s_hi}]  V:[{v_lo},{v_hi}]"
                  f"    area={area:.0f}    p=출력  q=종료")
-        cv2.putText(combined, label, (10, 22),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1)
+        cv2.putText(combined, label, (10, 28),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         cv2.imshow(win, combined)
 
