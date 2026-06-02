@@ -35,6 +35,7 @@ CAM_TILT_DEG       = 34.5    # 역산값: actual=500mm, est=610mm, delta_v=0 →
                                #   수평=0°, 아래로 내려다볼수록 +
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
 USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
+CLOSE_BEARING_SCALE = 1.0    # ★ calibrate_bearing.py 로 구한 보정 배율 (1.0=보정 없음)
 
 # ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
 # 실내 조명 조건에서 반드시 튜닝 필요
@@ -136,7 +137,7 @@ def _to_bearing_close(cx, cy):
     f_px    = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
     lateral = (cx - _EFF_W / 2.0) / f_px
     forward = (_EFF_H - cy) / _EFF_H + CAM_POLAR_EPSILON
-    return -math.degrees(math.atan2(lateral, forward))
+    return -math.degrees(math.atan2(lateral, forward)) * CLOSE_BEARING_SCALE
 
 
 def _get_roi_fill(frame, color_name, bottom_ratio=None):
