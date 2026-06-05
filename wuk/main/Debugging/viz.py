@@ -8,7 +8,8 @@ Usage:
 """
 import json, sys, glob, math, os
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))   # Debugging/
+MAIN_DIR   = os.path.dirname(SCRIPT_DIR)                  # main/  (JSON 생성 위치)
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
@@ -210,7 +211,7 @@ def visualize(path, show=True):
         ax2.set_title('FGM Gap Analysis — no gaps found')
 
     plt.tight_layout()
-    out = path.replace('.json', '.png')
+    out = os.path.join(SCRIPT_DIR, os.path.basename(path).replace('.json', '.png'))
     plt.savefig(out, dpi=150, bbox_inches='tight')
     print(f"  Saved: {out}")
     if show:
@@ -225,7 +226,7 @@ if __name__ == '__main__':
     if len(sys.argv) > 1:
         files = sys.argv[1:]
     else:
-        files = sorted(glob.glob(os.path.join(SCRIPT_DIR, 'stop_event_*.json')))
+        files = sorted(glob.glob(os.path.join(MAIN_DIR, 'stop_event_*.json')))
 
     if not files:
         print("No stop_event_*.json files found.")
