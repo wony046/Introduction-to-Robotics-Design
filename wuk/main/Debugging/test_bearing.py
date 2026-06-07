@@ -1,12 +1,10 @@
 """
 Bearing 시각화 도구 v2
 ─────────────────────────────────────────────────────
-_last_stable_bearing 추적 · 거리 추정 · CLOSE 거리 기반 판정
+거리 추정 · CLOSE 거리 기반 판정
 
 조작:
   1 / 2 / 3  : 색상 선택 (RED / YELLOW / BLUE)
-  f          : 필터 ON/OFF
-  r          : _last_stable_bearing 수동 초기화 (→ 0°)
   q          : 종료
 """
 
@@ -51,7 +49,6 @@ C_GREEN  = (50,  230, 50 )
 C_CYAN   = (255, 220, 0  )
 C_ORANGE = (0,   165, 255)
 C_RED_B  = (60,  60,  240)
-C_STABLE = (0,   220, 255)          # _last_stable_bearing 전용
 
 
 # ── 유틸 ─────────────────────────────────────────────────────────────────────
@@ -123,7 +120,7 @@ def _detect(frame, color_name):
 # ── 카메라 패널 ───────────────────────────────────────────────────────────────
 
 def _draw_cam_panel(frame, centroid, color_name, is_close,
-                    b_seek, b_close_val, last_stable, clip_l, clip_r):
+                    b_seek, b_close_val, clip_l, clip_r):
     disp = cv2.resize(frame, (int(_EFF_W * DISPLAY_SCALE),
                                int(_EFF_H * DISPLAY_SCALE)))
     sw, sh = disp.shape[1], disp.shape[0]
@@ -162,7 +159,6 @@ def _draw_cam_panel(frame, centroid, color_name, is_close,
 
         _arrow(b_seek,      C_CYAN,   2)
         _arrow(b_close_val, C_ORANGE, 2)
-        _arrow(last_stable, C_STABLE, 3)   # _last_stable_bearing: 굵게
 
     # 모드 (좌상단)
     mode_str = "[ CLOSE ]" if is_close else "[ SEEK  ]"
@@ -172,7 +168,7 @@ def _draw_cam_panel(frame, centroid, color_name, is_close,
     # 클리핑 경고
     clip_tag = ("L" if clip_l else "") + ("R" if clip_r else "")
     if clip_tag:
-        _put(disp, f"CLIPPED {clip_tag}  stable 고정",
+        _put(disp, f"CLIPPED {clip_tag}",
              (6, int(62*SC)), scale=0.60*SC, color=C_RED_B)
 
     # 색상명 (우상단)
@@ -180,9 +176,8 @@ def _draw_cam_panel(frame, centroid, color_name, is_close,
          (sw - int(110*SC), int(32*SC)), scale=0.75*SC, color=C_WHITE)
 
     # 범례 (우하단)
-    legend_y = sh - int(80*SC)
-    for text, col in [("SK=SEEK", C_CYAN), ("CL=CLOSE", C_ORANGE),
-                      ("STB=_last_stable", C_STABLE)]:
+    legend_y = sh - int(55*SC)
+    for text, col in [("SK=SEEK", C_CYAN), ("CL=CLOSE", C_ORANGE)]:
         _put(disp, text, (int(6*SC), legend_y), scale=0.45*SC, color=col)
         legend_y += int(22*SC)
 
@@ -191,16 +186,14 @@ def _draw_cam_panel(frame, centroid, color_name, is_close,
 
 # ── 다이어그램 패널 ───────────────────────────────────────────────────────────
 
-def _draw_diag_panel(centroid, is_close, b_seek, b_close_val,
-                     last_stable, dist_mm,
-                     clip_l=False, clip_r=False):
+def _draw_diag_panel(centroid, is_close, b_seek, b_close_val, dist_mm):
     img = np.zeros((DIAG_H, DIAG_W, 3), dtype=np.uint8)
     img[:] = (25, 25, 25)
 
     # ── 상단: bearing 다이어그램 ──────────────────────────────────────────────
     cx_d = DIAG_W // 2
-    cy_d = int(DIAG_H * 0.36)
-    r    = int(110 * SC)
+    cy_d = int(DIAG_H * 0.30)
+    r    = int(80 * SC)
 
     cv2.circle(img, (cx_d, cy_d), r, (60, 60, 60), 1)
     cv2.circle(img, (cx_d, cy_d), 3, C_GRAY, -1)
@@ -220,23 +213,18 @@ def _draw_diag_panel(centroid, is_close, b_seek, b_close_val,
     _put(img, "0°", (cx_d + 4, cy_d - r - int(10*SC)),
          scale=0.42*SC, color=(90, 90, 90))
 
-    def _diag_arrow(bearing, color, label, inner=0.30, thickness=2):
+    def _diag_arrow(bearing, color, inner=0.30, thickness=2):
         ex = int(cx_d + r * math.sin(math.radians(bearing)))
         ey = int(cy_d - r * math.cos(math.radians(bearing)))
         sx = int(cx_d + r * inner * math.sin(math.radians(bearing)))
         sy = int(cy_d - r * inner * math.cos(math.radians(bearing)))
         cv2.arrowedLine(img, (sx, sy), (ex, ey), color, thickness, tipLength=0.20)
-        lx = int(cx_d + (r + int(28*SC)) * math.sin(math.radians(bearing)))
-        ly = int(cy_d - (r + int(28*SC)) * math.cos(math.radians(bearing)))
-        _put(img, f"{label}:{bearing:+.1f}",
-             (lx - int(52*SC), ly + int(5*SC)), scale=0.48*SC, color=color)
 
     if centroid is not None:
-        _diag_arrow(b_seek,      C_CYAN,   "SK")
-        _diag_arrow(b_close_val, C_ORANGE, "CL")
-
-    # _last_stable_bearing 항상 표시 (굵게)
-    _diag_arrow(last_stable, C_STABLE, "STB", inner=0.15, thickness=3)
+        _diag_arrow(b_seek,      C_CYAN)
+        _diag_arrow(b_close_val, C_ORANGE)
+        _put(img, f"SK:{b_seek:+.1f}", (14, 22), scale=0.48*SC, color=C_CYAN)
+        _put(img, f"CL:{b_close_val:+.1f}", (DIAG_W//2 + 10, 22), scale=0.48*SC, color=C_ORANGE)
 
     # 활성 bearing 강조선
     active_b = b_close_val if is_close else b_seek
@@ -248,8 +236,8 @@ def _draw_diag_panel(centroid, is_close, b_seek, b_close_val,
              active_c, 3)
 
     # ── 수치 정보 ─────────────────────────────────────────────────────────────
-    y      = int(DIAG_H * 0.60)
-    line_h = int(30 * SC)
+    y      = int(DIAG_H * 0.52)
+    line_h = int(22 * SC)
 
     def row(label, value, color=C_WHITE, bold=False):
         nonlocal y
@@ -267,13 +255,6 @@ def _draw_diag_panel(centroid, is_close, b_seek, b_close_val,
         row("SEEK bearing",  f"{b_seek:+.2f} deg",     C_CYAN)
         row("CLOSE bearing", f"{b_close_val:+.2f} deg", C_ORANGE)
 
-        # ── _last_stable_bearing 강조 ──────────────────────────────────────
-        clipped   = clip_l or clip_r
-        stb_note  = "[클리핑-고정]" if clipped else "[갱신중]"
-        stb_color = (0, 140, 200) if clipped else C_STABLE
-        row("STABLE bearing", f"{last_stable:+.2f} deg  {stb_note}",
-            stb_color, bold=True)
-
         row("|CL - SK|",
             f"{abs(b_close_val - b_seek):.2f} deg",
             C_RED_B if abs(b_close_val - b_seek) > 10 else C_GREEN)
@@ -286,12 +267,9 @@ def _draw_diag_panel(centroid, is_close, b_seek, b_close_val,
             C_ORANGE if is_close else C_CYAN)
 
     else:
-        _put(img, "미감지",
-             (DIAG_W//2 - int(30*SC), y + int(20*SC)),
-             scale=0.80*SC, color=(100, 100, 100))
-        y += int(55*SC)
-        row("STABLE bearing", f"{last_stable:+.2f} deg  [마지막값]",
-            C_STABLE, bold=True)
+        _put(img, "NO TARGET",
+             (DIAG_W//2 - int(40*SC), y + int(20*SC)),
+             scale=0.60*SC, color=(100, 100, 100))
 
     # ── 하단: 거리 바 (CLOSE 진입 기준) ──────────────────────────────────────
     bar_y  = DIAG_H - int(50*SC)
@@ -342,10 +320,9 @@ def main():
     print(f"[거리 추정] CAM_H={CAM_HEIGHT_MM}mm  TILT={CAM_TILT_DEG}°  "
           f"CLOSE < {CLOSE_ENTER_MM}mm")
     print()
-    print("1=RED  2=YELLOW  3=BLUE  r=stable초기화  q=종료")
+    print("1=RED  2=YELLOW  3=BLUE  q=종료")
 
-    color_idx   = 0
-    last_stable = 0.0       # _last_stable_bearing 재현
+    color_idx = 0
 
     cv2.namedWindow('Bearing Test')
 
@@ -371,18 +348,11 @@ def main():
             dist_mm     = _estimate_dist(cy)
             is_close    = (dist_mm < CLOSE_ENTER_MM)
 
-            # camera_tracker._last_stable_bearing 재현:
-            # 클리핑 없을 때만 bearing_seek 으로 갱신
-            if not (clip_l or clip_r):
-                last_stable = b_seek
-
         cam_panel  = _draw_cam_panel(
             frame, centroid, color_name, is_close,
-            b_seek, b_close_val, last_stable, clip_l, clip_r)
+            b_seek, b_close_val, clip_l, clip_r)
         diag_panel = _draw_diag_panel(
-            centroid, is_close, b_seek, b_close_val,
-            last_stable, dist_mm,
-            clip_l=clip_l, clip_r=clip_r)
+            centroid, is_close, b_seek, b_close_val, dist_mm)
 
         # 높이 맞추기
         ch, dh = cam_panel.shape[0], diag_panel.shape[0]
@@ -399,17 +369,14 @@ def main():
         if key == ord('q'):
             break
         elif key == ord('1'):
-            color_idx = 0; last_stable = 0.0
+            color_idx = 0
             print("[색상] RED")
         elif key == ord('2'):
-            color_idx = 1; last_stable = 0.0
+            color_idx = 1
             print("[색상] YELLOW")
         elif key == ord('3'):
-            color_idx = 2; last_stable = 0.0
+            color_idx = 2
             print("[색상] BLUE")
-        elif key == ord('r'):
-            last_stable = 0.0
-            print("[STABLE] _last_stable_bearing 초기화 → 0.0°")
 
     cap.release()
     cv2.destroyAllWindows()
