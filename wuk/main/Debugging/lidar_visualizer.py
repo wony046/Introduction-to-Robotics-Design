@@ -28,9 +28,9 @@ STOP_FWD_MAX     = 175
 STOP_HORIZ_TH    = 105
 
 DETECTION_RANGE  = 1500
-FORWARD_SPEED    = 0.45
+FORWARD_SPEED    = 0.3
 MIN_SPEED        = 0.12
-MAX_W            = 2.5
+MAX_W            = 1.8
 W_MIN_DANGER     = 0.5
 LAYER_PERCENTILE = 5
 SCORE_ALPHA      = 5.0
@@ -43,41 +43,47 @@ FGM_RATIO_THRES     = 1.2
 FGM_MAX_RANGE_MM    = 800
 STOP_ESCAPE_MIN_GAP = ROBOT_HALF_WIDTH * 2 + 40  # 260 mm
 FRONT_GAP_MIN_DEPTH = 300
-SCORE_GAP_FRONT     = 1500.0
 DIR_ARROW_Y   = 50    # mm: y-position of score-direction indicator
 DIR_ARROW_LEN = 200   # mm: length of score-direction arrow
 
+# ── 방향 히스테리시스 & 가상 장애물 (jw_won.py 동기화) ───────────────────────
+DIRECTION_HYSTERESIS    = 300.0  # 이 점수 차 미만이면 직전 방향 유지
+MIN_PASSAGE_WIDTH       = STOP_ESCAPE_MIN_GAP  # 260mm: 이 미만 갭 → 가상 장애물
+VIRTUAL_OBS_GAIN        = 1.5
+VIRTUAL_CENTER_DEADBAND = 10     # deg: 갭 중심 ±이내면 양쪽 동등 척력
+VIRTUAL_EXP_K           = 2.5
+
 LAYERS = [
-    # L1: 가장 가까움, 동적 가중치, weight_cap=7.5, v_max=0.30
+    # L1: 가장 가까움, 동적 가중치, weight_cap=7.5, v_max=0.20
     {'name':'L1', 'fwd_min':60,  'fwd_max':180, 'horiz_th':140, 'color':'#FF4444',
      'w_gain':2.8, 'weight_base':0.8, 'weight_cap':7.5, 'weight_dynamic':True,
-     'v_max':0.22, 'affects_v':True},
-    # L2: 가까움, 동적 가중치, weight_cap=4.5, v_max=0.38
+     'v_max':0.2, 'affects_v':True},
+    # L2: 가까움, 동적 가중치, weight_cap=5.0, v_max=0.25
     {'name':'L2', 'fwd_min':180, 'fwd_max':300, 'horiz_th':120, 'color':'#FF8800',
-     'w_gain':2.5, 'weight_base':0.6, 'weight_cap':4.5, 'weight_dynamic':True,
-     'v_max':0.38, 'affects_v':True},
-    # L3: 중간, 동적 가중치, weight_cap=2.5, v_max=FORWARD_SPEED
+     'w_gain':2.5, 'weight_base':0.6, 'weight_cap':5.0, 'weight_dynamic':True,
+     'v_max':0.25, 'affects_v':True},
+    # L3: 중간, 동적 가중치, weight_cap=4.5, v_max=FORWARD_SPEED
     {'name':'L3', 'fwd_min':300, 'fwd_max':420, 'horiz_th':120, 'color':'#DDCC00',
-     'w_gain':1.8, 'weight_base':0.2, 'weight_cap':2.5, 'weight_dynamic':True, 'affects_v':True},
+     'w_gain':2.0, 'weight_base':0.4, 'weight_cap':4.5, 'weight_dynamic':True, 'affects_v':True},
     # L4: 중간-원거리 (weight: 진입 0.2 → 끝 0.1)
-    {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':100, 'color':'#88CC00',
+    {'name':'L4', 'fwd_min':420, 'fwd_max':540, 'horiz_th':110, 'color':'#88CC00',
      'w_gain':1.0, 'weight_base':0.1, 'weight_start':0.2, 'weight_dynamic':False, 'affects_v':True},
     # L5: 원거리 (weight: 진입 0.1 → 끝 0.05)
-    {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':100, 'color':'#00BB44',
+    {'name':'L5', 'fwd_min':540, 'fwd_max':660, 'horiz_th':110, 'color':'#00BB44',
      'w_gain':0.4, 'weight_base':0.05, 'weight_start':0.1,  'weight_dynamic':False, 'affects_v':False},
     # L6: 최원거리 (weight: 진입 0.05 → 끝 0.02)
-    {'name':'L6', 'fwd_min':660, 'fwd_max':780, 'horiz_th':100, 'color':'#0088CC',
+    {'name':'L6', 'fwd_min':660, 'fwd_max':780, 'horiz_th':110, 'color':'#0088CC',
      'w_gain':0.3, 'weight_base':0.02, 'weight_start':0.05, 'weight_dynamic':False, 'affects_v':False},
 ]
 
 # ── side repulsion parameters (jw_won.py: get_side_repulsion) ─────────────────
-# Detection zone: horiz 110~300 mm,  fwd -80~+80 mm
+# Detection zone: horiz 110~410 mm,  fwd -90~+90 mm
 SIDE_INNER        = ROBOT_HALF_WIDTH
-SIDE_SAFE_MARGIN  = 190
-SIDE_OUTER        = SIDE_INNER + SIDE_SAFE_MARGIN  # 300 mm
-SIDE_FWD_LEAD     = 80
-SIDE_FWD_REAR     = 80
-SIDE_REPULSE_GAIN = 0.8
+SIDE_SAFE_MARGIN  = 300
+SIDE_OUTER        = SIDE_INNER + SIDE_SAFE_MARGIN  # 410 mm
+SIDE_FWD_LEAD     = 90
+SIDE_FWD_REAR     = 90
+SIDE_REPULSE_GAIN = 1.25
 SIDE_EXP_K        = 2.0
 SCAN_WIDE_HALF    = 135
 
@@ -85,8 +91,8 @@ SCAN_WIDE_HALF    = 135
 # Sector: ±15°~±75° (robot-local), up to 600 mm
 SIDE_LAYER_ANG_START = 15   # deg
 SIDE_LAYER_ANG_END   = 75   # deg
-SIDE_LAYER_DIST_MAX  = 600  # mm
-SIDE_W_BOOST_GAIN    = 0.9  # 측방 레이어 net delta 계수 (부호 있는 합산)
+SIDE_LAYER_DIST_MAX  = 700  # mm
+SIDE_W_BOOST_GAIN    = 1.5  # 측방 레이어 net delta 계수 (부호 있는 합산)
 
 # ── path prediction / strength bar display ────────────────────────────────────
 PREDICT_SEC = 1.5    # s: how far ahead to draw the predicted path
@@ -337,6 +343,73 @@ def _get_gap_width(scan_norm, ref_angle, ref_dist, is_left):
         return _cosine_dist(edge_p[1], edge_p[1], rem)
     return 0.0
 
+def _get_narrow_gap_pushes(scan_norm, layer):
+    """통과 불가 좁은 갭 → 가상 장애물 척력. 반환: (push_left, push_right)"""
+    pts = []
+    for a, d in scan_norm:
+        if d < MIN_VALID_MM or d > DETECTION_RANGE:
+            continue
+        if not _is_in_front_90(a):
+            continue
+        _, fwd = _decompose(a, d)
+        if layer['fwd_min'] <= fwd < layer['fwd_max']:
+            pts.append((a, d))
+    if len(pts) < 2:
+        return 0.0, 0.0
+
+    pts_sorted = sorted(pts, key=lambda p: p[0])
+    opening_edges, closing_edges = [], []
+    for i in range(len(pts_sorted) - 1):
+        a1, d1 = pts_sorted[i]
+        a2, d2 = pts_sorted[i + 1]
+        if abs(d2 - d1) <= DEPTH_JUMP_THRES:
+            continue
+        if d2 > d1:
+            opening_edges.append((a1, d1))
+        else:
+            closing_edges.append((a2, d2))
+
+    if not opening_edges or not closing_edges:
+        return 0.0, 0.0
+
+    virt_push_left = virt_push_right = 0.0
+    for ao, do in opening_edges:
+        candidates = [(ac, dc) for ac, dc in closing_edges if ac > ao]
+        if not candidates:
+            continue
+        ac, dc = min(candidates, key=lambda x: x[0])
+
+        xo = do * math.sin(math.radians(ao))
+        xc = dc * math.sin(math.radians(ac))
+        gap_width = abs(xc - xo)
+        if gap_width >= MIN_PASSAGE_WIDTH:
+            continue
+
+        horiz_o = abs(xo)
+        horiz_c = abs(xc)
+        inside_o = horiz_o < layer['horiz_th']
+        inside_c = horiz_c < layer['horiz_th']
+        if inside_o and inside_c:
+            continue
+        overlap_scale = 0.4 if (inside_o or inside_c) else 1.0
+
+        t = max(0.0, min(1.0, gap_width / MIN_PASSAGE_WIDTH))
+        exp_ratio = (math.exp(VIRTUAL_EXP_K * (1.0 - t)) - 1.0) / (math.exp(VIRTUAL_EXP_K) - 1.0)
+        strength = exp_ratio * layer['horiz_th'] * VIRTUAL_OBS_GAIN * overlap_scale
+
+        center_angle = (ao + ac) / 2.0
+        if abs(center_angle) < VIRTUAL_CENTER_DEADBAND:
+            half = strength * 0.5
+            virt_push_left  = max(virt_push_left,  half)
+            virt_push_right = max(virt_push_right, half)
+        elif center_angle < 0:
+            virt_push_left  = max(virt_push_left,  strength)
+        else:
+            virt_push_right = max(virt_push_right, strength)
+
+    return virt_push_left, virt_push_right
+
+
 def _get_side_layer_push(scan_norm):
     """측방 레이어: ±15°~±75°, 최대 600mm. 반환: (left_push, right_push) [0~1]"""
     left_push  = 0.0
@@ -427,9 +500,12 @@ def _get_front_passable_gaps(scan_norm):
     return sorted(passable, key=lambda g: g['score'], reverse=True)
 
 
+_last_direction = 1.0   # 방향 히스테리시스 상태 (+1=LEFT, -1=RIGHT)
+
+
 def _compute_vw(scan_norm):
     """
-    Port of find_vw_layered (heading_deg=0 assumed — no IMU in visualizer).
+    Port of find_vw_layered fallback branch (heading_deg=0 — no IMU in visualizer).
     Returns (v, w_base, w_with_side, direction, score_L, score_R, best_fg):
       w_base      = direction * forward_urgency  (gray path)
       w_with_side = w_base + side_w_delta        (green path base)
@@ -437,6 +513,8 @@ def _compute_vw(scan_norm):
       score_L/R   = full scoring terms           (shown in info text)
       best_fg     = best front passable gap or None
     """
+    global _last_direction
+
     layer_results = [r for r in (_process_layer(scan_norm, L) for L in LAYERS)
                      if r is not None]
     if not layer_results:
@@ -452,31 +530,36 @@ def _compute_vw(scan_norm):
     sum_pR = sum(r['weight'] * r['push_right'] for r in layer_results)
     sum_pL = sum(r['weight'] * r['push_left']  for r in layer_results)
 
+    # 가상 장애물 척력 (통과 불가 좁은 갭)
+    virt_push_L = virt_push_R = 0.0
+    for layer in LAYERS:
+        vpl, vpr = _get_narrow_gap_pushes(scan_norm, layer)
+        virt_push_L = max(virt_push_L, vpl)
+        virt_push_R = max(virt_push_R, vpr)
+
+    effective_push_R = max(sum_pR, virt_push_R)
+    effective_push_L = max(sum_pL, virt_push_L)
+
     side_left_push, side_right_push = _get_side_layer_push(scan_norm)
 
-    # 전방 통과 가능 갭 보너스 (jw_won.py 동일 로직)
     front_gaps = _get_front_passable_gaps(scan_norm)
     best_fg    = front_gaps[0] if front_gaps else None
-    gap_bonus_L = gap_bonus_R = 0.0
-    if best_fg is not None:
-        norm = ((best_fg['width'] / STOP_ESCAPE_MIN_GAP) *
-                (best_fg['depth'] / FRONT_GAP_MIN_DEPTH))
-        bonus = SCORE_GAP_FRONT * norm
-        if best_fg['center_angle'] < 0:
-            gap_bonus_L = bonus
-        else:
-            gap_bonus_R = bonus
 
     score_L = (SCORE_ALPHA * gap_L
-               + SCORE_BETA  * sum_pR
-               + SCORE_SIDE  * side_right_push
-               + gap_bonus_L)
+               + SCORE_BETA  * effective_push_R
+               + SCORE_SIDE  * side_right_push)
     score_R = (SCORE_ALPHA * gap_R
-               + SCORE_BETA  * sum_pL
-               + SCORE_SIDE  * side_left_push
-               + gap_bonus_R)
+               + SCORE_BETA  * effective_push_L
+               + SCORE_SIDE  * side_left_push)
 
-    direction       = 1.0 if score_L >= score_R else -1.0
+    # 방향 히스테리시스 (jw_won.py DIRECTION_HYSTERESIS)
+    score_diff = score_L - score_R
+    if _last_direction > 0:
+        direction = 1.0 if score_diff > -DIRECTION_HYSTERESIS else -1.0
+    else:
+        direction = -1.0 if score_diff < DIRECTION_HYSTERESIS else 1.0
+    _last_direction = direction
+
     total_w_all     = sum(r['weight'] for r in layer_results)
     forward_urgency = sum(r['weight'] * r['urgency'] for r in layer_results) / total_w_all
     forward_urgency = max(min(forward_urgency, MAX_W), W_MIN_DANGER)

@@ -46,6 +46,8 @@ const float WHEEL_RATIO = 0.00568f;
 const float MPP_L = (1.0f / 4795.0f) * (1.0f - WHEEL_RATIO / 2.0f);
 const float MPP_R = (1.0f / 4795.0f) * (1.0f + WHEEL_RATIO / 2.0f);
 
+bool ffEnabled = true;
+
 // ── 타임아웃 ─────────────────────────────────────────────────────────────────
 const unsigned long CMD_TIMEOUT_MS = 500;
 unsigned long lastCmdTime = 0;
@@ -144,13 +146,15 @@ void runLine(float dist) {
   long dR  = eR - startR;
   long avg = (dL + dR) / 2;
 
-  // 사람용 (PC USB)
-  Serial.print(F("[LINE] odom=")); Serial.print(trav, 3);
-  Serial.print(F("m L="));  Serial.print(dL);
-  Serial.print(F(" R="));   Serial.print(dR);
-  Serial.print(F(" avg=")); Serial.println(avg);
+  float imbal = (avg != 0) ? (float)(dR - dL) / avg * 100.0f : 0.0f;
 
-  // 기계용 (RPi UART) — 파이썬이 파싱
+  Serial.print(F("[LINE] FF=")); Serial.print(ffEnabled ? F("ON") : F("OFF"));
+  Serial.print(F(" odom="));     Serial.print(trav, 3);
+  Serial.print(F("m  L="));      Serial.print(dL);
+  Serial.print(F("  R="));       Serial.print(dR);
+  Serial.print(F("  avg="));     Serial.print(avg);
+  Serial.print(F("  불균형="));   Serial.print(imbal, 1); Serial.println(F("%"));
+
   Serial1.print(F("LINE_RESULT:"));
   Serial1.print(trav, 4); Serial1.print(',');
   Serial1.print(dL);      Serial1.print(',');
@@ -184,8 +188,14 @@ void setVelocity(float v, float w) {
   float v_left  = v - (WHEEL_BASE * w / 2.0f);
   float v_right = v + (WHEEL_BASE * w / 2.0f);
 
-  float pwm_L = getFeedforwardPWM_L(abs(v_left)  * M_TO_PULSE);
-  float pwm_R = getFeedforwardPWM_R(abs(v_right) * M_TO_PULSE);
+  float pwm_L, pwm_R;
+  if (ffEnabled) {
+    pwm_L = getFeedforwardPWM_L(abs(v_left)  * M_TO_PULSE);
+    pwm_R = getFeedforwardPWM_R(abs(v_right) * M_TO_PULSE);
+  } else {
+    pwm_L = getRawPWM(abs(v_left)  * M_TO_PULSE);
+    pwm_R = getRawPWM(abs(v_right) * M_TO_PULSE);
+  }
 
   if (v_left  < 0) pwm_L = -pwm_L;
   if (v_right < 0) pwm_R = -pwm_R;
@@ -194,9 +204,10 @@ void setVelocity(float v, float w) {
   driveMotorRight(pwm_R);
 
   if (millis() - lastPrintTime >= 100) {
-    Serial.print(F("vL=")); Serial.print(v_left, 3);
+    Serial.print(F("vL="));  Serial.print(v_left, 3);
     Serial.print(F(" vR=")); Serial.print(v_right, 3);
     Serial.print(F(" hdg=")); Serial.print(heading * 57.3f, 1);
+    Serial.print(F(" FF="));  Serial.print(ffEnabled ? F("ON") : F("OFF"));
     Serial.println();
     lastPrintTime = millis();
   }
@@ -242,6 +253,7 @@ void loop() {
     else if (cmd == "chk" || cmd == "CHK") { checkCalQuality(); checkFFHoldout(); }
     else if (cmd == "R"   || cmd == "r")   { heading = 0.0f; odom_x = 0.0f; odom_y = 0.0f; Serial.println(F("[R] 헤딩+위치 리셋")); }
     else if (cmd == "H"   || cmd == "h")   { Serial.print(F("[H] ")); Serial.print(heading * 57.3f, 1); Serial.println(F("°")); }
+    else if (cmd == "FF"  || cmd == "ff")  { ffEnabled = !ffEnabled; Serial.print(F("[FF] ")); Serial.println(ffEnabled ? F("ON") : F("OFF")); }
   }
 
   // ── 라즈베리파이 UART 수신 ───────────────────────────────────────────────
@@ -257,6 +269,13 @@ void loop() {
     if (input == "R" || input == "r") {
       heading = 0.0f; odom_x = 0.0f; odom_y = 0.0f;
       Serial.println(F("[R] 헤딩+위치 리셋 (from RPi)"));
+      return;
+    }
+
+    // ── FF 토글 ─────────────────────────────────────────────────────────────
+    if (input == "FF" || input == "ff") {
+      ffEnabled = !ffEnabled;
+      Serial.print(F("[FF] ")); Serial.println(ffEnabled ? F("ON") : F("OFF"));
       return;
     }
 
@@ -327,6 +346,22 @@ float getFeedforwardPWM_R(float t) {
   for (int i=0;i<CAL_STEPS-1;i++)
     if (t>=cal_speed_R[i]&&t<=cal_speed_R[i+1])
       return cal_pwm[i]+(t-cal_speed_R[i])*(cal_pwm[i+1]-cal_pwm[i])/(cal_speed_R[i+1]-cal_speed_R[i]);
+  return 0;
+}
+
+// 좌우 동일 매핑 (평균 테이블 보간) — ffEnabled=false 시 사용
+float getRawPWM(float t) {
+  if (t <= 0) return 0;
+  float s0 = (cal_speed_L[0]           + cal_speed_R[0])           * 0.5f;
+  float sN = (cal_speed_L[CAL_STEPS-1] + cal_speed_R[CAL_STEPS-1]) * 0.5f;
+  if (t <  s0) return cal_pwm[0] * t / s0;
+  if (t >= sN) return cal_pwm[CAL_STEPS-1];
+  for (int i = 0; i < CAL_STEPS-1; i++) {
+    float si  = (cal_speed_L[i]   + cal_speed_R[i])   * 0.5f;
+    float si1 = (cal_speed_L[i+1] + cal_speed_R[i+1]) * 0.5f;
+    if (t >= si && t <= si1)
+      return cal_pwm[i] + (t - si) * (cal_pwm[i+1] - cal_pwm[i]) / (si1 - si);
+  }
   return 0;
 }
 
