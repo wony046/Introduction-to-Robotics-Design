@@ -3,7 +3,7 @@ import time
 import math
 import json
 import threading
-import camera_tracker
+import camera_tracker_1
 import search_planner    # 색지 탐색 (후보 추종 + 커버리지 스핀 + 색 메모리)
 import floor_verify      # 라이다-카메라 거리 비교로 색지/장애물 구분
 
