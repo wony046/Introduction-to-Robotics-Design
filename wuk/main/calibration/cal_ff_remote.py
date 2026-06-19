@@ -15,7 +15,7 @@ import sys
 import time
 
 # ── 설정 ──────────────────────────────────────────────────────────────────────
-UART_PORT  = '/dev/ttyAMA0'
+UART_PORT  = '/dev/ttyAMA3'
 BAUD_RATE  = 115200
 CAL_STEPS  = 18  # 아두이노와 동일
 
