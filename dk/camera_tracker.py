@@ -37,53 +37,19 @@ CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 
 USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
 CLOSE_BEARING_SCALE = 0.8212    # ★ calibrate_bearing.py 로 구한 보정 배율 (1.0=보정 없음)
 
-# ── 단발 미검출 hold ──────────────────────────────────────────────────────
-# 한두 프레임 색 검출을 놓쳐도(모션블러/원근압축) 직전 bearing을 짧게 유지해
-# 추종이 끊겨 탐색 모드로 튀는 것을 막는다. 이 시간이 지나면 진짜 None 반환.
-BEARING_HOLD_SEC   = 0.2      # 미검출 시 마지막 유효 bearing 유지 시간 (초)
-
 # ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
 # 실내 조명 조건에서 반드시 튜닝 필요
-# 확정 검출(접근/도착 판정)에 사용. RED는 H가 0 근처/179 근처 양쪽에
-# 걸쳐 wrap 되므로 두 구간을 모두 둔다(낮은 H 구간은 조명에 따라 활성).
 COLOR_RANGES = {
     'RED': [
-        ((146, 100, 80), (179, 255, 255)),   # 실측값 (높은 H)
-        ((0,   100, 80), (10,  255, 255)),   # wrap 보완 (낮은 H)
+        ((146, 100, 80), (179, 255, 255)),   # 실측값
     ],
     'YELLOW': [
-        # V 하한을 낮춰(186→120) 멀거나 그림자 진 노랑을 살리고,
-        # S 하한은 올려(35→70) 흰 바닥/저채도 오인을 줄이고,
-        # H 상한은 낮춰(72→45) 초록 침범을 막는다. ★실측 보정 필요
-        ((18, 70, 120), (45, 255, 255)),
+        ((18, 35, 186), (72, 177, 255)),   # 실측값
     ],
     'BLUE': [
-        # S 범위를 크게 넓혀(116–162 → 70–255) 진한/흐린 파랑을 모두 잡고,
-        # H도 살짝 넓힌다(79–119 → 95–128). ★실측 보정 필요
-        ((95, 70, 70), (128, 255, 255)),
+        ((79, 116, 114), (119, 162, 255)),   # 실측값
     ],
 }
-
-# ── 원거리 후보(candidate) 검출용 완화 범위 ──────────────────────────
-# 멀리 있는 색지는 조명 반사로 S/V가 빠지고, 모폴로지 침식으로 면적이
-# 줄어 확정 검출에서 누락된다. 후보 검출은 (1) S/V 하한을 낮추고
-# (2) 면적 임계를 낮춰 "저 방향에 색지가 있을 수도 있다"를 잡아낸다.
-# 후보는 접근/도착 판정에는 절대 쓰지 않고, 탐색 시 접근 방향으로만 쓴다.
-CANDIDATE_RANGES = {
-    'RED': [
-        ((146, 50, 50), (179, 255, 255)),
-        ((0,   50, 50), (12,  255, 255)),
-    ],
-    'YELLOW': [
-        ((16, 45, 90), (48, 255, 255)),
-    ],
-    'BLUE': [
-        ((92, 45, 55), (132, 255, 255)),
-    ],
-}
-
-CONFIRM_AREA_MIN   = 500    # 확정 검출 최소 면적 (px²)
-CANDIDATE_AREA_MIN = 150    # 후보 검출 최소 면적 (px²) — 더 멀리/약하게도 잡음
 
 # ── 미션 순서 ────────────────────────────────────────────────────────
 MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
@@ -109,14 +75,6 @@ _close               = False   # CLOSE 모드 (blob 크기 > 임계)
 _last_stable_bearing = 0.0     # 클리핑 전 마지막 유효 bearing (deg)
 _last_close_bearing  = 0.0     # CLOSE 진입 시 원근 보정 bearing (deg)
 _last_cy             = None    # 마지막 centroid y (기하 거리 추정용)
-_last_detect_time    = 0.0     # 마지막으로 색을 실제 검출한 시각 (hold 판정용)
-_last_close_flag     = False   # 마지막 유효 검출의 is_close 값 (hold 중 유지)
-
-# 후보(candidate) 검출 — 확정 검출이 None일 때 탐색이 참고하는 약한 신호
-_cand_bearing        = None    # 후보 bearing (deg) 또는 None
-_cand_dist_mm        = None    # 후보 추정 거리 (mm) 또는 None
-# 비목표 색 메모리: {'YELLOW': (bearing_deg, dist_mm), ...} — 탐색 중 발견분
-_seen_other          = {}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -146,7 +104,7 @@ def _detect_color(frame, color_name):
 
     largest = max(contours, key=cv2.contourArea)
     area    = cv2.contourArea(largest)
-    if area < CONFIRM_AREA_MIN:
+    if area < 500:
         return None, 0.0, False, False
 
     M = cv2.moments(largest)
@@ -161,45 +119,6 @@ def _detect_color(frame, color_name):
     clipped_r = (bx + bw >= _EFF_W - 1)
 
     return (cx, cy), area, clipped_l, clipped_r
-
-
-def _detect_candidate(frame, color_name):
-    """
-    완화된 HSV 범위 + 낮은 면적 임계로 '후보'를 검출.
-    확정 검출(_detect_color)이 놓치는 원거리/약한 색지를 잡아 탐색 시
-    접근 방향을 제공한다. 접근/도착 판정에는 절대 쓰지 않는다.
-    반환: (cx, cy) 또는 None
-    """
-    hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-    for (lo, hi) in CANDIDATE_RANGES[color_name]:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
-
-    # 작은 blob을 살리려고 OPEN을 생략하고 CLOSE만 약하게 적용
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
-    mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
-
-    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
-                                   cv2.CHAIN_APPROX_SIMPLE)
-    if not contours:
-        return None
-    largest = max(contours, key=cv2.contourArea)
-    if cv2.contourArea(largest) < CANDIDATE_AREA_MIN:
-        return None
-    M = cv2.moments(largest)
-    if M['m00'] == 0:
-        return None
-    return (int(M['m10'] / M['m00']), int(M['m01'] / M['m00']))
-
-
-def _cy_to_distance_mm(cy):
-    """centroid cy → 카메라 기하 기반 거리 추정 (mm). get_estimated_distance_mm과 동일 식."""
-    f_px       = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
-    delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, f_px))
-    depression = CAM_TILT_DEG + delta_v
-    if depression <= 1.0:
-        return 5000.0
-    return max(CAM_HEIGHT_MM / math.tan(math.radians(depression)), 50.0)
 
 
 def _to_bearing_seek(cx):
@@ -246,8 +165,6 @@ def _camera_loop():
     global _target_bearing, _color_detected
     global _mission_idx, _dwell_start, _dwelling, _done
     global _close, _last_stable_bearing, _last_close_bearing, _last_cy
-    global _last_detect_time, _last_close_flag
-    global _cand_bearing, _cand_dist_mm
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
@@ -283,24 +200,6 @@ def _camera_loop():
         centroid, area, clip_l, clip_r     = _detect_color(frame, target_color)
         roi_fill                        = _get_roi_fill(frame, target_color)
 
-        # ── 후보 검출: 확정 검출이 None일 때만 목표 색 후보를 찾는다 ──────
-        # 그리고 비목표 색은 항상 후보 스캔해 좌표 메모리에 보관한다.
-        cand_bearing = None
-        cand_dist    = None
-        seen_now     = {}
-        if centroid is None:
-            cand = _detect_candidate(frame, target_color)
-            if cand is not None:
-                cand_bearing = _to_bearing_seek(cand[0])
-                cand_dist    = _cy_to_distance_mm(cand[1])
-        for other in MISSION_ORDER:
-            if other == target_color:
-                continue
-            oc = _detect_candidate(frame, other)
-            if oc is not None:
-                seen_now[other] = (_to_bearing_seek(oc[0]),
-                                   _cy_to_distance_mm(oc[1]))
-
         # ── 근접 / 클리핑 판정 (lock 밖, 카메라 스레드 전용) ──────────────
         global _roi_peaked
 
@@ -328,22 +227,10 @@ def _camera_loop():
             else:
                 bearing = _last_stable_bearing
             _last_cy = cy
-            _last_detect_time = time.time()   # 실제 검출 시각 기록
-            _last_close_flag  = is_close_now
         else:
-            # ── 단발 미검출: hold 윈도우 안이면 마지막 bearing 유지 ──────────
-            held = (time.time() - _last_detect_time) < BEARING_HOLD_SEC
-            if held and _last_cy is not None:
-                # 직전 유효값을 그대로 유지 (_last_cy/_last_stable_bearing 보존).
-                # CLOSE 여부도 마지막 검출 시점 값을 따른다.
-                is_close_now = _last_close_flag
-                bearing = _last_close_bearing if is_close_now else _last_stable_bearing
-                cam_dist = 5000.0   # 거리는 get_estimated_distance_mm()가 _last_cy로 재계산
-            else:
-                bearing      = None
-                is_close_now = False
-                cam_dist     = 5000.0
-                _last_cy     = None   # hold 만료 → 거리 추정도 초기화
+            bearing      = None
+            is_close_now = False
+            cam_dist     = 5000.0
 
         # 도착 판정 (3가지 중 하나라도 충족 시 arrived=True)
         if USE_ROI_ARRIVE:
@@ -364,24 +251,13 @@ def _camera_loop():
             _target_bearing = bearing
             _color_detected = bearing is not None
             _close          = is_close_now
-            # hold로 확정 bearing이 살아있는 동안에는 후보를 노출하지 않는다
-            # (확정 추종과 후보 추종이 동시에 잡혀 탐색 플래너가 흔들리는 것 방지)
-            if bearing is not None:
-                _cand_bearing = None
-                _cand_dist_mm = None
-            else:
-                _cand_bearing = cand_bearing
-                _cand_dist_mm = cand_dist
-            for c, (b, d) in seen_now.items():
-                _seen_other[c] = (b, d)
 
             if DEBUG_CAMERA:
                 clip_str = ('L' if clip_l else '') + ('R' if clip_r else '') or '-'
-                held_str = ' [HOLD]' if (bearing is not None and centroid is None) else ''
                 print(f"[CAMERA] {target_color} area={area:.0f} "
                       f"clip={clip_str} close={is_close_now} "
                       f"bearing={bearing:+.1f}° dist={cam_dist:.0f}mm fill={roi_fill:.2f} "
-                      f"peaked={_roi_peaked}{held_str}" if bearing is not None else
+                      f"peaked={_roi_peaked}" if bearing is not None else
                       f"[CAMERA] {target_color} 미감지 fill={roi_fill:.2f}")
 
             if arrived:
@@ -533,27 +409,3 @@ def get_state():
         if _mission_idx < len(MISSION_ORDER):
             return f'SEEK_{MISSION_ORDER[_mission_idx]}'
         return 'DONE'
-
-
-def get_candidate():
-    """
-    목표 색 '후보'의 (bearing_deg, dist_mm) 반환. 없으면 None.
-    확정 검출(get_bearing)이 None일 때 탐색이 접근 방향으로 쓴다.
-    후보는 신뢰도가 낮으니 도착/CLOSE 판정에는 쓰지 말 것.
-    """
-    with _lock:
-        if _cand_bearing is None:
-            return None
-        return (_cand_bearing, _cand_dist_mm)
-
-
-def get_seen_other(color):
-    """탐색 중 본 비목표 색의 마지막 (bearing_deg, dist_mm). 없으면 None."""
-    with _lock:
-        return _seen_other.get(color)
-
-
-def clear_seen(color):
-    """해당 색 메모리 삭제 (미션이 그 색으로 넘어가 소비한 뒤 호출)."""
-    with _lock:
-        _seen_other.pop(color, None)
