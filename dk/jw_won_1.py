@@ -1310,21 +1310,32 @@ def _motor_controller(arduino):
 
                 # ── 3b: 미감지 또는 오인 기각 → 탐색 플래너 ────────────────
                 if bearing is None or not verified:
-                    _, tb, _, _ = search_planner.update(
+                    mode, tb, v_cmd, w_cmd = search_planner.update(
                         arduino_x_mm, arduino_y_mm, arduino_heading_deg,
                         camera_tracker, scan_points=pts)
-                    # COVER/CAND/MEM: 목표 좌표 방향을 회피 시스템에 전달.
-                    # 막힌 방향으로 계속 당기면 회피와 매 사이클 맞서 진동하며
-                    # 전진을 못 하므로, 막혔으면 정면(0°) 기준 회피에 맡긴다.
-                    if is_target_blocked(pts, tb):
-                        v, w = find_vw_command(pts, arduino_heading_deg,
-                                               target_bearing=0.0)
-                        if DEBUG_DIR:
-                            print(f"[SEARCH] 목표 방향({tb:+.1f}°) 막힘 "
-                                  f"→ 회피 우선(정면)")
+                    if mode == 'SPIN':
+                        # 제자리 회전 — 단, STOP zone이면 안전 우선 폴백
+                        if detect_stop_zone(pts):
+                            v, w = find_vw_command(pts, arduino_heading_deg,
+                                                   target_bearing=0.0)
+                        else:
+                            v, w = v_cmd, w_cmd
                     else:
-                        v, w = find_vw_command(pts, arduino_heading_deg,
-                                               target_bearing=tb)
+                        # COVER/CAND/MEM: 목표 좌표 방향을 회피 시스템에 전달.
+                        # 단, 목표 방향이 장애물에 막혀 있으면 목표 끌림(tb)을
+                        # 그대로 주지 않는다 — 막힌 방향으로 계속 당기면 회피와
+                        # 매 사이클 맞서 '까딱까딱' 진동하며 전진을 못 한다.
+                        # 막혔으면 정면(0°) 기준 회피에 맡겨 갭으로 우회시키고,
+                        # 장애물을 지나면 자연히 다시 tb로 끌린다.
+                        if is_target_blocked(pts, tb):
+                            v, w = find_vw_command(pts, arduino_heading_deg,
+                                                   target_bearing=0.0)
+                            if DEBUG_DIR:
+                                print(f"[SEARCH] 목표 방향({tb:+.1f}°) 막힘 "
+                                      f"→ 회피 우선(정면)")
+                        else:
+                            v, w = find_vw_command(pts, arduino_heading_deg,
+                                                   target_bearing=tb)
 
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
             prev_w = w
