@@ -279,6 +279,17 @@ void loop() {
       return;
     }
 
+    // ── FF 캘리브레이션 (원격 트리거) ─────────────────────────────────────────
+    if (input == "CAL" || input == "cal") {
+      stopMotors();
+      autoCalibrateMotors();
+      saveCalibToEEPROM();
+      checkCalQuality();
+      checkFFHoldout();
+      lastCmdTime = millis();
+      return;
+    }
+
     // ── 거리 캘리브레이션 트리거 ───────────────────────────
     if (input.startsWith("LINE")) {
       float d = input.substring(4).toFloat();
@@ -379,24 +390,39 @@ bool loadCalibFromEEPROM() {
   max_avg_speed=d.max_avg_speed; return true;
 }
 
+// ── 캘리브레이션 양방향 헬퍼 (Serial + Serial1 동시 출력) ───────────────────
+static void cPrint(const __FlashStringHelper* s)   { Serial.print(s);      Serial1.print(s); }
+static void cPrint(float v, int d = 0)             { Serial.print(v, d);   Serial1.print(v, d); }
+static void cPrint(int v)                          { Serial.print(v);      Serial1.print(v); }
+static void cPrintln(const __FlashStringHelper* s) { Serial.println(s);    Serial1.println(s); }
+static void cPrintln(float v, int d = 1)           { Serial.println(v, d); Serial1.println(v, d); }
+static void cPrintln()                             { Serial.println();     Serial1.println(); }
+
+// Serial 또는 Serial1 어느 쪽에서든 n/q 입력 대기
+static char calReadChar() {
+  while (true) {
+    if (Serial.available()) {
+      char c = Serial.read();
+      if (c == 'n' || c == 'N' || c == 'q' || c == 'Q') return c;
+    }
+    if (Serial1.available()) {
+      char c = Serial1.read();
+      if (c == 'n' || c == 'N' || c == 'q' || c == 'Q') return c;
+    }
+  }
+}
+
 void autoCalibrateMotors() {
-  Serial.println(F("\n[CAL] 시작 (n=측정, q=중단) — PWM당 3회 중앙값"));
+  cPrintln(F("\n[CAL] 시작 (n=측정, q=중단) — PWM당 3회 중앙값"));
   delay(2000);
   const float CAL_WINDOW_S = 1.5f;
   for (int i = 0; i < CAL_STEPS; i++) {
     float sampL[3], sampR[3];
     for (int r = 0; r < 3; r++) {
-      Serial.print(F("\n[준비] PWM ")); Serial.print(cal_pwm[i]);
-      Serial.print(F(" (")); Serial.print(r + 1); Serial.println(F("/3) → 'n'"));
-      bool abort = false;
-      while (true) {
-        if (Serial.available()) {
-          char c = Serial.read();
-          if (c == 'n' || c == 'N') break;
-          if (c == 'q' || c == 'Q') { abort = true; break; }
-        }
-      }
-      if (abort) { stopMotors(); return; }
+      cPrint(F("\n[준비] PWM ")); cPrint(cal_pwm[i]);
+      cPrint(F(" (")); cPrint(r + 1); cPrintln(F("/3) → 'n'"));
+      char c = calReadChar();
+      if (c == 'q' || c == 'Q') { stopMotors(); return; }
       digitalWrite(DIR1_L, HIGH); digitalWrite(DIR2_L, LOW);
       digitalWrite(DIR1_R, HIGH); digitalWrite(DIR2_R, LOW);
       analogWrite(PWM_L, (int)cal_pwm[i]); analogWrite(PWM_R, (int)cal_pwm[i]);
@@ -407,9 +433,9 @@ void autoCalibrateMotors() {
       sampL[r] = abs(eL - sL) / CAL_WINDOW_S;
       sampR[r] = abs(eR - sR) / CAL_WINDOW_S;
       stopMotors();
-      Serial.print(F("[측정")); Serial.print(r + 1); Serial.print(F("] spdL="));
-      Serial.print(sampL[r]); Serial.print(F(" spdR=")); Serial.println(sampR[r]);
-      if (r < 2) Serial.println(F("[원위치로 이동 후 'n']"));
+      cPrint(F("[측정")); cPrint(r + 1); cPrint(F("] spdL="));
+      cPrint(sampL[r], 1); cPrint(F(" spdR=")); cPrintln(sampR[r], 1);
+      if (r < 2) cPrintln(F("[원위치로 이동 후 'n']"));
     }
     // 3개 버블 정렬 → 중앙값(index 1) 채택
     if (sampL[0] > sampL[1]) { float t = sampL[0]; sampL[0] = sampL[1]; sampL[1] = t; }
@@ -420,32 +446,31 @@ void autoCalibrateMotors() {
     if (sampR[0] > sampR[1]) { float t = sampR[0]; sampR[0] = sampR[1]; sampR[1] = t; }
     cal_speed_L[i] = sampL[1];
     cal_speed_R[i] = sampR[1];
-    Serial.print(F("[중앙값] spdL=")); Serial.print(cal_speed_L[i]);
-    Serial.print(F(" spdR=")); Serial.println(cal_speed_R[i]);
+    cPrint(F("[중앙값] spdL=")); cPrint(cal_speed_L[i], 1);
+    cPrint(F(" spdR=")); cPrintln(cal_speed_R[i], 1);
   }
   max_avg_speed = (cal_speed_L[CAL_STEPS-1] + cal_speed_R[CAL_STEPS-1]) / 2.0f;
   noInterrupts(); encLeft = 0; encRight = 0; interrupts();
-  Serial.println(F("[CAL] 완료"));
+  cPrintln(F("[CAL] 완료"));
 }
 
 void checkFFHoldout() {
-  Serial.println(F("\n[FF CHECK 1] Hold-out"));
+  cPrintln(F("\n[FF CHECK 1] Hold-out"));
   for (int i=1;i<CAL_STEPS-1;i++) {
     float dL=cal_speed_L[i+1]-cal_speed_L[i-1],dR=cal_speed_R[i+1]-cal_speed_R[i-1];
     if(dL<0.5f||dR<0.5f) continue;
     float pL=cal_pwm[i-1]+((cal_speed_L[i]-cal_speed_L[i-1])/dL)*(cal_pwm[i+1]-cal_pwm[i-1]);
     float pR=cal_pwm[i-1]+((cal_speed_R[i]-cal_speed_R[i-1])/dR)*(cal_pwm[i+1]-cal_pwm[i-1]);
-    Serial.print(i);Serial.print(F("\t"));Serial.print(cal_pwm[i],0);Serial.print(F("\t"));
-    Serial.print(pL,1);Serial.print(F("\t"));Serial.print(pL-cal_pwm[i],1);Serial.print(F("\t"));
-    Serial.print(pR,1);Serial.print(F("\t"));Serial.println(pR-cal_pwm[i],1);
+    cPrint(i); cPrint(F("\t")); cPrint(cal_pwm[i]); cPrint(F("\t"));
+    cPrint(pL,1); cPrint(F("\t")); cPrint(pL-cal_pwm[i],1); cPrint(F("\t"));
+    cPrint(pR,1); cPrint(F("\t")); cPrintln(pR-cal_pwm[i],1);
   }
 }
 
 void checkCalQuality() {
-  Serial.println(F("\n[FF CHECK 2] 품질"));
+  cPrintln(F("\n[FF CHECK 2] 품질"));
   for (int i=0;i<CAL_STEPS;i++){
-    Serial.print(i);Serial.print(F("\t"));Serial.print(cal_pwm[i],0);
-    Serial.print(F("\t"));Serial.print(cal_speed_L[i],0);
-    Serial.print(F("\t"));Serial.println(cal_speed_R[i],0);
+    cPrint(i); cPrint(F("\t")); cPrint(cal_pwm[i]);
+    cPrint(F("\t")); cPrint(cal_speed_L[i]); cPrint(F("\t")); cPrintln(cal_speed_R[i], 0);
   }
 }
