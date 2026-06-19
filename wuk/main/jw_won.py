@@ -2,6 +2,7 @@ import serial
 import time
 import math
 import json
+import queue
 import threading
 import camera_tracker
 
@@ -212,6 +213,11 @@ _boundary_center_y  = None   # mm: 경계 원 중심 y
 _scan_lock   = threading.Lock()
 _latest_scan = []            # 라이다 스레드가 완성된 스캔을 여기에 기록
 _shutdown    = threading.Event()  # 종료 신호
+
+# ── STOP 이벤트 비차단 로깅 ──────────────────────────────
+STOP_LOG_ENABLED  = False              # 토글: 대회 런=False / 디버그=True
+_stop_log_queue   = queue.Queue(maxsize=20)
+_stop_log_counter = 0
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1177,18 +1183,10 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
         _stop_set_pivot(heading_deg, target, gap_width)
         stop_cycle_count = 0
         stop_phase       = 2
-        _fname = f'stop_event_{int(time.time())}.json'
-        with open(_fname, 'w') as _f:
-            json.dump({
-                'heading':  heading_deg,
-                'target':   target,
-                'gap_dist': gap_width,
-                'gap_info': gap_info,
-                'scan':     [[a, d] for a, d in scan_points if d > 0],
-            }, _f)
+        _enqueue_stop_event(heading_deg, target, gap_width, gap_info, scan_points)
         if DEBUG_STOP:
             print(f"  [STOP] triggered -> pivot target={target:+.0f}° "
-                  f"global={stop_locked_global_heading:.1f}° event saved {_fname}")
+                  f"global={stop_locked_global_heading:.1f}°")
         return 0.0, stop_pivot_w
 
     return find_vw_layered(scan_points, heading_deg, target_bearing)
@@ -1210,31 +1208,85 @@ def _dedup_scan(pts):
     return list(angle_map.items())
 
 
+def _enqueue_stop_event(heading_deg, target, gap_width, gap_info, scan_points):
+    """제어 스레드에서 호출. 절대 블로킹하지 않음.
+    큐가 가득 차면(라이터가 SD 지연으로 밀림) 드롭 — 제어 루프 보호 우선."""
+    global _stop_log_counter
+    if not STOP_LOG_ENABLED:
+        return
+    _stop_log_counter += 1
+    fname = f'stop_event_{int(time.time())}_{_stop_log_counter:04d}.json'
+    try:
+        _stop_log_queue.put_nowait(
+            (fname, heading_deg, target, gap_width, gap_info, scan_points))
+    except queue.Full:
+        pass
+
+
+def _stop_logger():
+    """별도 스레드: 큐에서 꺼내 디스크에 기록. SD 지연이 제어 루프에 전파되지 않음.
+    _shutdown 후엔 남은 큐를 비우고 종료."""
+    while not _shutdown.is_set() or not _stop_log_queue.empty():
+        try:
+            item = _stop_log_queue.get(timeout=0.2)
+        except queue.Empty:
+            continue
+        fname, heading_deg, target, gap_width, gap_info, scan_points = item
+        try:
+            with open(fname, 'w') as f:
+                json.dump({
+                    'heading':  heading_deg,
+                    'target':   target,
+                    'gap_dist': gap_width,
+                    'gap_info': gap_info,
+                    'scan':     [[a, d] for a, d in scan_points if d > 0],
+                }, f)
+        except Exception as e:
+            print(f"[STOP_LOG] write failed: {e}")
+        finally:
+            _stop_log_queue.task_done()
+
+
 def _lidar_reader(lidar):
     """라이다 수신 전용 스레드.
-    lidar.read(5) 블로킹이 모터 루프에 영향을 주지 않도록 분리.
-    한 바퀴 완성 시 중복 각도 제거 후 _latest_scan에 덮어쓰기 (누적 없음)."""
+    in_waiting 만큼 일괄로 읽어 바이트 버퍼에 쌓고, 5바이트 단위로 파싱.
+    패킷당 read(5) syscall(초당 5000회)을 청크 읽기로 줄여 GIL 부담↓.
+    체크비트(parse_packet) 실패 시 1바이트씩 밀어 재동기(resync) →
+    버퍼 오버런 등으로 정렬이 깨져도 회복."""
+    buf       = bytearray()
     local_pts = []
     while not _shutdown.is_set():
         try:
-            raw = lidar.read(5)
+            n     = lidar.in_waiting
+            chunk = lidar.read(n if n > 0 else 1)   # 없으면 1바이트 블로킹(busy-spin 방지)
         except Exception:
             continue
-        result = parse_packet(raw)
-        if result is None:
+        if not chunk:
             continue
-        angle_raw, distance = result
-        s_flag = raw[0] & 0x01
-        if s_flag == 1 and local_pts:
-            deduped = _dedup_scan(local_pts)   # 락 밖에서 연산
-            with _scan_lock:
-                _latest_scan.clear()
-                _latest_scan.extend(deduped)
-            local_pts = []
-        local_pts.append((
-            normalize_angle(angle_raw),
-            distance + LIDAR_OFFSET if distance > 0 else 0
-        ))
+        buf.extend(chunk)
+
+        i     = 0
+        n_buf = len(buf)
+        while n_buf - i >= 5:
+            pkt    = buf[i:i + 5]
+            result = parse_packet(pkt)
+            if result is None:
+                i += 1                  # 정렬 불일치 → 1바이트 밀고 재시도 (resync)
+                continue
+            angle_raw, distance = result
+            s_flag = pkt[0] & 0x01
+            if s_flag == 1 and local_pts:           # 한 바퀴 완성
+                deduped = _dedup_scan(local_pts)    # 락 밖에서 연산
+                with _scan_lock:
+                    _latest_scan.clear()
+                    _latest_scan.extend(deduped)
+                local_pts = []
+            local_pts.append((
+                normalize_angle(angle_raw),
+                distance + LIDAR_OFFSET if distance > 0 else 0
+            ))
+            i += 5
+        del buf[:i]                     # 소비분 제거, 남은 1~4바이트는 다음 청크와 이어붙임
 
 
 def _motor_controller(arduino):
@@ -1393,13 +1445,15 @@ def main():
     lidar.write(bytes([0xA5, 0x20]))
     lidar.read(7)
 
-    t_lidar = threading.Thread(target=_lidar_reader,      args=(lidar,),   daemon=True, name="lidar")
-    t_motor = threading.Thread(target=_motor_controller,  args=(arduino,), daemon=True, name="motor")
+    t_lidar   = threading.Thread(target=_lidar_reader,     args=(lidar,),   daemon=True, name="lidar")
+    t_motor   = threading.Thread(target=_motor_controller, args=(arduino,), daemon=True, name="motor")
+    t_stoplog = threading.Thread(target=_stop_logger,      daemon=True,     name="stoplog")
 
     try:
         camera_tracker.start()
         t_lidar.start()
         t_motor.start()
+        t_stoplog.start()
         while not _shutdown.is_set():
             time.sleep(0.5)
     except KeyboardInterrupt:
@@ -1409,6 +1463,7 @@ def main():
         camera_tracker.stop()
         t_lidar.join(timeout=2.0)
         t_motor.join(timeout=2.0)
+        t_stoplog.join(timeout=2.0)
         lidar.write(bytes([0xA5, 0x25]))
         time.sleep(0.1)
         lidar.close()
