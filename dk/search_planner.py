@@ -34,6 +34,13 @@ WP_ARRIVE_MM      = 300.0   # 웨이포인트/후보/메모리 도착 판정 거
 WP_TIMEOUT_SEC    = 12.0    # 이동 제한시간 (장애물로 막힐 때 포기)
 CAND_TIMEOUT_SEC  = 8.0     # 후보 추종 제한시간 (헛것일 때 빠르게 포기)
 
+# 한 번의 이동으로 현재 위치에서 벗어날 수 있는 최대 반경.
+# 경기장 중심을 모르므로 절대 좌표로는 가둘 수 없다. 대신 "한 번에 멀리
+# 가지 마라"로 제한한다 — 후보가 경기장 밖/헛것으로 멀리 잡혀도 이 반경까지만
+# 다가가 재확인하므로 통제 불능으로 경기장을 벗어나지 않는다.
+# (원래 가상경계도 경기장 중심이 아니라 '현재 위치 기준 원'이었음 → 같은 취지)
+MAX_STEP_RADIUS_MM = 900.0
+
 DEBUG             = 1
 
 # ── 내부 상태 ─────────────────────────────────────────────────────────
@@ -52,12 +59,16 @@ def _norm(a):
 
 
 def _quincunx(ox, oy):
-    """중심 + 4코너 격자점."""
-    h = min(ARENA_HALF_MM, DETECT_RADIUS_MM)
+    """중심 + 4코너 격자점.
+    오도메트리 원점 = 경기장 중심 가정. 벽에서 150mm 여유를 두고 클램프."""
+    h   = min(ARENA_HALF_MM, DETECT_RADIUS_MM)
+    lim = ARENA_HALF_MM - 150.0
     pts = [(ox, oy)]
     for sx in (+1, -1):
         for sy in (+1, -1):
-            pts.append((ox + sx * h, oy + sy * h))
+            cx = max(-lim, min(lim, ox + sx * h))
+            cy = max(-lim, min(lim, oy + sy * h))
+            pts.append((cx, cy))
     return pts
 
 
@@ -76,8 +87,21 @@ def notify_color_visible():
     _move_start_time = None
 
 
-def _start_move(mode, pos):
+def _clamp_step(cur_x, cur_y, tx, ty, max_r=MAX_STEP_RADIUS_MM):
+    """목표(tx,ty)가 현재 위치에서 max_r보다 멀면, 같은 방향으로 max_r 지점까지만.
+    경기장 밖/헛것 후보로 멀리 튀어나가는 것을 막는다 (한 번에 한 발씩)."""
+    dx, dy = tx - cur_x, ty - cur_y
+    dist = math.hypot(dx, dy)
+    if dist <= max_r or dist < 1e-6:
+        return (tx, ty)
+    s = max_r / dist
+    return (cur_x + dx * s, cur_y + dy * s)
+
+
+def _start_move(mode, pos, cur_x=None, cur_y=None):
     global _mode, _target_pos, _move_start_time
+    if cur_x is not None and cur_y is not None:
+        pos = _clamp_step(cur_x, cur_y, pos[0], pos[1])
     _mode            = mode
     _target_pos      = pos
     _move_start_time = time.time()
@@ -89,6 +113,27 @@ def _start_spin():
     _spin_accum_deg = 0.0
     _prev_heading   = None
     _target_pos     = None
+
+
+def _next_wp(x_mm, y_mm):
+    """다음 커버리지 웨이포인트 선택.
+    현재 위치에서 충분히 먼 것(WP_ARRIVE_MM*1.5 초과)을 순환하며 선택.
+    모두 가깝다면 그 중 가장 먼 것을 선택 (제자리 맴돌기 방지)."""
+    global _wp_index
+    grid      = _quincunx(*_origin)
+    best_idx  = (_wp_index + 1) % len(grid)
+    best_dist = -1.0
+    for i in range(len(grid)):
+        idx = (_wp_index + 1 + i) % len(grid)
+        d   = math.hypot(grid[idx][0] - x_mm, grid[idx][1] - y_mm)
+        if d > WP_ARRIVE_MM * 1.5:
+            _wp_index = idx
+            return grid[idx]
+        if d > best_dist:
+            best_dist = d
+            best_idx  = idx
+    _wp_index = best_idx
+    return grid[best_idx]
 
 
 def update(x_mm, y_mm, heading_deg, camera, scan_points=None):
@@ -120,7 +165,7 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None):
             mb, md = mem
             pos = _polar_to_global(x_mm, y_mm, heading_deg, mb, md)
             camera.clear_seen(color)
-            _start_move('MEM', pos)
+            _start_move('MEM', pos, x_mm, y_mm)
             if DEBUG:
                 print(f"[SEARCH] {color} 기억 좌표 직행 → "
                       f"({pos[0]:.0f}, {pos[1]:.0f})mm")
@@ -137,7 +182,7 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None):
                     print(f"[SEARCH] 후보 기각(장애물 추정) b={cb:+.1f}° d={cd:.0f}mm")
             if cand_ok:
                 pos = _polar_to_global(x_mm, y_mm, heading_deg, cb, cd)
-                _start_move('CAND', pos)
+                _start_move('CAND', pos, x_mm, y_mm)
                 if DEBUG:
                     print(f"[SEARCH] 후보 포착 b={cb:+.1f}° d={cd:.0f}mm → 접근")
 
@@ -150,13 +195,7 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None):
         if _spin_accum_deg < SPIN_TOTAL_DEG:
             return ('SPIN', 0.0, 0.0, SPIN_W)
 
-        grid = _quincunx(*_origin)
-        _wp_index = (_wp_index + 1) % len(grid)
-        for _ in range(len(grid)):
-            cand_pt = grid[_wp_index]
-            if math.hypot(cand_pt[0] - x_mm, cand_pt[1] - y_mm) > WP_ARRIVE_MM * 1.5:
-                break
-            _wp_index = (_wp_index + 1) % len(grid)
+        cand_pt = _next_wp(x_mm, y_mm)
         _start_move('COVER', cand_pt)
         if DEBUG:
             print(f"[SEARCH] 스핀 완료(미발견) → 커버리지 "
@@ -164,13 +203,7 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None):
 
     # COVER 모드: 목표 미설정 시 첫 커버리지 포인트 선택 (초기 배회)
     if _mode == 'COVER' and _target_pos is None:
-        grid = _quincunx(*_origin)
-        _wp_index = (_wp_index + 1) % len(grid)
-        for _ in range(len(grid)):
-            cand_pt = grid[_wp_index]
-            if math.hypot(cand_pt[0] - x_mm, cand_pt[1] - y_mm) > WP_ARRIVE_MM * 1.5:
-                break
-            _wp_index = (_wp_index + 1) % len(grid)
+        cand_pt = _next_wp(x_mm, y_mm)
         _start_move('COVER', cand_pt)
         if DEBUG:
             print(f"[SEARCH] 초기 배회 → 커버리지 ({cand_pt[0]:.0f}, {cand_pt[1]:.0f})mm")
@@ -192,4 +225,3 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None):
     bearing_global = math.degrees(math.atan2(dx, dy))
     rel_bearing    = _norm(bearing_global - heading_deg)
     return (_mode, rel_bearing, None, None)
-
