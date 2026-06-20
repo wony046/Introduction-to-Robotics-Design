@@ -1322,7 +1322,8 @@ def _motor_controller(arduino):
                         pts, bearing, cam_d, debug=DEBUG_VERIFY)
                     if verified:
                         _last_paper_verify_time = time.time()  # CLOSE 게이트 갱신
-                        search_planner.notify_color_visible()
+                        search_planner.notify_color_visible(
+                            arduino_x_mm, arduino_y_mm)
                         v, w = find_vw_command(pts, arduino_heading_deg,
                                                target_bearing=bearing)
                     # 검증 실패(장애물 오인) → 3b 탐색으로 폴스루
