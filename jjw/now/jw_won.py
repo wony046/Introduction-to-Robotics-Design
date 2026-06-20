@@ -353,6 +353,24 @@ def _compute_close_target():
     return x_t, y_t
 
 
+# ── camera_tracker.get_state() → 미션 인덱스 변환 ────────────────────
+# camera_tracker에 get_mission_idx()가 없으므로 get_state()로 대체.
+#   get_state(): 'SEEK_RED' / 'SEEK_YELLOW' / 'SEEK_BLUE' / 'DONE'
+#   → RED=0, YELLOW=1, BLUE=2, DONE=3
+_MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
+
+def _get_mission_idx():
+    """현재 미션 인덱스 반환 (도착 시 색지 전환 감지용)."""
+    state = camera_tracker.get_state()
+    if state == 'DONE':
+        return len(_MISSION_ORDER)
+    color = state.replace('SEEK_', '')
+    try:
+        return _MISSION_ORDER.index(color)
+    except ValueError:
+        return 0
+
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 가상 경계 & 탐색 모드 함수  ─ 코드 2에서 이식
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1470,7 +1488,7 @@ def _motor_controller(arduino):
                 bearing = camera_tracker.get_bearing()
 
                 # 미션 인덱스 변화 감지 → Mode 1 진입 (색지 도착 직후)
-                current_mission_idx = camera_tracker.get_mission_idx()
+                current_mission_idx = _get_mission_idx()
                 if current_mission_idx != _last_known_mission_idx:
                     _last_arrival_x          = arduino_x_mm
                     _last_arrival_y          = arduino_y_mm
