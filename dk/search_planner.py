@@ -98,10 +98,16 @@ def _safe_spin_direction(scan_points):
     스핀을 시작할 때 시야 안의 가까운 장애물이 그 사각으로 미끄러져
     들어가는 방향으로 돌면, 회전 중 그 장애물을 추적하지 못해 충돌 위험.
 
-    규칙: 가장 가까운 점(threat)의 베어링 부호와 같은 부호로 회전한다.
-      - threat이 좌측(+)  → 로봇이 좌측(CCW, w>0)으로 돌면, 그 점의
-        로봇기준 상대각이 감소(+→0)하여 정면으로 끌려옴 → 시야 유지.
-      - threat이 우측(-)  → CW(w<0)로 같은 효과.
+    부호규약 (jw_won.py / camera_tracker.py 와 동일):
+      - 라이다 스캔각 a:  + = 오른쪽,  - = 왼쪽
+      - 각속도 w:        +w = CCW(좌회전),  -w = CW(우회전)
+
+    규칙: 가장 가까운 점(threat)을 정면으로 끌어와 시야에 유지한다.
+      +w(CCW)로 돌면 고정 장애물의 상대 스캔각 a는 증가(오른쪽으로 흘러감),
+      -w(CW)로 돌면 a는 감소(왼쪽으로 흘러감)한다. 따라서 a를 0(정면)으로
+      모으려면 threat 쪽으로 돌아야 한다:
+        - threat이 오른쪽(a>0) → CW(-w)로 돌려 a를 0으로 끌어옴 → 반환 -1
+        - threat이 왼쪽(a<0)  → CCW(+w)로 돌려 a를 0으로 끌어옴 → 반환 +1
     위협 없음 또는 거의 정면이면 +1 (기본 CCW).
 
     반환: +1.0 (CCW) 또는 -1.0 (CW).
@@ -119,7 +125,8 @@ def _safe_spin_direction(scan_points):
             nearest_a = a
     if nearest_a is None or abs(nearest_a) < SPIN_DIR_DEADZONE_DEG:
         return +1.0
-    return +1.0 if nearest_a > 0 else -1.0
+    # threat이 오른쪽(a>0)이면 CW(-1), 왼쪽(a<0)이면 CCW(+1)로 끌어온다.
+    return -1.0 if nearest_a > 0 else +1.0
 
 
 def _polar_to_global(x, y, heading_deg, bearing_deg, dist_mm):
