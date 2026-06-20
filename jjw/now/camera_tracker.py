@@ -37,19 +37,19 @@ CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 
 USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
 CLOSE_BEARING_SCALE = 0.8212    # ★ calibrate_bearing.py 로 구한 보정 배율 (1.0=보정 없음)
 
-# ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
-# 실내 조명 조건에서 반드시 튜닝 필요
+# ── LAB 색상 범위 (OpenCV LAB: L[0-255], A[0-255 / 128=중립], B[0-255 / 128=중립]) ──
+# CLAHE 전처리 후 적용. REF_AB ± TOL, L >= L_MIN 기반 실측값
+# REF_AB = {'RED':(182,140), 'YELLOW':(130,165), 'BLUE':(136,94)}
+# TOL    = {'RED':30, 'YELLOW':18, 'BLUE':7}
+# L_MIN  = {'RED':28, 'YELLOW':155, 'BLUE':18}
 COLOR_RANGES = {
-    'RED': [
-        ((146, 100, 80), (179, 255, 255)),   # 실측값
-    ],
-    'YELLOW': [
-        ((18, 35, 186), (72, 177, 255)),   # 실측값
-    ],
-    'BLUE': [
-        ((79, 116, 114), (119, 162, 255)),   # 실측값
-    ],
+    'RED':    [((28,  152, 110), (255, 212, 170))],
+    'YELLOW': [((155, 112, 147), (255, 148, 183))],
+    'BLUE':   [((18,  129,  87), (255, 143, 101))],
 }
+
+# ── CLAHE 전처리 객체 (L 채널 조명 정규화) ───────────────────────────
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 # ── 미션 순서 ────────────────────────────────────────────────────────
 MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
@@ -81,6 +81,14 @@ _last_cy             = None    # 마지막 centroid y (기하 거리 추정용)
 # 내부 함수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def _to_lab(frame):
+    """BGR → LAB 변환. L 채널에 CLAHE 적용 후 반환."""
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = _clahe.apply(l)
+    return cv2.merge([l, a, b])
+
+
 def _detect_color(frame, color_name):
     """
     frame에서 color_name 색을 검출.
@@ -88,10 +96,10 @@ def _detect_color(frame, color_name):
       centroid=(cx,cy) 또는 None, area=float
       clipped_l/r: blob이 좌/우 프레임 경계에 닿으면 True
     """
-    hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    lab  = _to_lab(frame)
+    mask = np.zeros(lab.shape[:2], dtype=np.uint8)
     for (lo, hi) in COLOR_RANGES[color_name]:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+        mask |= cv2.inRange(lab, np.array(lo), np.array(hi))
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
@@ -150,10 +158,10 @@ def _get_roi_fill(frame, color_name, bottom_ratio=None):
     roi_total = roi.shape[0] * roi.shape[1]
     if roi_total == 0:
         return 0.0
-    hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    lab  = _to_lab(roi)
+    mask = np.zeros(lab.shape[:2], dtype=np.uint8)
     for lo, hi in COLOR_RANGES[color_name]:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+        mask |= cv2.inRange(lab, np.array(lo), np.array(hi))
     return cv2.countNonZero(mask) / roi_total
 
 
@@ -399,12 +407,6 @@ def signal_arrival():
     """오도메트리 등 외부 시스템이 도착을 알릴 때 호출.
     카메라의 peaked→drop 판정이 막혀 있어도 미션이 진행된다."""
     _arrival_signal.set()
-
-
-def get_mission_idx():
-    """현재 미션 인덱스 반환. 도착 이벤트 감지용."""
-    with _lock:
-        return _mission_idx
 
 
 def get_state():
