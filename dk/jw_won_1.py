@@ -20,6 +20,15 @@ LIDAR_OFFSET    = 10     # mm: 라이다 측정값 보정
 LIDAR_MIN_VALID = 100   # mm: 이 미만 무시 (노이즈)
 DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 
+# 라이다 시야 사양: ±이 각도 범위만 스캔. 그 너머(후방 90°)는 사각지대.
+# 영향:
+#   - scan_points에 후방 점은 아예 안 들어오므로 detect_stop_zone, find_all_gaps
+#     같은 함수는 자동으로 "본 데이터에서만" 판단 → 별도 처리 불필요.
+#   - pivot_blocked는 후방을 못 봐 사각 안 장애물에 회전 시작 직후 긁힐 수 있음.
+#     이를 보완해 search_planner._safe_spin_direction이 회전 방향을 적응시켜
+#     위협 장애물을 시야 안에 끌어두고 돈다.
+LIDAR_FOV_HALF_DEG = 135.0
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 로봇 & 속도 파라미터
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -333,9 +342,12 @@ def detect_stop_zone(scan_points):
 
 def pivot_blocked(scan_points, clear_mm=PIVOT_CLEAR_MM):
     """제자리 회전(피벗)을 하기에 위험한가?
-    방향 무관(360°)으로 clear_mm 안에 유효 장애물이 하나라도 있으면 True.
+    라이다 시야(±LIDAR_FOV_HALF_DEG=±135°) 안에서 clear_mm 안에 유효 장애물이
+    하나라도 있으면 True. 후방 ±45° 사각은 데이터 자체가 없어 검사 불가 —
+    그 사각 안 장애물은 search_planner._safe_spin_direction이 회전 방향을
+    적응시켜 시야 안으로 끌어오는 방식으로 보완한다.
     제자리 회전은 전진 성분이 없어 측면/후방 근접 장애물에 긁혀 끼이므로,
-    STOP존(정면 좁은 사각형)보다 넓게 전 방향을 본다."""
+    STOP존(정면 좁은 사각형)보다 넓게 시야 전 범위를 본다."""
     for angle_norm, dist in scan_points:
         if dist < LIDAR_MIN_VALID:
             continue
