@@ -26,8 +26,8 @@ def on_mouse_click(event, x, y, flags, param):
 
         # 💡 [핵심] 클릭한 픽셀과 색상 차이가 얼마나 나는 곳까지 같은 영역으로 볼 것인지 설정 (오차 범위)
         # 이 숫자를 키우면 더 넓은/비슷한 범위까지 추출되고, 줄이면 아주 똑같은 색만 추출됩니다.
-        lo_diff = (15, 15, 15)
-        up_diff = (15, 15, 15)
+        lo_diff = (5, 5, 5)
+        up_diff = (5, 5, 5)
         
         # 클릭한 (x,y) 좌표를 시작점으로 인접한 픽셀들을 탐색하여 mask 생성
         flags_ff = 4 | (255 << 8) | cv2.FLOODFILL_MASK_ONLY
