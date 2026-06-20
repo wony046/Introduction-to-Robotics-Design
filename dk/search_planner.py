@@ -136,7 +136,7 @@ def _next_wp(x_mm, y_mm):
     return grid[best_idx]
 
 
-def update(x_mm, y_mm, heading_deg, camera, scan_points=None):
+def update(x_mm, y_mm, heading_deg, camera, scan_points=None, pivot_ok=True):
     """
     목표 색 미감지 상태에서 매 제어 주기 호출.
     camera: camera_tracker 모듈
@@ -188,7 +188,11 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None):
 
     # SPIN: 제자리 회전
     if _mode == 'SPIN':
-        if _prev_heading is not None:
+        # pivot_ok=False면 이번 주기엔 장애물 회피로 제자리 회전을 못 했다는 뜻.
+        # 회피 주행으로 생긴 헤딩 변화를 스핀 진행으로 오카운트하면 한 바퀴를
+        # 다 돌기 전에 스캔을 끝낸 것으로 착각하므로, 그런 주기엔 누적하지 않고
+        # 기준 헤딩만 갱신한다(다음 실제 회전부터 정확히 누적).
+        if _prev_heading is not None and pivot_ok:
             _spin_accum_deg += abs(_norm(heading_deg - _prev_heading))
         _prev_heading = heading_deg
 
