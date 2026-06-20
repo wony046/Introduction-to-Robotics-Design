@@ -40,6 +40,12 @@ WP_ARRIVE_MM      = 300.0   # 웨이포인트/후보/메모리 도착 판정 거
 WP_TIMEOUT_SEC    = 12.0    # 이동 제한시간 (장애물로 막힐 때 포기)
 CAND_TIMEOUT_SEC  = 8.0     # 후보 추종 제한시간 (헛것일 때 빠르게 포기)
 
+# 스핀 제한시간. 정상이면 SPIN_TOTAL_DEG / SPIN_W*(180/π) ≈ 5.5초면 한 바퀴.
+# 그러나 근접 장애물로 pivot_blocked가 자주 걸리면 스핀이 끊겨 누적이 늦어진다.
+# 이 시간을 넘기면 스캔을 못 끝냈더라도 다음 웨이포인트로 강제 진행하여
+# 한 자리에 영영 묶이는 것을 막는다.
+SPIN_TIMEOUT_SEC  = 15.0
+
 # 한 번의 이동으로 현재 위치에서 벗어날 수 있는 최대 반경.
 # 경기장 중심을 모르므로 절대 좌표로는 가둘 수 없다. 대신 "한 번에 멀리
 # 가지 마라"로 제한한다 — 후보가 경기장 밖/헛것으로 멀리 잡혀도 이 반경까지만
@@ -52,6 +58,7 @@ DEBUG             = 1
 # ── 내부 상태 ─────────────────────────────────────────────────────────
 _mode             = 'COVER'  # 'SPIN' | 'COVER' | 'CAND' | 'MEM'  (시작은 배회 우선)
 _spin_accum_deg   = 0.0
+_spin_start_time  = None
 _prev_heading     = None
 _target_pos       = None
 _move_start_time  = None
@@ -87,9 +94,10 @@ def notify_color_visible(x_mm=None, y_mm=None):
     위치를 함께 받으면 그 좌표를 '목표를 마지막으로 본 곳'으로 기억해두고,
     다음번 색을 놓쳐 탐색이 재개될 때 격자 중심(origin)으로 쓴다."""
     global _mode, _spin_accum_deg, _prev_heading, _target_pos, _move_start_time
-    global _origin, _wp_index
+    global _origin, _wp_index, _spin_start_time
     _mode            = 'SPIN'
     _spin_accum_deg  = 0.0
+    _spin_start_time = time.time()
     _prev_heading    = None
     _target_pos      = None
     _move_start_time = None
@@ -123,11 +131,12 @@ def _start_move(mode, pos, cur_x=None, cur_y=None):
 
 
 def _start_spin():
-    global _mode, _spin_accum_deg, _prev_heading, _target_pos
-    _mode           = 'SPIN'
-    _spin_accum_deg = 0.0
-    _prev_heading   = None
-    _target_pos     = None
+    global _mode, _spin_accum_deg, _prev_heading, _target_pos, _spin_start_time
+    _mode            = 'SPIN'
+    _spin_accum_deg  = 0.0
+    _spin_start_time = time.time()
+    _prev_heading    = None
+    _target_pos      = None
 
 
 def _next_wp(x_mm, y_mm):
@@ -211,8 +220,17 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None, pivot_ok=True):
             _spin_accum_deg += abs(_norm(heading_deg - _prev_heading))
         _prev_heading = heading_deg
 
-        if _spin_accum_deg < SPIN_TOTAL_DEG:
+        # 스핀 타임아웃: 근접 장애물에 둘러싸여 누적이 차지 않더라도 일정 시간
+        # 지나면 포기하고 다음 코너로 넘어가 한 자리에 묶이는 것을 막는다.
+        spin_timeout = (_spin_start_time is not None and
+                        time.time() - _spin_start_time > SPIN_TIMEOUT_SEC)
+
+        if _spin_accum_deg < SPIN_TOTAL_DEG and not spin_timeout:
             return ('SPIN', 0.0, 0.0, SPIN_W)
+        if DEBUG and spin_timeout and _spin_accum_deg < SPIN_TOTAL_DEG:
+            print(f"[SEARCH] 스핀 타임아웃({SPIN_TIMEOUT_SEC:.0f}s, "
+                  f"누적 {_spin_accum_deg:.0f}°/{SPIN_TOTAL_DEG:.0f}°) "
+                  f"→ 다음 코너로 강제 진행")
 
         cand_pt = _next_wp(x_mm, y_mm)
         _start_move('COVER', cand_pt)
