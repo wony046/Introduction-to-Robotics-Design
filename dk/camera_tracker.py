@@ -38,18 +38,25 @@ USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / Fals
 CLOSE_BEARING_SCALE = 0.8212    # ★ calibrate_bearing.py 로 구한 보정 배율 (1.0=보정 없음)
 CAM_BEARING_FLIP   = -1         # 부호 일치 여부 확인용. 라이다와 방향 반대면 +1로 변경
 
-# ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
-# 실내 조명 조건에서 반드시 튜닝 필요
-COLOR_RANGES = {
-    'RED': [
-        ((146, 100, 80), (179, 255, 255)),   # 실측값
-    ],
-    'YELLOW': [
-        ((18, 35, 186), (72, 177, 255)),   # 실측값
-    ],
-    'BLUE': [
-        ((79, 116, 114), (119, 162, 255)),   # 실측값
-    ],
+# ── LAB 색상 파라미터 (★ lab_tuner.py 와 동일 모델 / 색깔마다 개별 튜닝) ──
+# 검출 모델 (lab_tuner.py 의 detect 와 동일):
+#     proc = gray_world_wb(frame) if wb else frame   # 화이트밸런스 토글
+#     lab  = BGR→LAB(proc)
+#     dist = sqrt((A - a)^2 + (B - b)^2)
+#     mask = (dist < tol) AND (L > lmin)
+#
+#   a    : A 채널 기준값 a_ref (128↑ = 적색, 128↓ = 녹색)
+#   b    : B 채널 기준값 b_ref (128↑ = 황색, 128↓ = 청색)
+#   tol  : (a,b) 기준점으로부터 허용 거리(TOL) — 클수록 색 범위가 넓어짐
+#   lmin : L 채널 하한 (L_min, 이보다 어두우면 제외)
+#   wb   : 화이트밸런스(gray-world) 적용 여부 (1=on, 0=off)
+#
+# ※ lab_tuner.py 로 색깔별 값을 맞춘 뒤 그대로 옮겨 적으면 됨.
+#   (튜너의 a_ref→a, b_ref→b, TOL→tol, L_min→lmin, WB→wb)
+COLOR_LAB = {
+    'RED':    {'a': 182, 'b': 140, 'tol': 30, 'lmin':  28, 'wb': 0},
+    'YELLOW': {'a': 130, 'b': 165, 'tol': 18, 'lmin': 155, 'wb': 0},
+    'BLUE':   {'a': 136, 'b':  94, 'tol':  7, 'lmin':  18, 'wb': 0},
 }
 
 # ── 미션 순서 ────────────────────────────────────────────────────────
@@ -85,6 +92,43 @@ _seen_other          = {}      # 비목표 색 메모리: {'YELLOW': (bearing_de
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# LAB 전처리 / 마스킹 (lab_tuner.py 와 동일 모델)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def gray_world_wb(bgr):
+    """Gray-world 화이트밸런스 (lab_tuner.py 와 동일). 색 캐스트 보정."""
+    b, g, r = cv2.split(bgr.astype(np.float32))
+    mb, mg, mr = b.mean() + 1e-6, g.mean() + 1e-6, r.mean() + 1e-6
+    mgray = (mb + mg + mr) / 3.0
+    b *= mgray / mb
+    g *= mgray / mg
+    r *= mgray / mr
+    return cv2.merge([b, g, r]).clip(0, 255).astype(np.uint8)
+
+
+def _to_lab(frame, use_wb):
+    """BGR → LAB 변환. use_wb=True 면 gray-world WB 선적용."""
+    proc = gray_world_wb(frame) if use_wb else frame
+    return cv2.cvtColor(proc, cv2.COLOR_BGR2LAB)
+
+
+def _lab_mask(lab, color_name):
+    """이미 LAB로 변환된 영상(lab)에서 color_name 거리 마스크 생성.
+    dist = sqrt((A-a)^2 + (B-b)^2) < tol  AND  L > lmin."""
+    p = COLOR_LAB[color_name]
+    L, A, B = cv2.split(lab.astype(np.float32))
+    dist = np.sqrt((A - p['a']) ** 2 + (B - p['b']) ** 2)
+    return ((dist < p['tol']) & (L > p['lmin'])).astype(np.uint8) * 255
+
+
+def _color_lab(frame, color_name):
+    """frame을 해당 색의 wb 설정대로 LAB 변환 후 마스크까지 반환.
+    반환: (mask, lab)"""
+    lab  = _to_lab(frame, COLOR_LAB[color_name]['wb'] == 1)
+    return _lab_mask(lab, color_name), lab
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 내부 함수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -95,10 +139,7 @@ def _detect_color(frame, color_name):
       centroid=(cx,cy) 또는 None, area=float
       clipped_l/r: blob이 좌/우 프레임 경계에 닿으면 True
     """
-    hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-    for (lo, hi) in COLOR_RANGES[color_name]:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+    mask, _ = _color_lab(frame, color_name)
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
@@ -132,10 +173,7 @@ def _detect_candidate(frame, color_name):
     """완화된 면적 임계(CANDIDATE_AREA_MIN)로 후보 검출.
     확정 검출이 놓치는 원거리/약한 색지를 잡아 탐색 접근 방향을 제공.
     접근/도착 판정에는 쓰지 않는다."""
-    hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-    for (lo, hi) in COLOR_RANGES[color_name]:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+    mask, _ = _color_lab(frame, color_name)
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (3, 3))
     mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -185,14 +223,13 @@ def _get_roi_fill(frame, color_name, bottom_ratio=None):
     bottom_ratio 미지정 시 ARRIVE_ROI_BOTTOM 사용."""
     ratio     = bottom_ratio if bottom_ratio is not None else ARRIVE_ROI_BOTTOM
     roi_start = int(_EFF_H * (1.0 - ratio))
-    roi       = frame[roi_start:, :]
+    # WB는 전체 프레임 통계 기반이므로 전체 변환 후 ROI를 슬라이스 (튜너와 동일)
+    lab       = _to_lab(frame, COLOR_LAB[color_name]['wb'] == 1)
+    roi       = lab[roi_start:, :]
     roi_total = roi.shape[0] * roi.shape[1]
     if roi_total == 0:
         return 0.0
-    hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
-    for lo, hi in COLOR_RANGES[color_name]:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+    mask = _lab_mask(roi, color_name)
     return cv2.countNonZero(mask) / roi_total
 
 
