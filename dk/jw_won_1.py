@@ -71,6 +71,12 @@ STOP_FWD_MIN  = 100
 STOP_FWD_MAX  = 175
 STOP_HORIZ_TH = 105
 
+# 피벗(제자리 회전) 안전 반경: 어느 방향이든 이 거리 안에 장애물이 있으면
+# 제자리 회전을 포기하고 회피 주행으로 전환한다. 제자리 회전은 전진 성분이
+# 없어 옆/뒤 장애물에 긁혀 끼일 수 있으므로 360° 전 방향을 본다.
+# ROBOT_HALF_WIDTH(110) + 회전 시 모서리 스윙 + 여유 마진.
+PIVOT_CLEAR_MM        = 220   # mm
+
 # STOP 탈출: 360° 전체 스캔, ROBOT_HALF_WIDTH*2 + 양쪽 20mm 마진
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   # 260mm
 STOP_MAX_CYCLES       = 30                          # 연속 STOP 사이클 상한 (초과 시 강제 탈출)
@@ -321,6 +327,19 @@ def detect_stop_zone(scan_points):
         if not is_in_front_90(angle_norm): continue
         horiz, fwd = decompose(angle_norm, dist)
         if STOP_FWD_MIN <= fwd <= STOP_FWD_MAX and horiz < STOP_HORIZ_TH:
+            return True
+    return False
+
+
+def pivot_blocked(scan_points, clear_mm=PIVOT_CLEAR_MM):
+    """제자리 회전(피벗)을 하기에 위험한가?
+    방향 무관(360°)으로 clear_mm 안에 유효 장애물이 하나라도 있으면 True.
+    제자리 회전은 전진 성분이 없어 측면/후방 근접 장애물에 긁혀 끼이므로,
+    STOP존(정면 좁은 사각형)보다 넓게 전 방향을 본다."""
+    for angle_norm, dist in scan_points:
+        if dist < LIDAR_MIN_VALID:
+            continue
+        if dist < clear_mm:
             return True
     return False
 
@@ -1310,14 +1329,24 @@ def _motor_controller(arduino):
 
                 # ── 3b: 미감지 또는 오인 기각 → 탐색 플래너 ────────────────
                 if bearing is None or not verified:
+                    # 피벗 가능 여부를 먼저 판정해 플래너에 알린다. 근처에 장애물이
+                    # 있으면 이번 주기엔 제자리 회전 대신 회피를 하므로, 플래너가
+                    # 스핀 누적각을 올리지 않도록 pivot_ok=False를 넘긴다.
+                    _pivot_blocked = detect_stop_zone(pts) or pivot_blocked(pts)
                     mode, tb, v_cmd, w_cmd = search_planner.update(
                         arduino_x_mm, arduino_y_mm, arduino_heading_deg,
-                        camera_tracker, scan_points=pts)
+                        camera_tracker, scan_points=pts,
+                        pivot_ok=(not _pivot_blocked))
                     if mode == 'SPIN':
-                        # 제자리 회전 — 단, STOP zone이면 안전 우선 폴백
-                        if detect_stop_zone(pts):
+                        # 제자리 회전 — 단, 근처에 장애물이 있으면 회전을 멈추고
+                        # 회피를 우선한다. 제자리 회전은 전진 성분이 없어 측면/
+                        # 후방 근접 장애물에 긁혀 끼이므로, STOP존(정면 좁은 사각형)
+                        # 뿐 아니라 360° 근접(pivot_blocked)도 함께 본다.
+                        if _pivot_blocked:
                             v, w = find_vw_command(pts, arduino_heading_deg,
                                                    target_bearing=0.0)
+                            if DEBUG_DIR:
+                                print("[SEARCH] 피벗 보류 — 장애물 근접 → 회피 우선")
                         else:
                             v, w = v_cmd, w_cmd
                     else:
