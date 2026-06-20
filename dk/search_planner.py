@@ -53,12 +53,19 @@ SPIN_TIMEOUT_SEC  = 15.0
 # (원래 가상경계도 경기장 중심이 아니라 '현재 위치 기준 원'이었음 → 같은 취지)
 MAX_STEP_RADIUS_MM = 900.0
 
+# 라이다 시야 사양: ±이 각도까지만 본다. 그 너머(후방 90°)는 사각지대.
+# 사각지대로 위험 장애물이 미끄러져 들어가지 않게 스핀 회전 방향을 적응한다.
+LIDAR_FOV_HALF_DEG     = 135.0
+SPIN_DIR_THREAT_MM     = 600.0   # 이 거리 안의 점만 '위험'으로 보고 방향 결정
+SPIN_DIR_DEADZONE_DEG  = 5.0     # 가장 가까운 점이 거의 정면이면 방향 선택 무의미
+
 DEBUG             = 1
 
 # ── 내부 상태 ─────────────────────────────────────────────────────────
 _mode             = 'COVER'  # 'SPIN' | 'COVER' | 'CAND' | 'MEM'  (시작은 배회 우선)
 _spin_accum_deg   = 0.0
 _spin_start_time  = None
+_spin_dir         = None     # +1=CCW, -1=CW. None이면 다음 SPIN 진입 시 결정.
 _prev_heading     = None
 _target_pos       = None
 _move_start_time  = None
@@ -84,6 +91,37 @@ def _quincunx(ox, oy):
     return pts
 
 
+def _safe_spin_direction(scan_points):
+    """가장 가까운 위협 장애물의 방향을 보고 안전한 스핀 회전 부호를 반환.
+
+    라이다는 ±LIDAR_FOV_HALF_DEG(±135°)만 본다. 즉 후방 90°가 사각.
+    스핀을 시작할 때 시야 안의 가까운 장애물이 그 사각으로 미끄러져
+    들어가는 방향으로 돌면, 회전 중 그 장애물을 추적하지 못해 충돌 위험.
+
+    규칙: 가장 가까운 점(threat)의 베어링 부호와 같은 부호로 회전한다.
+      - threat이 좌측(+)  → 로봇이 좌측(CCW, w>0)으로 돌면, 그 점의
+        로봇기준 상대각이 감소(+→0)하여 정면으로 끌려옴 → 시야 유지.
+      - threat이 우측(-)  → CW(w<0)로 같은 효과.
+    위협 없음 또는 거의 정면이면 +1 (기본 CCW).
+
+    반환: +1.0 (CCW) 또는 -1.0 (CW).
+    """
+    if not scan_points:
+        return +1.0
+    nearest_a, nearest_d = None, float('inf')
+    for a, d in scan_points:
+        if d < 100.0 or d > SPIN_DIR_THREAT_MM:
+            continue
+        if abs(a) > LIDAR_FOV_HALF_DEG:
+            continue   # 사각 너머 데이터(있을 리 없지만) 안전장치
+        if d < nearest_d:
+            nearest_d = d
+            nearest_a = a
+    if nearest_a is None or abs(nearest_a) < SPIN_DIR_DEADZONE_DEG:
+        return +1.0
+    return +1.0 if nearest_a > 0 else -1.0
+
+
 def _polar_to_global(x, y, heading_deg, bearing_deg, dist_mm):
     g = math.radians(heading_deg + bearing_deg)
     return (x + dist_mm * math.sin(g), y + dist_mm * math.cos(g))
@@ -94,10 +132,11 @@ def notify_color_visible(x_mm=None, y_mm=None):
     위치를 함께 받으면 그 좌표를 '목표를 마지막으로 본 곳'으로 기억해두고,
     다음번 색을 놓쳐 탐색이 재개될 때 격자 중심(origin)으로 쓴다."""
     global _mode, _spin_accum_deg, _prev_heading, _target_pos, _move_start_time
-    global _origin, _wp_index, _spin_start_time
+    global _origin, _wp_index, _spin_start_time, _spin_dir
     _mode            = 'SPIN'
     _spin_accum_deg  = 0.0
     _spin_start_time = time.time()
+    _spin_dir        = None
     _prev_heading    = None
     _target_pos      = None
     _move_start_time = None
@@ -132,9 +171,11 @@ def _start_move(mode, pos, cur_x=None, cur_y=None):
 
 def _start_spin():
     global _mode, _spin_accum_deg, _prev_heading, _target_pos, _spin_start_time
+    global _spin_dir
     _mode            = 'SPIN'
     _spin_accum_deg  = 0.0
     _spin_start_time = time.time()
+    _spin_dir        = None    # 다음 update에서 scan_points 보고 결정
     _prev_heading    = None
     _target_pos      = None
 
@@ -212,6 +253,16 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None, pivot_ok=True):
 
     # SPIN: 제자리 회전
     if _mode == 'SPIN':
+        global _spin_dir
+        # 첫 사이클에서 라이다 보고 안전한 회전 방향 결정 (라이다 후방 사각
+        # 회피). 한 번 정한 방향은 이번 SPIN이 끝날 때까지 유지(진동 방지).
+        if _spin_dir is None:
+            _spin_dir = _safe_spin_direction(scan_points or [])
+            if DEBUG:
+                arrow = 'CCW(+)' if _spin_dir > 0 else 'CW(-)'
+                print(f"[SEARCH] 스핀 방향 결정: {arrow} "
+                      f"(라이다 FOV ±{LIDAR_FOV_HALF_DEG:.0f}° 안 위협 기준)")
+
         # pivot_ok=False면 이번 주기엔 장애물 회피로 제자리 회전을 못 했다는 뜻.
         # 회피 주행으로 생긴 헤딩 변화를 스핀 진행으로 오카운트하면 한 바퀴를
         # 다 돌기 전에 스캔을 끝낸 것으로 착각하므로, 그런 주기엔 누적하지 않고
@@ -226,7 +277,7 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None, pivot_ok=True):
                         time.time() - _spin_start_time > SPIN_TIMEOUT_SEC)
 
         if _spin_accum_deg < SPIN_TOTAL_DEG and not spin_timeout:
-            return ('SPIN', 0.0, 0.0, SPIN_W)
+            return ('SPIN', 0.0, 0.0, SPIN_W * _spin_dir)
         if DEBUG and spin_timeout and _spin_accum_deg < SPIN_TOTAL_DEG:
             print(f"[SEARCH] 스핀 타임아웃({SPIN_TIMEOUT_SEC:.0f}s, "
                   f"누적 {_spin_accum_deg:.0f}°/{SPIN_TOTAL_DEG:.0f}°) "
