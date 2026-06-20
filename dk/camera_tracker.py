@@ -36,7 +36,7 @@ CAM_TILT_DEG       = 34.5    # 역산값: actual=500mm, est=610mm, delta_v=0 →
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
 USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
 CLOSE_BEARING_SCALE = 0.8212    # ★ calibrate_bearing.py 로 구한 보정 배율 (1.0=보정 없음)
-CAM_BEARING_FLIP   = -1         # 부호 일치 여부 확인용. 라이다와 방향 반대면 +1로 변경
+CAM_BEARING_FLIP   = +1         # 부호 일치 여부 확인용. 라이다와 방향 반대면 +1로 변경
 
 # ── LAB 색상 파라미터 (★ lab_tuner.py 와 동일 모델 / 색깔마다 개별 튜닝) ──
 # 검출 모델 (lab_tuner.py 의 detect 와 동일):
