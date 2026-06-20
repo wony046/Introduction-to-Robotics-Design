@@ -21,7 +21,7 @@ search_planner.py — 색지 탐색 플래너
 
 import math
 import time
-import floor_verify   # 후보가 장애물(황토/남색)인지 라이다로 검증
+# LAB 색 검출(camera_tracker)로 색지/장애물을 분리하므로 floor_verify는 사용 안 함.
 
 # ── 측정 권장 파라미터 ─────────────────────────────────────────────────
 DETECT_RADIUS_MM  = 900.0   # 한 지점 스핀으로 확정 검출 가능한 신뢰 반경 (실측)
@@ -205,8 +205,9 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None, pivot_ok=True):
     """
     목표 색 미감지 상태에서 매 제어 주기 호출.
     camera: camera_tracker 모듈
-    scan_points: 라이다 스캔 [(angle, dist), ...] — 주어지면 후보를
-                 floor_verify로 검증해 장애물 오인 후보를 추종하지 않는다.
+    scan_points: 라이다 스캔 [(angle, dist), ...] — 스핀 안전 회전 방향
+                 (_safe_spin_direction)을 결정하는 데 사용. 색지 검증에는
+                 더 이상 쓰지 않는다 (LAB 검출이 황토/남색을 자체적으로 거름).
 
     반환: (mode, target_bearing_deg, v, w)
       mode='SPIN' → (v, w)를 그대로 모터에 (제자리 회전)
@@ -235,21 +236,17 @@ def update(x_mm, y_mm, heading_deg, camera, scan_points=None, pivot_ok=True):
                 print(f"[SEARCH] {color} 기억 좌표 직행 → "
                       f"({pos[0]:.0f}, {pos[1]:.0f})mm")
 
-    # (1) 후보 추종: 탐색 중 후보 포착 시 접근 — 단, 라이다 검증 통과한 후보만
+    # (1) 후보 추종: 탐색 중 후보 포착 시 접근.
+    # 이전엔 floor_verify(라이다 거리비교)로 황토/남색 장애물 오인 후보를 걸렀으나,
+    # 카메라가 LAB로 색지/장애물을 자체 분리하므로 후보를 그대로 신뢰한다.
     if _mode in ('SPIN', 'COVER'):
         cand = camera.get_candidate()
         if cand is not None:
             cb, cd = cand
-            cand_ok = True
-            if scan_points:
-                cand_ok = floor_verify.is_floor_paper(scan_points, cb, cd)
-                if not cand_ok and DEBUG:
-                    print(f"[SEARCH] 후보 기각(장애물 추정) b={cb:+.1f}° d={cd:.0f}mm")
-            if cand_ok:
-                pos = _polar_to_global(x_mm, y_mm, heading_deg, cb, cd)
-                _start_move('CAND', pos, x_mm, y_mm)
-                if DEBUG:
-                    print(f"[SEARCH] 후보 포착 b={cb:+.1f}° d={cd:.0f}mm → 접근")
+            pos = _polar_to_global(x_mm, y_mm, heading_deg, cb, cd)
+            _start_move('CAND', pos, x_mm, y_mm)
+            if DEBUG:
+                print(f"[SEARCH] 후보 포착 b={cb:+.1f}° d={cd:.0f}mm → 접근")
 
     # SPIN: 제자리 회전
     if _mode == 'SPIN':
