@@ -1025,7 +1025,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         # ② 목표 막힘 → 통과 갭 중 목표 최근접으로 우회 (gap-following)
         desired_heading      = chosen_gap['center_angle']
         prev_desired_heading = desired_heading
-        w = KP_GOAL * desired_heading
+        w = -KP_GOAL * desired_heading  # ★ LiDAR center_angle ↔ heading 반대 부호 → -KP (분기① 카메라 bearing과 다름)
         if DEBUG_GAP:
             print(f"  [GAP_FOLLOW] {len(front_gaps)} gap(s) → chosen={desired_heading:+.1f}° "
                   f"target={target_bearing:+.1f}° w={w:+.3f}")

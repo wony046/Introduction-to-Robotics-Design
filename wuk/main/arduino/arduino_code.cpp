@@ -39,7 +39,7 @@ volatile long encLeft  = 0;
 volatile long encRight = 0;
 long  prevL = 0, prevR = 0;
 float heading = 0.0f;
-float odom_x  = 0.0f;   // m 단위 (전방 +Y, 우측 +X)
+float odom_x  = 0.0f;   // m 단위 (전방 +Y, 좌측 +X)
 float odom_y  = 0.0f;
 
 const float WHEEL_RATIO = 0.00568f;
@@ -174,7 +174,7 @@ void updateOdometry() {
   prevL = safeL; prevR = safeR;
   float ds  = (dsL + dsR) * 0.5f;
   heading  += (dsR - dsL) / WHEEL_BASE;
-  odom_x   += ds * sinf(heading);
+  odom_x   += ds * sinf(heading); # 오도메트리 x 위치 (mm, 좌측 +)
   odom_y   += ds * cosf(heading);
 }
 
