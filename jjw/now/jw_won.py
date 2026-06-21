@@ -167,6 +167,8 @@ BOUNDARY_EXPAND_TRIGGER = 2        # 회: 이 횟수 이상 이탈→복귀 시 
 BOUNDARY_HYSTERESIS_MM  = 150.0    # mm: 경계 진입/이탈 히스테리시스 (진동 방지)
 BOUNDARY_BLEND_DIST     = 300.0    # mm: 경계 초과 후 인력 100%까지 도달하는 거리
 BOUNDARY_V_MIN          = 0.5      # 경계 완전 초과 시 v 감속 최소 비율
+BOUNDARY_ALIGN_ANGLE    = 120.0    # deg: 중심 방향이 이 각도 이상 벗어나면 v→0 (등진 채 전진=발산 방지)
+BOUNDARY_REAR_LATCH_DEG = 150.0    # deg: 중심이 이 각도 이상 후방이면 회전 방향 고정 (±180° 떨림 방지)
 
 # Mode 1 피버턴 파라미터
 PIVOT_W_SPEED      = 0.6    # rad/s: 탐색 피버턴 회전 속도
@@ -261,8 +263,10 @@ _last_pivot_y        = None   # mm: 마지막 피버턴 완료 위치 y
 
 # ── 가변 경계 상태 ────────────────────────────────────────────────────────────
 _current_boundary_radius = BOUNDARY_RADIUS   # mm: 현재 적용 경계 반경
-_boundary_exit_count     = 0                  # 경계 이탈→복귀 누적 횟수
-_boundary_was_outside    = False              # 히스테리시스: 현재 경계 외부 여부
+_boundary_exit_count     = 0                  # 경계 이탈→복귀 누적 횟수 (경계 확장용)
+_boundary_was_outside    = False              # 히스테리시스: 경계 확장 카운트용 외부 여부
+_boundary_pulling        = False              # 히스테리시스: 인력 활성 여부 (경계선 깜빡임 방지)
+_boundary_turn_sign      = 0.0                # 정후방 회전 방향 래치 (0=미설정, ±1=고정)
 
 # ── 루프 탈출 상태 ────────────────────────────────────────────────────────────
 _loop_cell          = None   # (cx, cy): 현재 추적 중인 셀
@@ -425,14 +429,25 @@ def _get_boundary_correction(center_x, center_y, radius):
     경계 초과:  blend=[0,1], v_scale=[BOUNDARY_V_MIN, 1.0]
     반환: (rel_bearing_deg, v_scale)
     """
+    global _boundary_pulling, _boundary_turn_sign
+
     dx   = center_x - arduino_x_mm
     dy   = center_y - arduino_y_mm
     dist = math.sqrt(dx**2 + dy**2)
 
-    if dist <= radius:
+    # 인력 히스테리시스: radius 넘으면 ON, radius-HYST 안으로 들어와야 OFF
+    #   → 경계선 근처에서 인력이 켜졌다 꺼졌다 하며 생기는 진동 방지
+    if _boundary_pulling:
+        if dist < radius - BOUNDARY_HYSTERESIS_MM:
+            _boundary_pulling = False
+    elif dist > radius:
+        _boundary_pulling = True
+
+    if not _boundary_pulling:
+        _boundary_turn_sign = 0.0
         return 0.0, 1.0
 
-    excess = dist - radius
+    excess = max(dist - radius, 0.0)
     blend  = min(excess / BOUNDARY_BLEND_DIST, 1.0)
 
     # ★ 부호 체계: 카메라 bearing(오른쪽=음수)과 일치시켜야 분기①(+KP_GOAL)이
@@ -440,12 +455,26 @@ def _get_boundary_correction(center_x, center_y, radius):
     bearing_to_center = math.degrees(math.atan2(dx, dy))
     rel_bearing       = normalize_angle(arduino_heading_deg - bearing_to_center)
 
-    v_scale = BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend)
+    # 정후방 떨림 방지: 중심이 후방(±180° 부근)이면 회전 방향을 한쪽으로 고정.
+    #   normalize_angle이 +179/-179를 오가며 w 부호가 반전하는 좌우 떨림 차단.
+    if abs(rel_bearing) > BOUNDARY_REAR_LATCH_DEG:
+        if _boundary_turn_sign == 0.0:
+            _boundary_turn_sign = 1.0 if rel_bearing >= 0 else -1.0
+        rel_bearing = _boundary_turn_sign * abs(rel_bearing)
+    else:
+        _boundary_turn_sign = 0.0
+
+    # 거리 기반 감속 × 각도 기반 감속:
+    #   중심을 등지면(각도>ALIGN) v→0 제자리 회전 → 등진 채 전진(발산) 방지
+    v_dist  = BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend)
+    v_align = max(0.0, 1.0 - abs(rel_bearing) / BOUNDARY_ALIGN_ANGLE)
+    v_scale = v_dist * v_align
 
     if DEBUG_BOUNDARY:
         print(f"  [BOUNDARY] dist={dist:.0f}mm radius={radius:.0f}mm "
               f"excess={excess:.0f}mm blend={blend:.2f} "
-              f"target_b={rel_bearing:+.1f}° v_scale={v_scale:.2f}")
+              f"target_b={rel_bearing:+.1f}° v_scale={v_scale:.2f} "
+              f"pull={_boundary_pulling} latch={_boundary_turn_sign:+.0f}")
 
     return rel_bearing, v_scale
 
@@ -1575,6 +1604,7 @@ def _motor_controller(arduino):
            _pivot_active, _pivot_prev_hdg, _pivot_total_rotated, _pivot_direction, _last_pivot_time, \
            _last_pivot_x, _last_pivot_y, \
            _current_boundary_radius, _boundary_exit_count, _boundary_was_outside, \
+           _boundary_pulling, _boundary_turn_sign, \
            _loop_cell, _loop_count, _loop_cell_time, \
            _loop_escape_until, _loop_escape_w, \
            _loop_escape_count, _loop_last_escape_x, _loop_last_escape_y, _loop_flip
@@ -1683,6 +1713,8 @@ def _motor_controller(arduino):
                     _last_pivot_y            = arduino_y_mm
                     _boundary_exit_count     = 0
                     _boundary_was_outside    = False
+                    _boundary_pulling        = False
+                    _boundary_turn_sign      = 0.0
                     _current_boundary_radius = BOUNDARY_RADIUS
                     _loop_reset()                            # 루프 추적 초기화
                     print(f"[MODE1] 탐색 시작: 도착=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
@@ -1698,6 +1730,8 @@ def _motor_controller(arduino):
                     _pivot_active            = False
                     _boundary_exit_count     = 0
                     _boundary_was_outside    = False
+                    _boundary_pulling        = False
+                    _boundary_turn_sign      = 0.0
                     _current_boundary_radius = BOUNDARY_RADIUS
                     v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=bearing)
 
