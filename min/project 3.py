@@ -1573,14 +1573,6 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
 
     # ── Phase 2: 피봇 중 ──────────────────────────────────────────────────────
     if stop_phase == 2:
-        # STOP 존 해제가 헤딩 수렴보다 우선 — 방향이 조금 어긋나도 일단 주행 재개
-        if not detect_stop_zone(scan_points):
-            if DEBUG_STOP:
-                err = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
-                print(f"  [STOP] zone cleared (heading err={err:.1f}°) -> layered")
-            _stop_reset()
-            return find_vw_layered(scan_points, heading_deg, target_bearing)
-
         stop_cycle_count += 1
         if stop_cycle_count >= STOP_MAX_CYCLES:
             if DEBUG_STOP:
@@ -1588,13 +1580,23 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
             _stop_reset()
             return find_vw_layered(scan_points, heading_deg, target_bearing)
 
-        # ★ 제자리 회전 전 장애물 300mm 이격 확보 — 미달 시 직선 후진 (몸체 스윕 충돌 방지)
+        # ★ 이격 우선: 전방 장애물 <300mm & 후방 여유면, STOP존 해제 여부와 무관하게
+        #   먼저 직선 후진해 300mm까지 벌린다. (STOP 경계 175mm에서 후진↔layered 가 토글되어
+        #   w 부호가 +/- 로 진동하던 문제 방지 — 300mm 확보 전엔 후진만 한다)
         retreat = _pivot_clearance_retreat(scan_points)
         if retreat is not None:
             if DEBUG_STOP_PIVOT:
                 print(f"  [STOP] 이격 확보 후진 v={retreat[0]:+.2f} "
                       f"(전방 장애물 <{PIVOT_CLEAR_MM:.0f}mm)")
             return retreat
+
+        # 전방 300mm 확보됨 → STOP 존 해제 시 layered 복귀
+        if not detect_stop_zone(scan_points):
+            if DEBUG_STOP:
+                err = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
+                print(f"  [STOP] zone cleared (heading err={err:.1f}°) -> layered")
+            _stop_reset()
+            return find_vw_layered(scan_points, heading_deg, target_bearing)
 
         err   = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
         scale = min(1.0, err / STOP_PIVOT_SLOW_DEG)
@@ -1825,6 +1827,9 @@ def _motor_controller(arduino):
                     # 사각형 이탈 방지 (소프트 가드 + 하드 클램프, STOP존 시 해제)
                     v, w = _search_apply_containment(v, w, pts)
 
+            if v < 0.0:        # 이격 확보 후진은 직진 후진 — 잔여 회전(스무딩 residual) 제거로 진동 방지
+                w = 0.0
+                prev_w = 0.0
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
             prev_w = w
             cmd = f"{v:.2f} {w:.2f}\n"
