@@ -1919,18 +1919,20 @@ def _motor_controller(arduino):
                         # 인력 ON/OFF·갭 우회는 find_vw_layered 분기가 처리(충돌 X).
                         dist_to_tgt = math.hypot(cx - arduino_x_mm, cy - arduino_y_mm)
                         if dist_to_tgt < MODE2_NEAR_TARGET_MM:
-                            # 목표 매우 근접 → 베어링 요동(제자리 회전) 방지.
-                            # 직진+회피로 두고 타임아웃→Mode1 피버턴이 재탐색 담당.
-                            target_tb = 0.0
+                            # 추정 위치 도달 → 정지.
+                            # (전속 직진으로 추정 위치를 '관통'하고, 통과 후 추정 위치가
+                            #  뒤로 가며 _get_target_bearing이 ±180° 부호 진동 → 좌우로 떨며
+                            #  전진해 경계를 탈출하던 문제 차단.)
+                            # 재탐색은 타임아웃→Mode1 피버턴이 담당.
+                            v, w = 0.0, 0.0
                         else:
                             target_tb = _get_target_bearing(cx, cy)
-
-                        # 경계는 방향이 아닌 감속 leash로만 사용 (목표 이탈 시 천천히)
-                        _, v_scale = _get_boundary_correction(
-                            cx, cy, _current_boundary_radius)
-                        v, w = find_vw_command(
-                            pts, arduino_heading_deg, target_bearing=target_tb)
-                        v *= v_scale
+                            # 경계는 방향이 아닌 감속 leash로만 사용 (목표 이탈 시 천천히)
+                            _, v_scale = _get_boundary_correction(
+                                cx, cy, _current_boundary_radius)
+                            v, w = find_vw_command(
+                                pts, arduino_heading_deg, target_bearing=target_tb)
+                            v *= v_scale
                     else:
                         # 첫 번째 색지 탐색 전 (추정 위치 없음) → 일반 장애물 회피
                         v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=0.0)
