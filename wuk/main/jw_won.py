@@ -118,10 +118,10 @@ SEND_INTERVAL  = 0.1
 # 측면 반발력 파라미터 (horiz 190mm × fwd 160mm 감지 구간)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 SIDE_SAFE_MARGIN  = 300   # mm: 로봇 측면 안전 마진 (side_th = 110+190 = 300mm)
-SIDE_FWD_LEAD     = 90    # mm: 라이다 기준 전방 여유 (진입 예측)
+SIDE_FWD_LEAD     = 50    # mm: 라이다 기준 전방 여유 (진입 예측)
 SIDE_FWD_REAR     = 90    # mm: 라이다 기준 후방 깊이 (로봇 몸체)
-SIDE_REPULSE_GAIN = 1.25   # rad/s: 반발력 최대 w 기여
-SIDE_EXP_K        = 2.0   # 지수 계수: 클수록 근접 시 반발력이 급격히 증가
+SIDE_REPULSE_GAIN = 0.8   # rad/s: 반발력 최대 w 기여
+SIDE_EXP_K        = 1.2   # 지수 계수: 클수록 근접 시 반발력이 급격히 증가
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 측방 방향 레이어 (±15°~±75°, 600mm)
@@ -181,11 +181,15 @@ _close_target_x    = None   # 색지 추정 x 좌표 (mm)
 _close_target_y    = None   # 색지 추정 y 좌표 (mm)
 _close_initial_dist = None  # CLOSE 진입 시 초기 거리 (진행률 계산용)
 _close_observe_start = None # CLOSE 정지 관측 시작 시각
+_close_pivot_done    = False # 색지 도달 후 360° 피봇 완료 여부
+_close_pivot_accum   = 0.0   # 피봇 누적 회전량 (deg)
+_close_pivot_prev_hdg = None # 피봇 델타 계산용 직전 헤딩
 KP_CLOSE_HDG      = 0.1  # 헤딩 오차(deg) → w 게인  (포화: ±° → MAX_W)
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 CLOSE_OBSERVE_SEC = 1.0   # CLOSE 진입 후 정지 관측 시간 (sec)
 CLOSE_STANDOFF_MM = 100   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
+CLOSE_PIVOT_W     = 1.0   # rad/s: 색지 도달 후 360° 피봇 회전 속도 (부호=회전 방향)
 
 # ── 가상 경계 (색 미감지 시 활성화) ──────────────────────────────────────────
 # 색 미감지로 전환되는 순간 로봇의 현재 위치를 중심으로 반경 BOUNDARY_RADIUS mm
@@ -1355,6 +1359,7 @@ def _motor_controller(arduino):
     """모터 제어 전용 스레드.
     SEND_INTERVAL마다 독립적으로 명령 송신 — 라이다 지연과 무관."""
     global prev_w, _close_target_x, _close_target_y, _close_initial_dist, _close_observe_start
+    global _close_pivot_done, _close_pivot_accum, _close_pivot_prev_hdg
     global _boundary_center_x, _boundary_center_y
     last_cmd_str = ""
     while not _shutdown.is_set():
@@ -1367,6 +1372,9 @@ def _motor_controller(arduino):
                 v, w = 0.0, 0.0
                 prev_w = 0.0
                 _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
+                _close_pivot_done = False
+                _close_pivot_accum = 0.0
+                _close_pivot_prev_hdg = None
 
             # ── 상태 2: CLOSE → 정지 관측 후 오도메트리 위치 제어 ──────────
             # _close_target_x가 이미 세팅돼 있으면 카메라 미감지 시에도 CLOSE 유지
@@ -1399,13 +1407,41 @@ def _motor_controller(arduino):
                     _close_initial_dist = max(dist_err, 1.0)  # 0 나눔 방지
 
                 if dist_err < CLOSE_ARRIVE_MM:
-                    # 추정 좌표 도달 → 색지 위에 바퀴가 들어온 것으로 판정, 정지
-                    # _close_target_x 유지: 다음 사이클도 재계산 없이 dist_err < threshold → 정지 유지
-                    v, w = 0.0, 0.0
-                    prev_w = 0.0
-                    camera_tracker.signal_arrival()   # 카메라 peaked→drop이 막혀도 미션 진행
-                    if DEBUG_CLOSE_DONE:
-                        print(f"[CLOSE] 도달 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) → 정지")
+                    # 추정 좌표 도달 → 색지 위에 바퀴가 들어온 것으로 판정
+                    # _close_target_x 유지: 다음 사이클도 재계산 없이 dist_err < threshold → 이 분기 유지
+                    if not _close_pivot_done:
+                        # ── 색지 도달 1회 360° 피봇 ────────────────────────────
+                        # 측정 헤딩 변화량을 누적해 360° 회전 완료까지 제자리 회전.
+                        # signal_arrival()은 피봇 완료 후 호출 — 도중 호출 시 카메라가
+                        # DWELL/DONE 전이 → State 1이 피봇을 끊어버림.
+                        if _close_pivot_prev_hdg is None:
+                            _close_pivot_prev_hdg = arduino_heading_deg
+                            _close_pivot_accum    = 0.0
+                            print(f"[CLOSE] 도달 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) "
+                                  f"→ 360° 피봇 시작")
+                        _close_pivot_accum   += abs(normalize_angle(
+                            arduino_heading_deg - _close_pivot_prev_hdg))
+                        _close_pivot_prev_hdg = arduino_heading_deg
+
+                        if _close_pivot_accum < 360.0:
+                            v, w   = 0.0, CLOSE_PIVOT_W   # 한 방향 제자리 회전
+                            prev_w = w                    # CLOSE 모드 내 스무딩 관성 제거
+                            if DEBUG_CLOSE_DONE:
+                                print(f"[CLOSE] 피봇 중 ... {_close_pivot_accum:.0f}/360°")
+                        else:
+                            _close_pivot_done = True
+                            v, w   = 0.0, 0.0
+                            prev_w = 0.0
+                            camera_tracker.signal_arrival()  # 카메라 peaked→drop이 막혀도 미션 진행
+                            if DEBUG_CLOSE_DONE:
+                                print(f"[CLOSE] 360° 피봇 완료 → 정지")
+                    else:
+                        # 피봇 완료 후: 정지 유지
+                        v, w = 0.0, 0.0
+                        prev_w = 0.0
+                        camera_tracker.signal_arrival()   # 카메라 peaked→drop이 막혀도 미션 진행
+                        if DEBUG_CLOSE_DONE:
+                            print(f"[CLOSE] 도달 유지 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) → 정지")
                 else:
                     target_hdg = math.degrees(math.atan2(ex, ey))
                     hdg_err    = normalize_angle(target_hdg - arduino_heading_deg)
@@ -1441,6 +1477,9 @@ def _motor_controller(arduino):
                           f"is_done={camera_tracker.is_done()}  "
                           f"is_dwelling={camera_tracker.is_dwelling()}")
                 _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
+                _close_pivot_done = False
+                _close_pivot_accum = 0.0
+                _close_pivot_prev_hdg = None
                 bearing = camera_tracker.get_bearing()
                 if bearing is not None:
                     # 색 감지 중: 경계 중심 리셋 → 다음 소실 시 현재 위치가 새 기준

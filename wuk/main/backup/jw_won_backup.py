@@ -168,6 +168,7 @@ DEBUG_CLOSE_HDG    = 0   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hd
 DEBUG_CLOSE_DONE   = 0   # [CLOSE] 도달 판정
 DEBUG_CLOSE_REMAIN = 0   # [CLOSE] 남은 거리 / 진행률 (매 사이클)
 DEBUG_SEND        = 0   # [SEND] 모터 명령 전송
+DEBUG_BOUNDARY    = 0   # [BOUNDARY] 가상 경계 초과 시
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
@@ -185,6 +186,16 @@ CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 CLOSE_OBSERVE_SEC = 1.0   # CLOSE 진입 후 정지 관측 시간 (sec)
 CLOSE_STANDOFF_MM = 100   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
+
+# ── 가상 경계 (색 미감지 시 활성화) ──────────────────────────────────────────
+# 색 미감지로 전환되는 순간 로봇의 현재 위치를 중심으로 반경 BOUNDARY_RADIUS mm
+# 가상 원을 생성. 원을 벗어날수록 중심 방향 인력이 블렌딩되어 적용된다.
+BOUNDARY_RADIUS     = 1500.0  # mm: 가상 경계 반경
+BOUNDARY_BLEND_DIST = 300.0   # mm: 경계 초과 후 인력 100%까지 도달하는 거리
+BOUNDARY_V_MIN      = 0.5     # 경계 완전 초과 시 v 감속 최소 비율 (원래 v의 50%)
+_boundary_center_x  = None    # mm: 경계 원 중심 x (색 미감지 시 최초 1회 설정)
+_boundary_center_y  = None    # mm: 경계 원 중심 y
+
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터
@@ -291,6 +302,61 @@ def _compute_close_target():
               f"dist={dist_mm:.0f}→{target_dist:.0f}mm(standoff {CLOSE_STANDOFF_MM})  "
               f"global_bearing={bearing_global_deg:.1f}°")
     return x_t, y_t
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 가상 경계 함수
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _set_boundary_center():
+    """색 미감지로 전환 시 최초 1회 현재 위치를 경계 원 중심으로 설정.
+    이미 설정된 경우 무시 (미션 전체에 걸쳐 중심은 고정)."""
+    global _boundary_center_x, _boundary_center_y
+    if _boundary_center_x is None:
+        _boundary_center_x = arduino_x_mm
+        _boundary_center_y = arduino_y_mm
+        print(f"[BOUNDARY] 중심 설정: ({arduino_x_mm:.0f}, {arduino_y_mm:.0f})mm  "
+              f"반경={BOUNDARY_RADIUS:.0f}mm")
+
+
+def _get_boundary_correction():
+    """경계 초과 시 중심 방향 상대 베어링과 v 감속 비율을 반환.
+
+    w를 직접 덮어쓰지 않고 중심 방향을 target_bearing 으로 find_vw_command() 에
+    전달 → 기존 갭 추종·레이어 회피가 장애물을 우회하면서 중심으로 복귀.
+
+    경계 내부:  rel_bearing=0.0, v_scale=1.0  (변화 없음)
+    경계 초과:
+        excess = dist - BOUNDARY_RADIUS
+        blend  = min(excess / BOUNDARY_BLEND_DIST, 1.0)   [0.0 ~ 1.0]
+        rel_bearing = 중심 방향 로봇 상대 베어링 (deg)
+        v_scale = BOUNDARY_V_MIN + (1 - BOUNDARY_V_MIN) * (1 - blend)
+    반환: (rel_bearing_deg, v_scale)"""
+    if _boundary_center_x is None:
+        return 0.0, 1.0
+
+    dx   = _boundary_center_x - arduino_x_mm
+    dy   = _boundary_center_y - arduino_y_mm
+    dist = math.sqrt(dx**2 + dy**2)
+
+    if dist <= BOUNDARY_RADIUS:
+        return 0.0, 1.0
+
+    excess = dist - BOUNDARY_RADIUS
+    blend  = min(excess / BOUNDARY_BLEND_DIST, 1.0)
+
+    # 중심 방향 글로벌 베어링 → 로봇 프레임 상대 베어링
+    bearing_to_center = math.degrees(math.atan2(dx, dy))
+    rel_bearing       = normalize_angle(bearing_to_center - arduino_heading_deg)
+
+    # v 감속 비율 (w는 장애물 회피 시스템이 담당)
+    v_scale = BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend)
+
+    if DEBUG_BOUNDARY:
+        print(f"  [BOUNDARY] dist={dist:.0f}mm excess={excess:.0f}mm "
+              f"blend={blend:.2f} target_b={rel_bearing:+.1f}° v_scale={v_scale:.2f}")
+
+    return rel_bearing, v_scale
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1289,6 +1355,7 @@ def _motor_controller(arduino):
     """모터 제어 전용 스레드.
     SEND_INTERVAL마다 독립적으로 명령 송신 — 라이다 지연과 무관."""
     global prev_w, _close_target_x, _close_target_y, _close_initial_dist, _close_observe_start
+    global _boundary_center_x, _boundary_center_y
     last_cmd_str = ""
     while not _shutdown.is_set():
         read_arduino(arduino)
@@ -1376,11 +1443,17 @@ def _motor_controller(arduino):
                 _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
                 bearing = camera_tracker.get_bearing()
                 if bearing is not None:
-                    # 색 감지 중: 카메라 bearing 방향으로 주행
+                    # 색 감지 중: 경계 중심 리셋 → 다음 소실 시 현재 위치가 새 기준
+                    _boundary_center_x = None
+                    _boundary_center_y = None
                     v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=bearing)
                 else:
-                    # 색 미감지: 정면(0°) 기준 일반 장애물 회피
-                    v, w = find_vw_command(pts, arduino_heading_deg)
+                    # 색 미감지: 경계 중심 방향을 target_bearing으로 전달
+                    # → 1.5m(BOUNDARY_RADIUS) 초과 시 중심 방향 인력 + v 감속
+                    _set_boundary_center()
+                    boundary_tb, v_scale = _get_boundary_correction()
+                    v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=boundary_tb)
+                    v *= v_scale
 
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
             prev_w = w
