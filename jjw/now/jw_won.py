@@ -183,6 +183,7 @@ MODE2_TIMEOUT_SEC  = 60.0   # sec: Mode2에서 이 시간 초과 시 Mode1으로
 #   · 클리어런스 부족 (드묾: 좁은 곳)  → 편향 회피로 자리 이탈 (STOP은 find_vw가 처리)
 #   · 같은 자리에서 LOOP_REFLIP_TRIG회 이상 재탈출 → 탈출 방향 좌우 교번
 #   · 다른 위치로 이동 성공 시 자동 리셋
+LOOP_ESCAPE_ENABLED = False  # ★ 루프 탈출 메커니즘 on/off (False=비활성, 재피버턴·경계만 사용)
 LOOP_CELL_MM      = 400.0   # mm: 위치 양자화 셀 크기 (2m 공간 → 약 5×5칸)
 LOOP_REVISIT_TRIG = 4       # 회: 같은 셀 재진입 누적 이 횟수 → 루프로 판정
 LOOP_ESCAPE_SEC   = 1.5     # sec: 탈출 강제 회전 지속 시간 (트인 곳이라 짧게)
@@ -498,6 +499,9 @@ def _loop_check_and_escape(pts):
     global _loop_cell, _loop_count, _loop_cell_time, \
            _loop_escape_until, _loop_escape_w, \
            _loop_escape_count, _loop_last_escape_x, _loop_last_escape_y, _loop_flip
+
+    if not LOOP_ESCAPE_ENABLED:
+        return None   # 비활성: 평소 로직(재피버턴·경계 복귀)만 진행
 
     now = time.time()
 
