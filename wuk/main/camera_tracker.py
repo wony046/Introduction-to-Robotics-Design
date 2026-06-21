@@ -34,9 +34,9 @@ CAM_HEIGHT_MM      = 590.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm
 CAM_TILT_DEG       = 41.8    # 848×480 거리검증 보정값 (다점 실측 편향 보정, 40.4→41.8). 수평=0°, 아래로+ (4:3: 34.5)
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
 USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
-CLOSE_BEARING_SCALE = 0.8212    # ★ calibrate_bearing.py 로 구한 보정 배율 (1.0=보정 없음)
-                                #   [16:9 변경] CLOSE forward항이 _EFF_H(640→848) 정규화 → 변동.
-                                #   ▶ calibrate_bearing.py 재실행으로 재산출 필요.
+CLOSE_BEARING_SCALE = 0.7913    # ★ 848×480 calibrate_bearing.py 재측정 (RMSE 2.6°). 기존 4:3: 0.8212
+                                #   주의: 보정도구는 X=우측+ 규약이라 부호가 -0.7913로 출력되지만,
+                                #   시스템 bearing은 우측=음수(SEEK와 동일)이므로 크기만 取해 +로 적용.
 
 # ── LAB 색상 범위 (OpenCV LAB: L[0-255], A[0-255 / 128=중립], B[0-255 / 128=중립]) ──
 # CLAHE 전처리 후 적용. REF_AB ± TOL, L >= L_MIN 기반 실측값
