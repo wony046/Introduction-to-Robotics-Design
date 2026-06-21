@@ -7,62 +7,56 @@ import numpy as np
 # ── 카메라 설정 ─────────────────────────────────────────────────────
 CAMERA_INDEX      = 0         
 FRAME_W           = 640
-FRAME_H           = 480       # ★ 원래 해상도로 완벽 복구
+FRAME_H           = 480       
 HFOV_DEG          = 38.6      
 
-# 카메라가 90° 회전 마운트된 경우 설정
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
 
-# 회전 후 실효 해상도
 if FRAME_ROTATE in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
-    _EFF_W, _EFF_H = FRAME_H, FRAME_W  # 회전 후: 480 x 640
+    _EFF_W, _EFF_H = FRAME_H, FRAME_W
 else:
     _EFF_W, _EFF_H = FRAME_W, FRAME_H
 
-# ── 도착 판정 ────────────────────────────────────────────────────────
+# ── 도착 판정 및 제어 파라미터 ───────────────────────────────────────
 ARRIVE_HOLD_SEC   = 1.2       
 ARRIVE_ROI_BOTTOM = 0.1       
 ARRIVE_ROI_PEAK   = 0.7       
 ARRIVE_ROI_DROP   = 0.5       
 USE_ROI_ARRIVE    = 0         
 
-# ── 근접 접근 제어 & 캘리브레이션 ──────────────────────────────────────
 CLOSE_ENTER_MM     = 450.0    
 CAM_HEIGHT_MM      = 590.0    
 CAM_TILT_DEG       = 40.4     
 CAM_POLAR_EPSILON  = 0.05     
 USE_CLIPPING_GUARD = False    
 CLOSE_BEARING_SCALE = 0.8212  
+STOP_EARLY_MM      = 50.0     
 
-STOP_EARLY_MM      = 50.0     # ★ 제동 관성 밀림 보상 유지
-
-# ── LAB 색상 범위 (기준값 기반 자동 계산 유지) ────────────────────────
+# ── ★ 새로 전달받은 LAB 색상 범위 자동 계산 ────────────────────────
 REF_AB = {
     'RED':    (180, 160),
-    'YELLOW': (129, 170),
-    'BLUE':   (125,  72),
+    'YELLOW': (102, 160),
+    'BLUE':   (111,  80),
 }
-TOL   = {'RED': 35, 'YELLOW': 19, 'BLUE': 31}
-L_MIN = {'RED': 30, 'YELLOW': 25, 'BLUE': 30}
+TOL   = {'RED': 35, 'YELLOW': 29, 'BLUE': 35}
+L_MIN = 30  # 모든 색상에 공통으로 적용되는 최소 밝기
 
 COLOR_RANGES = {}
 for color in ['RED', 'YELLOW', 'BLUE']:
     a_ref, b_ref = REF_AB[color]
     t = TOL[color]
-    l_min = L_MIN[color]
-    lower = (l_min, max(0, a_ref - t), max(0, b_ref - t))
+    # L_MIN은 단일 정수값(30)을 그대로 사용합니다.
+    lower = (L_MIN, max(0, a_ref - t), max(0, b_ref - t))
     upper = (255,   min(255, a_ref + t), min(255, b_ref + t))
     COLOR_RANGES[color] = [(lower, upper)]
 
 _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
 
-# ── 디버그 ───────────────────────────────────────────────────────────
-DEBUG_CAMERA  = 0     
 SHOW_FRAME    = 0     
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 공유 상태
+# 전역 상태 변수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _lock                = threading.Lock()
 _target_bearing      = None    
@@ -78,10 +72,10 @@ _close               = False
 _last_stable_bearing = 0.0     
 _last_close_bearing  = 0.0     
 _last_cy             = None    
-_mission_changed     = False   # ★ 나선 배회용 리셋 신호 유지
+_mission_changed     = False   
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 내부 함수 (동적 f_px 계산 원복)
+# 내부 함수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _get_f_px():
     return (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
@@ -137,8 +131,7 @@ def _get_roi_fill(frame, color_name, bottom_ratio=None):
     roi_start = int(_EFF_H * (1.0 - ratio))
     roi       = frame[roi_start:, :]
     roi_total = roi.shape[0] * roi.shape[1]
-    if roi_total == 0:
-        return 0.0
+    if roi_total == 0: return 0.0
     lab  = _to_lab(roi)
     mask = np.zeros(lab.shape[:2], dtype=np.uint8)
     for lo, hi in COLOR_RANGES[color_name]:
@@ -146,7 +139,7 @@ def _get_roi_fill(frame, color_name, bottom_ratio=None):
     return cv2.countNonZero(mask) / roi_total
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 카메라 스레드 루프
+# 카메라 메인 루프
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _camera_loop():
     global _target_bearing, _color_detected
@@ -221,8 +214,6 @@ def _camera_loop():
 
         if USE_ROI_ARRIVE:
             if roi_fill >= ARRIVE_ROI_PEAK:
-                if not _roi_peaked and DEBUG_CAMERA:
-                    print(f"[CAMERA] {target_color} ROI peak! fill={roi_fill:.2f}")
                 _roi_peaked = True
             arrived = (roi_fill >= ARRIVE_ROI_PEAK
                        or (_roi_peaked and roi_fill < ARRIVE_ROI_DROP)
@@ -242,7 +233,7 @@ def _camera_loop():
 
                 elapsed = time.time() - _dwell_start
                 if elapsed >= ARRIVE_HOLD_SEC:
-                    print(f"[CAMERA] {target_color} 완료! → ", end='')
+                    print(f"\n[CAMERA] ★★★ {target_color} 미션 도착 완료! ★★★")
                     _mission_idx         += 1
                     _mission_changed      = True
                     _dwell_start          = None
@@ -253,9 +244,9 @@ def _camera_loop():
                     _arrival_signal.clear()
                     if _mission_idx >= len(MISSION_ORDER):
                         _done = True
-                        print("DONE (완주)")
+                        print("[CAMERA] DONE (모든 미션 완주)\n")
                     else:
-                        print(f"{MISSION_ORDER[_mission_idx]} 탐색 시작")
+                        print(f"[CAMERA] 다음 타겟: {MISSION_ORDER[_mission_idx]} 탐색 시작\n")
             else:
                 _dwell_start = None
                 _dwelling    = False
@@ -265,17 +256,12 @@ def _camera_loop():
             _disp_done    = _done
 
         if SHOW_FRAME:
-            _disp_color = (MISSION_ORDER[_disp_idx]
-                           if not _disp_done and _disp_idx < len(MISSION_ORDER) else 'DONE')
+            _disp_color = (MISSION_ORDER[_disp_idx] if not _disp_done and _disp_idx < len(MISSION_ORDER) else 'DONE')
             display = frame.copy()
             cv2.line(display, (_EFF_W // 2, 0), (_EFF_W // 2, _EFF_H), (180, 180, 180), 1)
             if centroid is not None:
                 cv2.circle(display, centroid, 14, (0, 255, 0),  3)
                 cv2.circle(display, centroid,  3, (0, 255, 0), -1)
-            bearing_str = f"{_disp_bearing:+.1f}" if _disp_bearing is not None else "None"
-            cv2.putText(display, f"Target:  {_disp_color}",      (10,  35), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (  0, 255, 255), 2)
-            cv2.putText(display, f"Bearing: {bearing_str} deg",  (10,  75), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (  0, 255,   0), 2)
-            cv2.putText(display, f"Area:    {area:.0f} px2",     (10, 115), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 255,   0), 2)
             cv2.imshow('camera_tracker', display)
             if cv2.waitKey(1) & 0xFF == ord('q'):
                 _shutdown.set()
@@ -283,8 +269,7 @@ def _camera_loop():
         time.sleep(0.03)
 
     cap.release()
-    if SHOW_FRAME:
-        cv2.destroyAllWindows()
+    if SHOW_FRAME: cv2.destroyAllWindows()
     print("[CAMERA] 스레드 종료")
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -318,15 +303,10 @@ def get_last_close_bearing():
 def get_estimated_distance_mm():
     with _lock:
         cy = _last_cy
-    if cy is None:
-        return 500.0
-
+    if cy is None: return 500.0
     delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, _get_f_px()))
     depression = CAM_TILT_DEG + delta_v   
-
-    if depression <= 1.0:
-        return 5000.0   
-
+    if depression <= 1.0: return 5000.0   
     raw_dist = CAM_HEIGHT_MM / math.tan(math.radians(depression))
     return max(raw_dist - STOP_EARLY_MM, 50.0)
 
