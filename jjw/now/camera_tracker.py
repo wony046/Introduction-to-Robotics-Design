@@ -40,17 +40,24 @@ CLOSE_BEARING_SCALE = 0.7913    # ★ 848×480 calibrate_bearing.py 재측정 (R
 
 # ── LAB 색상 범위 (OpenCV LAB: L[0-255], A[0-255 / 128=중립], B[0-255 / 128=중립]) ──
 # CLAHE 전처리 후 적용. REF_AB ± TOL, L >= L_MIN 기반 실측값
-# REF_AB = {'RED':(180,160), 'YELLOW':(102,160), 'BLUE':(111,80)}
-# TOL    = {'RED':35, 'YELLOW':29, 'BLUE':35}
-# L_MIN  = 30
+# REF_AB = {'RED':(180,160), 'YELLOW':(126,192), 'BLUE':(133,61)}
+# TOL    = {'RED':35, 'YELLOW':40, 'BLUE':41}
+# L_MIN  = {'RED':30, 'YELLOW':134, 'BLUE':53}
 COLOR_RANGES = {
-    'RED':    [((30, 145, 125), (255, 215, 195))],
-    'YELLOW': [((30,  73, 131), (255, 131, 189))],
-    'BLUE':   [((30,  76,  45), (255, 146, 115))],
+    'RED':    [((30,  145, 125), (255, 215, 195))],
+    'YELLOW': [((134,  86, 152), (255, 166, 232))],
+    'BLUE':   [((53,   92,  20), (255, 174, 102))],
 }
 
 # ── CLAHE 전처리 객체 (L 채널 조명 정규화) ───────────────────────────
 _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+
+# ── 노이즈 필터 (오검출 억제) ─────────────────────────────────────────
+MIN_BLOB_AREA      = 900     # px²: 이 미만 blob 무시 (기존 500 → 상향, 작은 노이즈 컷)
+MIN_SOLIDITY       = 0.7     # blob 채움도(contourArea / boundingRect 면적) 하한.
+                            #   색지=채워진 사각형(≈1.0) / 선·점·산발 노이즈=낮음 → 제거
+MAX_ASPECT_RATIO   = 6.0     # boundingRect 장변/단변 비 상한. 가늘고 긴 노이즈(엣지 등) 제거
+DETECT_PERSIST_N   = 3       # 이 프레임 수 연속 검출돼야 '진짜 색'으로 보고 (시간적 지속성)
 
 # ── 미션 순서 ────────────────────────────────────────────────────────
 MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
@@ -76,6 +83,7 @@ _close               = False   # CLOSE 모드 (blob 크기 > 임계)
 _last_stable_bearing = 0.0     # 클리핑 전 마지막 유효 bearing (deg)
 _last_close_bearing  = 0.0     # CLOSE 진입 시 원근 보정 bearing (deg)
 _last_cy             = None    # 마지막 centroid y (기하 거리 추정용)
+_detect_streak       = 0       # 연속 검출 프레임 수 (시간적 지속성 필터; 카메라 스레드 전용)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -113,7 +121,18 @@ def _detect_color(frame, color_name):
 
     largest = max(contours, key=cv2.contourArea)
     area    = cv2.contourArea(largest)
-    if area < 500:   # [16:9] 절대 픽셀 임계값. FOV 가로확장 방식이면 객체 픽셀크기 불변→유지 OK
+    if area < MIN_BLOB_AREA:   # [16:9] 절대 픽셀 임계값. 작은 노이즈 컷
+        return None, 0.0, False, False
+
+    bx, _, bw, bh = cv2.boundingRect(largest)
+
+    # ── 형태 검사: 색지(채워진 사각형)만 통과, 점·선형 노이즈 제거 ──
+    rect_area = bw * bh
+    solidity  = area / rect_area if rect_area > 0 else 0.0
+    if solidity < MIN_SOLIDITY:
+        return None, 0.0, False, False
+    long_side, short_side = max(bw, bh), min(bw, bh)
+    if short_side == 0 or (long_side / short_side) > MAX_ASPECT_RATIO:
         return None, 0.0, False, False
 
     M = cv2.moments(largest)
@@ -123,7 +142,6 @@ def _detect_color(frame, color_name):
     cx = int(M['m10'] / M['m00'])
     cy = int(M['m01'] / M['m00'])
 
-    bx, _, bw, _ = cv2.boundingRect(largest)
     clipped_l = (bx <= 1)
     clipped_r = (bx + bw >= _EFF_W - 1)
 
@@ -174,6 +192,7 @@ def _camera_loop():
     global _target_bearing, _color_detected
     global _mission_idx, _dwell_start, _dwelling, _done
     global _close, _last_stable_bearing, _last_close_bearing, _last_cy
+    global _detect_streak
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
@@ -208,6 +227,16 @@ def _camera_loop():
         target_color                       = MISSION_ORDER[idx]
         centroid, area, clip_l, clip_r     = _detect_color(frame, target_color)
         roi_fill                        = _get_roi_fill(frame, target_color)
+
+        # ── 시간적 지속성 필터 ────────────────────────────────────────────
+        # 형태·면적 검사를 통과한 검출도 DETECT_PERSIST_N 프레임 연속 잡혀야
+        # '진짜 색'으로 인정. 순간적으로 튀는 노이즈 blob은 streak를 못 채워 무시.
+        if centroid is not None:
+            _detect_streak += 1
+        else:
+            _detect_streak = 0
+        if _detect_streak < DETECT_PERSIST_N:
+            centroid = None   # 아직 미확정 → bearing 보고 보류
 
         # ── 근접 / 클리핑 판정 (lock 밖, 카메라 스레드 전용) ──────────────
         global _roi_peaked
