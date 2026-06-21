@@ -1414,8 +1414,13 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         term_push_R = SCORE_BETA  * effective_push_L
         term_side_L = SCORE_SIDE  * side_right_push
         term_side_R = SCORE_SIDE  * side_left_push
-        term_head_L = max(0.0, -heading_deg) * HEADING_WEIGHT_MM
-        term_head_R = max(0.0,  heading_deg) * HEADING_WEIGHT_MM
+        # ★ heading_deg는 누적값(360° 피버턴 후 364°처럼 360↑). 정규화 필수.
+        #   정규화 없이 raw로 쓰면 Mode1 피버턴 직후 term_head가 폭주
+        #   (예: hdg=364 → 364*5=1820)하여 회피 항을 덮어쓰고 한쪽으로 쏠림
+        #   → "Mode1/2 탐색에서만 반대로 감"의 실제 원인. (Mode0는 heading≈0이라 무해)
+        hd = normalize_angle(heading_deg)
+        term_head_L = max(0.0, -hd) * HEADING_WEIGHT_MM
+        term_head_R = max(0.0,  hd) * HEADING_WEIGHT_MM
         # 목표 방향 bias: 갭이 없어 회피만 할 때 '동점 깨기'로만 목표 쪽 편향.
         # GOAL_BIAS_MAX로 상한 → side/push 회피 항을 절대 override 못 함(돌진 방지).
         # ★ 부호: 분기①(w = +KP*target_bearing)과 같은 쪽으로 기울여야 목표로 복귀.
