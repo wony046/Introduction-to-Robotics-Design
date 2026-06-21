@@ -31,7 +31,7 @@ struct CalibData {
 #define LINE_SETTLE  40      // 정지 후 안정화 틱 (×5ms)
 
 // ── 로봇 파라미터 ────────────────────────────────────────────────────────────
-const float WHEEL_BASE = 0.1802f;
+const float WHEEL_BASE = 0.1796f;
 const float M_TO_PULSE = 4795.0f;
 
 // ── 오도메트리 ──────────────────────────────────────────────────────────────

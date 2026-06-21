@@ -54,10 +54,18 @@ SETTLE_S     = 0.6    # 정지 후 오도메트리 안정화 대기 [s]
 DEFAULT_TURNS = 3     # 권장 회전 바퀴 수
 
 # ── 공유 상태 ─────────────────────────────────────────────────────────────────
-_lock     = threading.Lock()
-_running  = threading.Event()    # 송신 스레드 생존 플래그
-_state    = {'heading': 0.0, 'x': 0.0, 'y': 0.0, 'got': False}
-_cmd      = {'v': 0.0, 'w': 0.0}  # 송신 스레드가 계속 내보내는 현재 명령
+_lock      = threading.Lock()         # _state / _cmd 보호
+_io_lock   = threading.Lock()         # 시리얼 write 직렬화 (R 라인과 v/w 라인 섞임 방지)
+_running   = threading.Event()        # 송신 스레드 생존 플래그
+_tx_paused = threading.Event()        # set 동안 tx_thread 송신 일시정지 (리셋 시 R 단독 전송)
+_state     = {'heading': 0.0, 'x': 0.0, 'y': 0.0, 'got': False}
+_cmd       = {'v': 0.0, 'w': 0.0}      # 송신 스레드가 계속 내보내는 현재 명령
+
+
+def ser_write(ser: serial.Serial, data: bytes):
+    """모든 시리얼 쓰기를 _io_lock 으로 직렬화 — 두 스레드의 바이트 인터리빙 방지."""
+    with _io_lock:
+        ser.write(data)
 
 
 # ── 수신 스레드: 'O:x,y,heading' 파싱 ─────────────────────────────────────────
@@ -67,6 +75,8 @@ def rx_thread(ser: serial.Serial):
             raw = ser.readline()
             if not raw:
                 continue
+            if not raw.endswith(b'\n'):
+                continue              # 타임아웃으로 중간에 끊긴 부분 프레임 → 버림
             line = raw.decode('utf-8', errors='replace').strip()
             if not line.startswith('O:'):
                 # 아두이노 디버그 메시지는 그대로 흘려보냄
@@ -90,10 +100,13 @@ def rx_thread(ser: serial.Serial):
 # ── 송신 스레드: 현재 명령을 주기적으로 재전송 (타임아웃 방지) ────────────────
 def tx_thread(ser: serial.Serial):
     while _running.is_set():
+        if _tx_paused.is_set():
+            time.sleep(SEND_DT)
+            continue
         with _lock:
             v, w = _cmd['v'], _cmd['w']
         try:
-            ser.write(f'{v:.2f} {w:.2f}\n'.encode())
+            ser_write(ser, f'{v:.2f} {w:.2f}\n'.encode())
         except serial.SerialException:
             break
         time.sleep(SEND_DT)
@@ -111,15 +124,34 @@ def read_heading() -> float:
         return _state['heading']
 
 
-def reset_odom(ser: serial.Serial):
-    """헤딩/위치 0 으로 리셋 (R 명령). 송신 스레드가 곧 v/w 를 덮어쓰므로 직접 write."""
+def reset_odom(ser: serial.Serial) -> bool:
+    """
+    헤딩/위치 0 리셋 (R 명령). tx 를 잠시 멈춰 R 라인을 단독 전송하고,
+    리셋 직후의 O: 텔레메트리가 heading≈0 인지 확인(최대 3회 재시도).
+    성공 True / 검증 실패 False.
+    """
     set_cmd(0.0, 0.0)
-    time.sleep(0.1)
-    ser.write(b'R\n')
-    time.sleep(0.3)
-    with _lock:
-        _state['heading'] = 0.0
-        _state['got']     = False
+    _tx_paused.set()
+    time.sleep(SEND_DT * 2)        # 진행 중인 tx write 가 드레인될 시간
+    try:
+        for _ in range(3):
+            ser_write(ser, b'R\n')
+            time.sleep(0.15)       # 아두이노 R 처리 + 직전(리셋 前) O: 라인 드레인
+            with _lock:
+                _state['got'] = False
+            t0 = time.time()
+            while time.time() - t0 < 0.5:
+                with _lock:
+                    got, hdg = _state['got'], _state['heading']
+                if got:
+                    if abs(hdg) < 2.0:
+                        return True
+                    break          # 새 샘플인데 heading≉0 → R 재전송
+                time.sleep(0.02)
+        print('  [경고] 헤딩 리셋 확인 실패 — 결과 신뢰도 낮음')
+        return False
+    finally:
+        _tx_paused.clear()
 
 
 def live_status_thread(stop_evt: threading.Event):
@@ -248,7 +280,7 @@ def main():
         _running.clear()
         time.sleep(SEND_DT * 2)
         try:
-            ser.write(b'0.00 0.00\n')   # 확실히 정지
+            ser_write(ser, b'0.00 0.00\n')   # 확실히 정지
         except serial.SerialException:
             pass
         ser.close()
