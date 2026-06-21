@@ -23,7 +23,7 @@ DETECTION_RANGE = 1500  # mm: 라이다 최대 신뢰 거리
 # 로봇 & 속도 파라미터
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-ROBOT_HALF_WIDTH = 110   # mm: 라이다 중심 ~ 좌우 끝
+ROBOT_HALF_WIDTH = 115   # mm: 라이다 중심 ~ 좌우 끝
 
 FORWARD_SPEED    = 0.3
 MIN_SPEED        = 0.12
@@ -51,8 +51,8 @@ LAYER_PERCENTILE = 5
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 STOP_FWD_MIN  = 100
-STOP_FWD_MAX  = 175
-STOP_HORIZ_TH = 105
+STOP_FWD_MAX  = 200
+STOP_HORIZ_TH = 115
 
 STOP_ESCAPE_MIN_GAP   = ROBOT_HALF_WIDTH * 2 + 40   
 STOP_MAX_CYCLES       = 30                          
@@ -206,19 +206,24 @@ def _compute_close_target():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def _get_spiral_search_bearing():
     """
-    오도메트리 원점(최근 색지) 기준으로 반경 1m 이내를 나선형으로 탐색하는 방향 반환.
+    오도메트리 원점(최근 색지 또는 출발지) 기준으로 나선형 탐색.
     """
     r = math.sqrt(arduino_x_mm**2 + arduino_y_mm**2)
     
-    if r < 50:
-        target_global_heading = arduino_heading_deg + 15.0 
+    if r < 150:
+        # ★ 수정됨: 시작 직후 15cm 이내에서는 제자리 맴돎을 방지하고 
+        # 살짝만(5도) 틀면서 시원하게 앞으로 뻗어나가도록 유도
+        target_global_heading = arduino_heading_deg + 5.0 
     else:
+        # 원점으로부터 현재 로봇이 위치한 각도
         angle_from_origin = math.degrees(math.atan2(arduino_x_mm, arduino_y_mm))
         
         if r < SPIRAL_MAX_RADIUS:
+            # 15cm 밖으로 나오면 본격적인 나선 궤도(90도 + 팽창각) 시작
             expansion = SPIRAL_EXPAND_ANGLE * (1.0 - r / SPIRAL_MAX_RADIUS)
             target_global_heading = angle_from_origin + 90.0 + expansion
         else:
+            # 1m 초과 시 원 안으로 다시 복귀
             correction = min(60.0, (r - SPIRAL_MAX_RADIUS) * 0.2)
             target_global_heading = angle_from_origin + 90.0 - correction
             
