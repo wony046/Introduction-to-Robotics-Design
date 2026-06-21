@@ -408,6 +408,13 @@ def signal_arrival():
     _arrival_signal.set()
 
 
+def get_mission_idx():
+    """현재 미션 인덱스 반환 (0=RED, 1=YELLOW, 2=BLUE, 3=DONE).
+    색지 도착 시 인덱스가 증가하므로, 외부에서 도착(미션 전환) 감지에 사용."""
+    with _lock:
+        return _mission_idx
+
+
 def get_state():
     """현재 미션 상태 문자열 반환. 디버그용."""
     with _lock:
