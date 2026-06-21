@@ -110,6 +110,8 @@ GAP_SMOOTH_WEIGHT = 0.3           # 갭 선택: 직전 방향 유지 강도 (떨
 KP_GOAL            = MAX_W / 45.0  # 비례 조향 게인 (45° → MAX_W)
 COLOR_CONFIRM_SEC  = 0.4           # sec: Mode1/2→Mode0 전환 디바운스 — 색을 이 시간 이상
                                    #      연속 감지해야 추종(Mode0) 전환 (단일 프레임 노이즈 무시)
+COLOR_CONFIRM_JUMP_DEG = 12.0      # deg: 확정 중 bearing이 직전 대비 이 각도 초과로 튀면
+                                   #      '튀는 가짜 색'으로 보고 확정 타이머 재시작 → 모드 오전환 방지
 TARGET_ALIGN_ANGLE = 50.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
                                   #      Mode2 능동 접근은 정렬 우선이 유리 → 60→50 조임
 TARGET_CLEAR_CONE  = 18           # deg: 목표 방향 ± 이 각도 범위를 막힘 검사 대상으로
@@ -267,6 +269,7 @@ _last_target_est_x       = None   # mm: 마지막 감지 목표 추정 위치 x 
 _last_target_est_y       = None   # mm: 마지막 감지 목표 추정 위치 y
 _last_known_mission_idx  = 0      # 미션 인덱스 변화 감지용
 _color_confirm_start     = None   # 색 연속 감지 시작 시각 (Mode1/2→Mode0 디바운스; None=미감지)
+_color_confirm_ref       = 0.0    # 확정 중 직전 bearing 기준값 (튀는 값 점프 감지용)
 
 # ── Mode 1 피버턴 상태 ────────────────────────────────────────────────────────
 _pivot_active        = False   # True: 피버턴 진행 중
@@ -1666,7 +1669,7 @@ def _motor_controller(arduino):
            _mode2_start_time, _last_pivot_robot_x, _last_pivot_robot_y, \
            _current_boundary_radius, _boundary_exit_count, _boundary_was_outside, \
            _initial_x, _initial_y, _initial_heading, _initial_pose_set, \
-           _use_semicircle_boundary, _color_confirm_start
+           _use_semicircle_boundary, _color_confirm_start, _color_confirm_ref
     last_cmd_str = ""
     while not _shutdown.is_set():
         read_arduino(arduino)
@@ -1783,8 +1786,12 @@ def _motor_controller(arduino):
                 # 단일 프레임 노이즈로 탐색이 끊기지 않도록, COLOR_CONFIRM_SEC 이상
                 # 연속 감지됐을 때만 Mode0(추종) 전환 허용. 이미 Mode0면 게이트 없음.
                 if bearing is not None:
-                    if _color_confirm_start is None:
+                    # 신규 감지이거나 직전 대비 크게 튀면(가짜 색) 확정 타이머 재시작 →
+                    # 튀는 색은 0.4초를 못 채워 Mode0로 못 넘어감. 진짜 색지(부드러운 이동)만 확정.
+                    if (_color_confirm_start is None
+                            or abs(bearing - _color_confirm_ref) > COLOR_CONFIRM_JUMP_DEG):
                         _color_confirm_start = time.time()
+                    _color_confirm_ref = bearing
                     color_confirmed = (time.time() - _color_confirm_start) >= COLOR_CONFIRM_SEC
                 else:
                     _color_confirm_start = None
@@ -1811,8 +1818,8 @@ def _motor_controller(arduino):
                     print(f"[MODE1] 탐색 시작: 도착=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
                           f"피버턴=CCW 경계={BOUNDARY_RADIUS:.0f}mm")
 
-                if bearing is not None and (_search_mode == 0 or color_confirmed):
-                    # 색 감지 확정(연속 ≥COLOR_CONFIRM_SEC) 또는 이미 추종 중 → 목표 추정 갱신·탐색 해제
+                if bearing is not None:
+                    # 색 감지 중 → 목표 추정 위치 갱신, 탐색 모드 해제
                     _update_target_estimate()
                     if _search_mode != 0:
                         print(f"[MODE{_search_mode}→0] 색지 재감지")
