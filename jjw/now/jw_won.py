@@ -397,8 +397,7 @@ def read_arduino(arduino):
 
 def _compute_close_target():
     """CLOSE 진입 시 색지 추정 좌표 계산. (x_mm, y_mm) 반환."""
-    # 카메라 bearing은 우측=음수, 글로벌 변환식 x=sin(hdg)은 우측=양수 → 부호 변환(미러링 방지)
-    bearing_global_deg = arduino_heading_deg - camera_tracker.get_last_close_bearing()
+    bearing_global_deg = arduino_heading_deg + camera_tracker.get_last_close_bearing()
     dist_mm            = camera_tracker.get_estimated_distance_mm()
     # 색지 추정 위치보다 CLOSE_STANDOFF_MM 만큼 덜 접근해 정지 (음수 방지 클램프)
     target_dist        = max(dist_mm - CLOSE_STANDOFF_MM, 0.0)
@@ -513,8 +512,7 @@ def _update_target_estimate():
     if dist_mm >= 4000.0:
         return
     bearing_rel = camera_tracker.get_last_stable_bearing()
-    # 카메라 bearing은 우측=음수, 글로벌 변환식 x=sin(hdg)은 우측=양수 → 부호 변환(미러링 방지)
-    global_hdg  = arduino_heading_deg - bearing_rel
+    global_hdg  = arduino_heading_deg + bearing_rel
     hdg_rad     = math.radians(global_hdg)
     _last_target_est_x = arduino_x_mm + dist_mm * math.sin(hdg_rad)
     _last_target_est_y = arduino_y_mm + dist_mm * math.cos(hdg_rad)
@@ -1366,9 +1364,8 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         # ① 목표 방향이 비어있음 → 목표로 직진 (갭 무시)
         desired_heading      = target_bearing
         prev_desired_heading = desired_heading
-        # target_bearing 규약 = LiDAR/오도메트리(우측=양수) 통일 → 분기②와 동일하게 -KP.
-        # (Mode0 카메라 bearing은 호출부에서 부호 변환해 넘김)
-        w = -KP_GOAL * desired_heading
+        # target_bearing(카메라 bearing 또는 atan2 오도메트리 bearing)은 동일 규약(θ) → +KP
+        w = KP_GOAL * desired_heading
 
         # 목표 정렬도에 따라 v 조정
         # 정렬됨(0°) → FORWARD_SPEED / 많이 벗어남(≥TARGET_ALIGN_ANGLE) → MIN_SPEED
@@ -1383,7 +1380,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         # ② 목표 막힘 → 통과 갭 중 목표 최근접으로 우회 (gap-following)
         desired_heading      = chosen_gap['center_angle']
         prev_desired_heading = desired_heading
-        w = -KP_GOAL * desired_heading  # LiDAR center_angle 규약(우측=양수) → -KP (분기①·④와 동일 부호)
+        w = -KP_GOAL * desired_heading  # ★ LiDAR center_angle ↔ heading 반대 부호 → -KP (분기① bearing과 다름)
         if DEBUG_GAP:
             print(f"  [GAP_FOLLOW] {len(front_gaps)} gap(s) → chosen={desired_heading:+.1f}° "
                   f"target={target_bearing:+.1f}° w={w:+.3f}")
@@ -1464,7 +1461,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         # ④ 막힘인데 갭도 장애물도 없음(드묾) → 목표 유지
         desired_heading      = target_bearing
         prev_desired_heading = desired_heading
-        w = -KP_GOAL * target_bearing   # target_bearing 규약 = LiDAR(우측=양수) → -KP
+        w = KP_GOAL * target_bearing
         if DEBUG_CLEAR:
             print(f"  [CLEAR] no obstacles → target={target_bearing:+.1f}° w={w:+.3f}")
 
@@ -1741,11 +1738,10 @@ def _motor_controller(arduino):
                     if DEBUG_CLOSE_DONE:
                         print(f"[CLOSE] 도달 ({dist_err:.0f}mm < {CLOSE_ARRIVE_MM}mm) → 정지")
                 else:
-                    target_hdg = math.degrees(math.atan2(ex, ey))   # 우측=양수(오도메트리)
+                    target_hdg = math.degrees(math.atan2(ex, ey))
                     hdg_err    = normalize_angle(target_hdg - arduino_heading_deg)
 
-                    # 추정 좌표가 un-mirror(실제 목표 쪽)로 바뀜 → 조향도 -KP (w>0=좌회전 규약)
-                    w = max(min(-KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
+                    w = max(min(KP_CLOSE_HDG * hdg_err, MAX_W), -MAX_W)
                     v = CLOSE_SPEED_MAX
 
                     prev_w = w   # CLOSE 모드 내 스무딩 관성 제거
@@ -1810,8 +1806,7 @@ def _motor_controller(arduino):
                     _boundary_was_outside    = False
                     _current_boundary_radius = BOUNDARY_RADIUS
                     _use_semicircle_boundary = False  # 빨강 감지됨 → 이후 원형 경계
-                    # 카메라 bearing은 우측=음수 → target_bearing 규약(LiDAR 우측=양수)으로 부호 변환
-                    v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=-bearing)
+                    v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=bearing)
 
                 elif _search_mode == 1:
                     # ── Mode 1: 도착 후 탐색 ──────────────────────────────────
