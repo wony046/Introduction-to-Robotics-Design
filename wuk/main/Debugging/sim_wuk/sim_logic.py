@@ -100,11 +100,8 @@ VIRTUAL_OBS_GAIN        = 1.5
 VIRTUAL_CENTER_DEADBAND = 10
 VIRTUAL_EXP_K           = 2.5
 
-# 마지막 본 색지 추종 (색 미감지 시) / CLOSE (Phase 2~3 에서 시뮬이 사용)
-LOST_TOL_MAX_DEG        = 20.0    # ★ deg: 허용 방향 범위 최대치 (오차 대응 상한)
-LOST_TOL_PER_ROT_DEG    = 0.15    # 누적 회전 1°당 tol 증가량 (deg)
-LOST_TOL_PER_M          = 8.0     # 누적 이동 1m당 tol 증가량 (deg)
-LOST_ARRIVE_DEADZONE_MM = 150     # mm: 추정 좌표 근접 시 정면 유지(베어링 노이즈 방지)
+# SEEK 기억 추종 (색지 놓침 후 마지막 글로벌 방향 유지) / CLOSE (Phase 2~3)
+SEEK_MEMORY_SEC     = 10          # ★ 색지 놓친 후 기억 추종 유지 시간 (sec). 0이면 비활성
 KP_CLOSE_HDG        = 0.1         # ★
 CLOSE_SPEED_MAX     = 0.2         # ★
 CLOSE_ARRIVE_MM     = 30          # ★

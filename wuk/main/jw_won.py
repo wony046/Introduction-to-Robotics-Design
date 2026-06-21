@@ -188,10 +188,27 @@ CLOSE_OBSERVE_SEC = 1.0   # CLOSE 진입 후 정지 관측 시간 (sec)
 CLOSE_STANDOFF_MM = 100   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
 
 # ── SEEK 기억 추종 (색지 놓침 후 마지막 방향 유지) ──────────────────────────
-SEEK_MEMORY_SEC      = 100    # 색지 놓친 후 기억 추종 유지 시간 (sec). 0이면 비활성
+SEEK_MEMORY_SEC      = 10     # 색지 놓친 후 기억 추종 유지 시간 (sec). 0이면 비활성
 _seek_mem_global_brg = None   # 마지막 관측 시 글로벌 방향 (deg), None=기억 없음
                               # (현재 목표 색상 전용 — get_bearing()이 목표 색만 반환)
 _seek_mem_time       = 0.0    # 마지막 관측 시각 (time.time())
+
+# ── SEEK 탐색 (기억 만료 후 한 바퀴 피봇하며 색지 재탐색) ────────────────────
+SEEK_SEARCH_W         = 0.9    # 탐색 피봇 회전 속도 (rad/s)
+SEEK_REALIGN_TOL      = 5.0    # 탐색 실패 후 0도 복귀 허용 오차 (deg)
+SEEK_SEARCH_MAX_SEC   = 20.0   # 탐색 안전 상한 (sec): 초과 시 강제 종료 (스턱 방지)
+SEEK_PIVOT_CLEARANCE_MM = ROBOT_HALF_WIDTH + 120  # 230mm: 제자리 회전 시 전 방향 필요 여유
+                                                  # (로봇 외접 반경 + 마진). 미달 시 회피로 공간 확보 후 피봇
+PIVOT_REAR_BLIND_DEG    = 45   # deg: 후방 카메라 거치대 반사 구간. 180°±(이/2) 범위는 클리어런스
+                               # 검사에서 제외 (반사파가 상시 장애물로 잡혀 항상 막힘 처리되는 것 방지)
+SEEK_PIVOT_BLOCKED_MAX_SEC = 4.0  # sec: 회전 공간이 이 시간 이상 계속 부족하면 탐색 조기 포기
+                                  # (clutter에서 360° clearance를 못 뚫고 20s 낭비하는 livelock 방지)
+_seek_search_phase    = 0      # 0=비활성, 1=360° 피봇 탐색, 2=0도 복귀
+_seek_search_acc      = 0.0    # 누적 회전량 (deg)
+_seek_search_prev_hdg = 0.0    # 직전 사이클 헤딩 (델타 누적용)
+_seek_search_dir      = 1.0    # 피봇 방향 (+1=좌, -1=우)
+_seek_search_start    = 0.0    # 탐색 시작 시각 (안전 상한용)
+_seek_pivot_blocked_since = None  # 회전 공간 부족이 시작된 시각 (None=현재 확보됨)
 
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
@@ -314,6 +331,28 @@ def detect_stop_zone(scan_points):
         if STOP_FWD_MIN <= fwd <= STOP_FWD_MAX and horiz < STOP_HORIZ_TH:
             return True
     return False
+
+
+def has_pivot_clearance(scan_points, clearance_mm):
+    """제자리 회전이 안전한가: (후방 거치대 반사 구간 제외) 전 방향에서
+    clearance_mm 이내에 장애물이 없으면 True.
+
+    로봇이 제자리 회전하면 외접원(반지름≈로봇 외접 반경)을 휩쓸므로,
+    그 반경 안에 장애물이 있으면 회전 중 충돌 위험 → False (피봇 보류).
+
+    [후방 블라인드] 180°±(PIVOT_REAR_BLIND_DEG/2)는 카메라 거치대 반사파가
+      상시 들어와 실제 장애물과 구분 불가 → 클리어런스 판정에서 제외.
+      (이 제외가 없으면 반사파 때문에 항상 False가 되어 피봇이 절대 발동 안 됨)
+    [주의] 제외 구간에 실제 후방 장애물이 있어도 무시되므로 회전 시 접촉 가능.
+    노이즈(LIDAR_MIN_VALID 미만)도 무시."""
+    rear_half = PIVOT_REAR_BLIND_DEG / 2.0
+    for a, d in scan_points:
+        if not (LIDAR_MIN_VALID < d < clearance_mm):
+            continue
+        if abs(abs(a) - 180.0) <= rear_half:   # 후방 블라인드 섹터(거치대 반사) 제외
+            continue
+        return False
+    return True
 
 
 def find_all_gaps(scan_points):
@@ -1298,6 +1337,8 @@ def _motor_controller(arduino):
     SEND_INTERVAL마다 독립적으로 명령 송신 — 라이다 지연과 무관."""
     global prev_w, _close_target_x, _close_target_y, _close_initial_dist, _close_observe_start
     global _seek_mem_global_brg, _seek_mem_time
+    global _seek_search_phase, _seek_search_acc, _seek_search_prev_hdg, \
+           _seek_search_dir, _seek_search_start, _seek_pivot_blocked_since
     last_cmd_str = ""
     while not _shutdown.is_set():
         read_arduino(arduino)
@@ -1310,6 +1351,7 @@ def _motor_controller(arduino):
                 prev_w = 0.0
                 _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
                 _seek_mem_global_brg = None   # 색지 도달 → 기억 삭제 (다음 색상은 새로 기억)
+                _seek_search_phase   = 0      # 탐색 상태도 초기화
 
             # ── 상태 2: CLOSE → 정지 관측 후 오도메트리 위치 제어 ──────────
             # _close_target_x가 이미 세팅돼 있으면 카메라 미감지 시에도 CLOSE 유지
@@ -1390,10 +1432,16 @@ def _motor_controller(arduino):
                     # 마지막 본 방향을 글로벌(절대) 방향으로 고정 저장 → 로봇이 돌아도 유효
                     _seek_mem_global_brg = normalize_angle(arduino_heading_deg + bearing)
                     _seek_mem_time       = time.time()
+                    if _seek_search_phase != 0:
+                        if DEBUG_SEEK_MEM:
+                            print(f"  [SEEK_SRCH] 색지 재포착! → 추종 재개 (bearing={bearing:+.1f}°)")
+                        _seek_search_phase = 0   # 탐색 중이었다면 종료
                     v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=bearing)
+
                 elif (SEEK_MEMORY_SEC > 0 and _seek_mem_global_brg is not None
+                      and _seek_search_phase == 0
                       and time.time() - _seek_mem_time < SEEK_MEMORY_SEC):
-                    # 색 놓침(기억 유효): 글로벌 방향을 현재 헤딩 기준 상대각으로 환산해 추종
+                    # 색 놓침(기억 유효, <10s): 글로벌 방향을 현재 헤딩 기준 상대각으로 환산해 추종
                     # → 헤딩 변화만큼 자동 보정 (회전은 정확, 평행이동은 미보정)
                     mem_bearing = normalize_angle(_seek_mem_global_brg - arduino_heading_deg)
                     if DEBUG_SEEK_MEM:
@@ -1402,11 +1450,90 @@ def _motor_controller(arduino):
                               f"global={_seek_mem_global_brg:+.1f}° "
                               f"hdg={arduino_heading_deg:+.1f}° → target={mem_bearing:+.1f}°")
                     v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=mem_bearing)
+
+                elif _seek_mem_global_brg is not None:
+                    # 색 놓침(기억 만료) → 탐색 모드: 한 바퀴 피봇하며 색지 재탐색
+                    now = time.time()
+                    if _seek_search_phase == 0:
+                        # 탐색 시작(phase 1): 마지막 본 쪽으로 피봇
+                        _seek_search_phase    = 1
+                        _seek_search_acc      = 0.0
+                        _seek_search_prev_hdg = arduino_heading_deg
+                        _seek_search_start    = now
+                        mem_rel = normalize_angle(_seek_mem_global_brg - arduino_heading_deg)
+                        _seek_search_dir = 1.0 if mem_rel >= 0 else -1.0
+                        if DEBUG_SEEK_MEM:
+                            print(f"  [SEEK_SRCH] 기억 만료({SEEK_MEMORY_SEC:.0f}s) → 360° 탐색 피봇 "
+                                  f"시작 (dir={'L' if _seek_search_dir > 0 else 'R'})")
+
+                    # 회전 공간 1회 평가 + 막힘 지속 시각 추적 (phase 1·2 공용)
+                    clear = has_pivot_clearance(pts, SEEK_PIVOT_CLEARANCE_MM)
+                    if clear:
+                        just_regained = (_seek_pivot_blocked_since is not None)
+                        _seek_pivot_blocked_since = None
+                        blocked_dur = 0.0
+                    else:
+                        just_regained = False
+                        if _seek_pivot_blocked_since is None:
+                            _seek_pivot_blocked_since = now
+                        blocked_dur = now - _seek_pivot_blocked_since
+
+                    if now - _seek_search_start > SEEK_SEARCH_MAX_SEC:
+                        # 안전 상한: 전체 탐색이 너무 오래 → 강제 종료(스턱 방지)
+                        if DEBUG_SEEK_MEM:
+                            print(f"  [SEEK_SRCH] 안전 상한({SEEK_SEARCH_MAX_SEC:.0f}s) 초과 → 종료")
+                        _seek_search_phase   = 0
+                        _seek_mem_global_brg = None
+                        v, w = find_vw_command(pts, arduino_heading_deg)
+
+                    elif blocked_dur > SEEK_PIVOT_BLOCKED_MAX_SEC:
+                        # 회전 공간이 계속 부족(clutter) → 제자리 회전 불가 → 탐색 조기 포기
+                        # (360° clearance를 전방 회피로는 못 뚫어 20s 낭비하는 livelock 방지)
+                        if DEBUG_SEEK_MEM:
+                            print(f"  [SEEK_SRCH] 회전 공간 {blocked_dur:.1f}s 계속 부족 → 탐색 포기, 일반 회피")
+                        _seek_search_phase   = 0
+                        _seek_mem_global_brg = None
+                        v, w = find_vw_command(pts, arduino_heading_deg)
+
+                    elif not clear:
+                        # 회전 공간 부족(아직 한계 미만) → 피봇 보류, 일반 회피로 공간 확보 (회전량 누적 안 함)
+                        if DEBUG_SEEK_MEM:
+                            print(f"  [SEEK_SRCH] 회전 공간 부족(<{SEEK_PIVOT_CLEARANCE_MM}mm, "
+                                  f"{blocked_dur:.1f}s) → 공간 확보 회피")
+                        v, w = find_vw_command(pts, arduino_heading_deg)
+
+                    elif _seek_search_phase == 1:
+                        # 공간 확보됨 → 누적 회전량(헤딩 델타 절댓값, wrap 안전)이 360°까지 피봇
+                        if just_regained:
+                            # 막힘에서 막 벗어남 → 회피로 누적된 헤딩 변화는 제외(기준점만 재설정)
+                            _seek_search_prev_hdg = arduino_heading_deg
+                        d = normalize_angle(arduino_heading_deg - _seek_search_prev_hdg)
+                        _seek_search_acc     += abs(d)
+                        _seek_search_prev_hdg = arduino_heading_deg
+                        if _seek_search_acc >= 360.0:
+                            # 한 바퀴 완료 → 색지 못 찾음 → 0도 복귀 단계로
+                            _seek_search_phase = 2
+                            if DEBUG_SEEK_MEM:
+                                print(f"  [SEEK_SRCH] 360° 완료, 색지 못 찾음 → 0도 복귀")
+                            v, w = 0.0, math.copysign(SEEK_SEARCH_W,
+                                                      normalize_angle(0.0 - arduino_heading_deg))
+                        else:
+                            v, w = 0.0, _seek_search_dir * SEEK_SEARCH_W
+
+                    else:  # phase 2: 헤딩 0°로 복귀 (clear 확보된 상태에서만 도달)
+                        err = normalize_angle(0.0 - arduino_heading_deg)
+                        if abs(err) <= SEEK_REALIGN_TOL:
+                            # 복귀 완료 → 탐색 종료, 기억 삭제, 일반 장애물 회피로 전환
+                            if DEBUG_SEEK_MEM:
+                                print(f"  [SEEK_SRCH] 0도 복귀 완료(err={err:+.1f}°) → 일반 장애물 회피")
+                            _seek_search_phase   = 0
+                            _seek_mem_global_brg = None
+                            v, w = find_vw_command(pts, arduino_heading_deg)
+                        else:
+                            v, w = 0.0, math.copysign(SEEK_SEARCH_W, err)
+
                 else:
-                    # 색 미감지(기억 만료/없음): 정면(0°) 기준 일반 장애물 회피
-                    if DEBUG_SEEK_MEM and _seek_mem_global_brg is not None:
-                        print(f"  [SEEK_MEM] 기억 만료({SEEK_MEMORY_SEC:.1f}s) → 정면 회피 복귀")
-                    _seek_mem_global_brg = None
+                    # 기억 없음(미션 시작 후 한 번도 색지 못 봄) → 정면(0°) 일반 장애물 회피
                     v, w = find_vw_command(pts, arduino_heading_deg)
 
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
