@@ -69,6 +69,7 @@ _close               = False
 _last_stable_bearing = 0.0     
 _last_close_bearing  = 0.0     
 _last_cy             = None    
+_mission_changed     = False
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 내부 함수
@@ -238,6 +239,7 @@ def _camera_loop():
                 if elapsed >= ARRIVE_HOLD_SEC:
                     print(f"[CAMERA] {target_color} 완료! → ", end='')
                     _mission_idx         += 1
+                    _mission_changed      = True
                     _dwell_start          = None
                     _dwelling             = False
                     _roi_peaked           = False
@@ -345,3 +347,12 @@ def get_state():
         if _mission_idx < len(MISSION_ORDER):
             return f'SEEK_{MISSION_ORDER[_mission_idx]}'
         return 'DONE'
+
+def check_mission_changed():
+    """새로운 미션(색지)으로 넘어갔는지 확인 (확인 즉시 False로 리셋하여 한 번만 발동)"""
+    global _mission_changed
+    with _lock:
+        if _mission_changed:
+            _mission_changed = False
+            return True
+        return False
