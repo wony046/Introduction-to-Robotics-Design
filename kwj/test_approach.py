@@ -10,7 +10,7 @@ import numpy as np
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CLOSE_ENTER_MM      = 450.0   # [튜닝] 이 거리 이내로 접근하면 정밀 제어(CLOSE) 시작
 CLOSE_OBSERVE_SEC   = 1.0     # [튜닝] CLOSE 진입 시 목표를 확실히 찍기 위해 정지하는 시간(초)
-CLOSE_ARRIVE_MM     = 30.0    # [튜닝] 목표 좌표 반경 몇 mm 안에 들어오면 최종 도착(DONE)으로 판정할지
+CLOSE_ARRIVE_MM     = 20.0    # [튜닝] 목표 좌표 반경 몇 mm 안에 들어오면 최종 도착(DONE)으로 판정할지
 CLOSE_SPEED_MAX     = 0.2     # CLOSE 모드일 때의 전진 속도
 CLOSE_BEARING_SCALE = 0.8212  # 근접 원근 보정 배율 (필요시 1.0으로 변경하며 테스트)
 KP_CLOSE_HDG        = 0.1     # 오도메트리 추종 시 회전 민감도
