@@ -37,14 +37,15 @@ USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / Fals
 CLOSE_BEARING_SCALE = 0.8212    # ★ calibrate_bearing.py 로 구한 보정 배율 (1.0=보정 없음)
 
 # ── LAB 색상 범위 (OpenCV LAB: L[0-255], A[0-255 / 128=중립], B[0-255 / 128=중립]) ──
-# CLAHE 전처리 후 적용. REF_AB ± TOL, L >= L_MIN 기반 실측값
-# REF_AB = {'RED':(182,140), 'YELLOW':(130,165), 'BLUE':(136,94)}
-# TOL    = {'RED':30, 'YELLOW':18, 'BLUE':7}
-# L_MIN  = {'RED':28, 'YELLOW':155, 'BLUE':18}
+# CLAHE 전처리 후 적용. REF_AB ± TOL, L >= L_MIN 기반 실측값 (색지 탐색 캘리)
+# REF_AB = {'RED':(180,160), 'YELLOW':(129,170), 'BLUE':(125,72)}
+# TOL    = {'RED':35, 'YELLOW':19, 'BLUE':31}
+# L_MIN  = {'RED':30, 'YELLOW':25, 'BLUE':30}
+# lo=(L_MIN, A-TOL, B-TOL), hi=(255, A+TOL, B+TOL)
 COLOR_RANGES = {
-    'RED':    [((28,  152, 110), (255, 212, 170))],
-    'YELLOW': [((155, 112, 147), (255, 148, 183))],
-    'BLUE':   [((18,  129,  87), (255, 143, 101))],
+    'RED':    [((30, 145, 125), (255, 215, 195))],
+    'YELLOW': [((25, 110, 151), (255, 148, 189))],
+    'BLUE':   [((30,  94,  41), (255, 156, 103))],
 }
 
 # ── CLAHE 전처리 객체 (L 채널 조명 정규화) ───────────────────────────
