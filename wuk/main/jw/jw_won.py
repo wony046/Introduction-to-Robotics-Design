@@ -225,11 +225,11 @@ DEBUG_SIDE_LAYER  = 0   # [SIDE_LAYER] 측방 레이어
 DEBUG_VIRTUAL     = 0   # [VIRTUAL] 가상 장애물
 DEBUG_CLOSE_INIT   = 0   # [CLOSE] 목표 좌표 계산 (진입 1회)
 DEBUG_CLOSE_POS    = 0   # [CLOSE] 접근 중 위치/거리
-DEBUG_CLOSE_HDG    = 1   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
-DEBUG_CLOSE_DONE   = 0   # [CLOSE] 도달 판정
+DEBUG_CLOSE_HDG    = 0   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
+DEBUG_CLOSE_DONE   = 1   # [CLOSE] 도달 판정
 DEBUG_CLOSE_REMAIN = 0   # [CLOSE] 남은 거리 / 진행률 (매 사이클)
 DEBUG_BOUNDARY    = 0   # [BOUNDARY] 가상 경계 초과 시
-DEBUG_SEND        = 1   # [SEND] 모터 명령 전송
+DEBUG_SEND        = 0   # [SEND] 모터 명령 전송
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
 arduino_heading_deg   = 0.0
@@ -1414,13 +1414,8 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         term_push_R = SCORE_BETA  * effective_push_L
         term_side_L = SCORE_SIDE  * side_right_push
         term_side_R = SCORE_SIDE  * side_left_push
-        # ★ heading_deg는 누적값(360° 피버턴 후 364°처럼 360↑). 정규화 필수.
-        #   정규화 없이 raw로 쓰면 Mode1 피버턴 직후 term_head가 폭주
-        #   (예: hdg=364 → 364*5=1820)하여 회피 항을 덮어쓰고 한쪽으로 쏠림
-        #   → "Mode1/2 탐색에서만 반대로 감"의 실제 원인. (Mode0는 heading≈0이라 무해)
-        hd = normalize_angle(heading_deg)
-        term_head_L = max(0.0, -hd) * HEADING_WEIGHT_MM
-        term_head_R = max(0.0,  hd) * HEADING_WEIGHT_MM
+        term_head_L = max(0.0, -heading_deg) * HEADING_WEIGHT_MM
+        term_head_R = max(0.0,  heading_deg) * HEADING_WEIGHT_MM
         # 목표 방향 bias: 갭이 없어 회피만 할 때 '동점 깨기'로만 목표 쪽 편향.
         # GOAL_BIAS_MAX로 상한 → side/push 회피 항을 절대 override 못 함(돌진 방지).
         # ★ 부호: 분기①(w = +KP*target_bearing)과 같은 쪽으로 기울여야 목표로 복귀.
