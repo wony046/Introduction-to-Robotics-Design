@@ -21,7 +21,7 @@ import numpy as np
 
 # ── camera_tracker.py 와 동일하게 맞출 것 ───────────────────────────────────
 CAMERA_INDEX      = 0
-FRAME_W           = 640
+FRAME_W           = 848   # 16:9 (848×480) 로 변경. FRAME_H=480 유지
 FRAME_H           = 480
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
 HFOV_DEG          = 38.6

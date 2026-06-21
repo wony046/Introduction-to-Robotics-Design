@@ -160,16 +160,16 @@ BOUNDARY_V_MIN      = 0.5      # 경계 완전 초과 시 v 감속 최소 비율
 
 # ── 디버그 토글 ──────────────────────────────────────────────────────────────
 DEBUG_LAYERS      = 0   # [L1~L6] 레이어 분석 결과
-DEBUG_STOP        = 0   # [STOP] 발동 & 탈출 이벤트
-DEBUG_STOP_PIVOT  = 0   # [STOP] 피봇 중 매 사이클 (noisy)
-DEBUG_BRANCH      = 1   # [BRANCH] 분기 결정
+DEBUG_STOP        = 1   # [STOP] 발동 & 탈출 이벤트
+DEBUG_STOP_PIVOT  = 1   # [STOP] 피봇 중 매 사이클 (noisy)
+DEBUG_BRANCH      = 0   # [BRANCH] 분기 결정
 DEBUG_TARGET      = 0   # [TARGET] 목표 방향 직진
-DEBUG_GAP         = 1   # [GAP_FOLLOW] 갭 우회
+DEBUG_GAP         = 0   # [GAP_FOLLOW] 갭 우회
 DEBUG_FALLBACK    = 0   # [FALLBACK] 점수 기반 회피 요약
 DEBUG_SCORE       = 0   # [SCORE] 점수 상세 (FALLBACK 하위)
 DEBUG_DIR         = 0   # [DIR] 방향 결정 결과
 DEBUG_CLEAR       = 0   # [CLEAR] 장애물 없음
-DEBUG_FINAL       = 1   # [FINAL] 최종 v, w
+DEBUG_FINAL       = 0   # [FINAL] 최종 v, w
 DEBUG_SIDE        = 0   # [SIDE] 측면 반발력
 DEBUG_SIDE_LAYER  = 0   # [SIDE_LAYER] 측방 레이어
 DEBUG_VIRTUAL     = 0   # [VIRTUAL] 가상 장애물
@@ -479,29 +479,98 @@ def choose_escape_gap(gaps, prefer_angle=0.0):
     return None
 
 
+def find_free_sectors(scan_points, block_dist):
+    """1° 빈 360개 점유 배열 → 원형 순회로 연속 free 구간 추출.
+    free = block_dist 이내에 유효 포인트가 없는 각도 구간(=깊이 자동 충족).
+    blocked 빈에서 순회 시작 → wrap 경계 자동 처리.
+    반환: list of {center_angle, width, ang_width, R}."""
+    blocked  = [False] * 360
+    shoulder = [block_dist] * 360
+    for a, d in scan_points:
+        if LIDAR_MIN_VALID < d < block_dist:
+            i = int(round(a)) % 360
+            blocked[i]  = True
+            shoulder[i] = min(shoulder[i], d)
+
+    if not any(blocked):
+        return [{'center_angle': 0.0, 'width': 9999.0, 'ang_width': 360.0, 'R': block_dist}]
+
+    start   = blocked.index(True)
+    sectors = []
+    k = 0
+    while k < 360:
+        if blocked[(start + k) % 360]:
+            k += 1
+            continue
+        run_begin = k
+        while k < 360 and not blocked[(start + k) % 360]:
+            k += 1
+        run_end   = k
+        ang_width = run_end - run_begin
+        left_sh   = shoulder[(start + run_begin - 1) % 360]
+        right_sh  = shoulder[(start + run_end) % 360]
+        R         = min(left_sh, right_sh, block_dist)
+        width_mm  = 2.0 * R * math.sin(math.radians(min(ang_width, 180)) / 2.0)
+        center    = normalize_angle(start + run_begin + ang_width / 2.0)
+        sectors.append({'center_angle': center, 'width': width_mm,
+                        'ang_width': ang_width, 'R': R})
+    return sectors
+
+
+def choose_escape_sector(sectors, prefer_angle=0.0):
+    """폭 >= STOP_ESCAPE_MIN_GAP 섹터 중 prefer_angle 최근접 선택. 없으면 None."""
+    passable = [s for s in sectors if s['width'] >= STOP_ESCAPE_MIN_GAP]
+    if passable:
+        return min(passable,
+                   key=lambda s: abs(((s['center_angle'] - prefer_angle) + 180) % 360 - 180))
+    return None
+
+
 def find_stop_escape_direction(scan_points, heading_deg=0.0):
-    """FGM 기반 STOP 탈출 방향 결정. 반환: (target_angle, gap_width, gap_info_list)
-    heading_deg 기준 글로벌 0°에 가장 가까운(최소 회전) 통과 가능 갭 선택.
+    """STOP 탈출 방향 결정. 반환: (target_angle, gap_width, info_list, method)
+    1차 FGM(에지 기반). 통과 갭 0개면 2차 빈 섹터(각도 기반)로 폴백.
     """
+    # ── 1차: FGM (에지 기반) ──
     gaps   = find_all_gaps(scan_points)
     chosen = choose_escape_gap(gaps, prefer_angle=heading_deg)
+    method = 'FGM'
+
+    # ── 2차: 통과 갭 0개 → 빈 섹터 탐색 ──
+    if chosen is None:
+        sectors = find_free_sectors(scan_points, FGM_MAX_RANGE_MM)
+        chosen  = choose_escape_sector(sectors, prefer_angle=heading_deg)
+        method  = 'SECTOR'
 
     if chosen is None:
-        return 0.0, 0.0, []
+        return 0.0, 0.0, [], 'NONE'
 
-    gap_info = [
-        {
-            'width':        g['width'],
-            'center_angle': g['center_angle'],
-            'edge_a':       list(g['edge_a']),
-            'edge_b':       list(g['edge_b']),
-            'depth':        g['depth'],
-            'passable':     g['width'] >= STOP_ESCAPE_MIN_GAP and g['depth'] >= FGM_MIN_DEPTH_MM,
-            'chosen':       g is chosen,
-        }
-        for g in gaps
-    ]
-    return float(chosen['center_angle']), float(chosen['width']), gap_info
+    if method == 'FGM':
+        info = [
+            {
+                'width':        g['width'],
+                'center_angle': g['center_angle'],
+                'edge_a':       list(g['edge_a']),
+                'edge_b':       list(g['edge_b']),
+                'depth':        g['depth'],
+                'passable':     g['width'] >= STOP_ESCAPE_MIN_GAP and g['depth'] >= FGM_MIN_DEPTH_MM,
+                'chosen':       g is chosen,
+            }
+            for g in gaps
+        ]
+    else:
+        info = [
+            {
+                'width':        s['width'],
+                'center_angle': s['center_angle'],
+                'ang_width':    s['ang_width'],
+                'R':            s['R'],
+                'passable':     s['width'] >= STOP_ESCAPE_MIN_GAP,
+                'chosen':       s is chosen,
+            }
+            for s in sectors
+        ]
+
+    return float(chosen['center_angle']), float(chosen['width']), info, method
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1179,13 +1248,13 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
 
     # ── Phase 0: 정상 → STOP 감지 시 즉시 피봇 ──────────────────────────────
     if detect_stop_zone(scan_points):
-        target, gap_width, gap_info = find_stop_escape_direction(scan_points, heading_deg)
+        target, gap_width, gap_info, escape_method = find_stop_escape_direction(scan_points, heading_deg)
         _stop_set_pivot(heading_deg, target, gap_width)
         stop_cycle_count = 0
         stop_phase       = 2
         _enqueue_stop_event(heading_deg, target, gap_width, gap_info, scan_points)
         if DEBUG_STOP:
-            print(f"  [STOP] triggered -> pivot target={target:+.0f}° "
+            print(f"  [STOP] triggered ({escape_method}) -> pivot target={target:+.0f}° "
                   f"global={stop_locked_global_heading:.1f}°")
         return 0.0, stop_pivot_w
 

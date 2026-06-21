@@ -24,8 +24,8 @@ import numpy as np
 
 # ── 카메라 설정 (camera_tracker.py 와 동일하게 맞출 것) ────────────────
 CAMERA_INDEX = 0
-FRAME_W      = 1280
-FRAME_H      = 720
+FRAME_W      = 848   # 16:9 (848×480) 로 통일 (기존 1280×720 — 타 파일과 불일치였음)
+FRAME_H      = 480
 FRAME_ROTATE = cv2.ROTATE_90_COUNTERCLOCKWISE   # None 이면 회전 없음
 
 SAMPLE_WIN   = 9     # 클릭 시 샘플링할 정사각 윈도우 한 변(px)

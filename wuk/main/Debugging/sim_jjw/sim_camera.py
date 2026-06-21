@@ -26,8 +26,8 @@ ARRIVE_HOLD_SEC = 1.2    # 도착 후 정지 유지(dwell) 시간
 # 카메라 투영 모델 (camera_tracker.py 와 동일) — 프리뷰 창 렌더용
 CAM_HEIGHT_MM = 430.0    # 카메라~바닥(색지) 수직 높이
 CAM_TILT_DEG  = 34.5     # 광축 하향 틸트(수평=0, 아래로+)
-EFF_W = 480.0            # 90° 회전 마운트 후 실효 가로 (_EFF_W)
-EFF_H = 640.0            # 90° 회전 마운트 후 실효 세로 (_EFF_H)
+EFF_W = 480.0            # 90° 회전 마운트 후 실효 가로 (_EFF_W) = raw FRAME_H, 유지
+EFF_H = 848.0            # 90° 회전 마운트 후 실효 세로 (_EFF_H). [16:9] raw FRAME_W 640→848
 
 def f_px():
     """초점거리(px). HFOV 가 EFF_W 기준이므로 EFF_W 로 산출."""
@@ -37,7 +37,7 @@ def f_px():
 # 근거리 한계 ~250mm(아래로 시야 벗어남) / 원거리 ~2600mm 추정.
 # ★ CLOSE 모드의 dead-reckoning 을 충실히 테스트하려면 이 근거리 한계가 중요:
 #   거리<250mm 면 카메라가 색지를 잃고 → CLOSE 오도메트리 추종이 인계받음.
-CAM_NEAR_MM  = 250.0
+CAM_NEAR_MM  = 250.0     # [16:9] EFF_H 변경으로 수직FOV 변동 → 재산출 권장
 CAM_FAR_MM   = 2600.0
 
 MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
