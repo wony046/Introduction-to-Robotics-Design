@@ -1661,8 +1661,14 @@ def _motor_controller(arduino):
 
                     if _pivot_active:
                         # 우선순위: STOP zone / 주변 장애물 > 장애물 회피 > 피버턴
-                        if (detect_stop_zone(pts) or
-                                not is_pivot_clearance_ok(pts, PIVOT_CLEAR_RADIUS)):
+                        _sz = detect_stop_zone(pts)
+                        _blockers = [(round(a), round(d)) for a, d in pts
+                                     if d >= LIDAR_MIN_VALID and not is_rear_blind(a)
+                                     and d <= PIVOT_CLEAR_RADIUS]
+                        if _sz or _blockers:
+                            # ▼ 진단용: 어느 가드가/어느 포인트가 피버턴을 막는지 (확인 후 제거)
+                            print(f"[MODE1-DIAG] 피버턴 차단 stop_zone={_sz} "
+                                  f"blockers(≤{PIVOT_CLEAR_RADIUS:.0f}mm)={_blockers[:6]}")
                             # 주변 장애물 → 피버턴 중단, 장애물 회피 위임
                             # (누적 회전은 갱신하지 않아 재개 시 올바르게 이어짐)
                             v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=0.0)
