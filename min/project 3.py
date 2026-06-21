@@ -117,6 +117,7 @@ TARGET_BLOCK_DIST = 600           # mm: 이 거리 이내 장애물이 있으면
 
 SCAN_WIDE_HALF = 135   # 측면 반발력 감지 범위 (is_in_wide_scan 사용) (각도)
 SEND_INTERVAL  = 0.1
+CAMERA_WARMUP_SEC = 2.0   # 시작 시 카메라/센서 초기화 대기 (이 시간 후 모터 제어 시작)
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 측면 반발력 파라미터 (horiz 190mm × fwd 160mm 감지 구간)
@@ -197,6 +198,7 @@ SEARCH_BEHIND_CONE_DEG = 25.0   # deg: 마지막 색지 방향 ± 이 콘 안에
 SEARCH_BEHIND_MAX_DIST = 1200.0 # mm: 이 거리 이내 장애물만 "가린 장애물"로 인정
 SEARCH_BEHIND_MIN_DIST = 150.0  # mm: 이 미만은 노이즈로 무시
 SEARCH_BEHIND_DEPTH    = 350.0  # mm: 장애물 앞면 너머로 더 들어갈 추정 깊이
+SEARCH_BEHIND_REPULSE_SCALE = 1.4  # 장애물 뒤 지점(②)으로 가는 동안 반발력(측면) 배율 (가는 길 장애물 여유↑)
 
 # ── 탐색 안전장치 (무한 정체 방지) ────────────────────────────────────
 # 1) 웨이포인트 타임아웃: 한 지점(이동+피벗 합산)에 이 시간 초과 시 다음 지점으로 포기.
@@ -267,6 +269,7 @@ _search_pivot_accum     = 0.0  # 피벗 누적 회전량 (deg)
 _search_prev_hdg        = None # 피벗 누적 계산용 직전 헤딩
 _search_wp_start_time   = None # 현재 웨이포인트 진입 시각 (타임아웃용)
 _search_abandoned       = 0    # 연속으로 포기(타임아웃/건너뜀)한 웨이포인트 수
+_search_behind_idx      = None # '장애물 뒤' 웨이포인트 인덱스 (없으면 None)
 
 # ── 스레드 공유 상태 ─────────────────────────────────────────────────────────
 _scan_lock   = threading.Lock()
@@ -376,7 +379,7 @@ def _search_reset():
     global _search_active, _search_center_x, _search_center_y
     global _search_corners, _search_corner_idx, _search_phase
     global _search_pivot_start_hdg, _search_pivot_accum, _search_prev_hdg
-    global _search_wp_start_time, _search_abandoned
+    global _search_wp_start_time, _search_abandoned, _search_behind_idx
     _search_active          = False
     _search_center_x        = None
     _search_center_y        = None
@@ -388,6 +391,7 @@ def _search_reset():
     _search_prev_hdg        = None
     _search_wp_start_time   = None
     _search_abandoned       = 0
+    _search_behind_idx      = None
 
 
 def _clamp_into_square(px, py, cx, cy):
@@ -458,7 +462,7 @@ def _search_begin(scan_points=None):
     global _search_active, _search_center_x, _search_center_y
     global _search_corners, _search_corner_idx, _search_phase
     global _search_pivot_accum, _search_pivot_start_hdg, _search_prev_hdg
-    global _search_wp_start_time, _search_abandoned
+    global _search_wp_start_time, _search_abandoned, _search_behind_idx
 
     if _search_active:
         return
@@ -503,6 +507,7 @@ def _search_begin(scan_points=None):
     _search_prev_hdg        = arduino_heading_deg
     _search_wp_start_time   = time.time()
     _search_abandoned       = 0
+    _search_behind_idx      = (1 if behind is not None else None)  # ② 장애물 뒤 = wp1
 
     print(f"[SEARCH] 사각형 탐색 시작 — 중심=({cx:.0f},{cy:.0f})mm "
           f"변={SEARCH_SQUARE_SIZE:.0f}mm"
@@ -643,8 +648,10 @@ def _search_compute_command(scan_points):
         rel_bearing       = normalize_angle(bearing_to_corner - arduino_heading_deg)
 
         # 라이다 회피 시스템에 지점 방향을 목표로 전달 (장애물 우회하며 접근)
+        # 장애물 뒤 지점(②)으로 가는 길에는 반발력을 조금 높여 가는 길 장애물 여유 확보
+        rscale = SEARCH_BEHIND_REPULSE_SCALE if _search_corner_idx == _search_behind_idx else 1.0
         v, w = find_vw_command(scan_points, arduino_heading_deg,
-                               target_bearing=rel_bearing)
+                               target_bearing=rel_bearing, repulse_scale=rscale)
         # 지점 방향과 크게 어긋나면 거의 제자리 회전으로 속도 억제
         if abs(rel_bearing) > SEARCH_ALIGN_ANGLE:
             v = min(v, MIN_SPEED)
@@ -1380,7 +1387,7 @@ def get_narrow_gap_pushes(scan_points, layer, in_stop=False):
 # 계층형 v/w 산출 (메인 로직)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
+def find_vw_layered(scan_points, heading_deg, target_bearing=0.0, repulse_scale=1.0):
     """
     목표 방향 막힘 여부 우선 판정 후 4-way 분기:
       ① 목표 방향 열림           → 목표로 직진 (갭 무시)
@@ -1523,10 +1530,10 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         if DEBUG_CLEAR:
             print(f"  [CLEAR] no obstacles → target={target_bearing:+.1f}° w={w:+.3f}")
 
-    # ── 5. 안전 보정 (항상 가산) ────────────────────────────────────────────
-    w += (side_right_push - side_left_push) * SIDE_W_BOOST_GAIN
+    # ── 5. 안전 보정 (항상 가산) ── repulse_scale: 장애물 뒤 진입 등 '가는 길' 반발력 강화
+    w += (side_right_push - side_left_push) * SIDE_W_BOOST_GAIN * repulse_scale
     side_dw, _, _ = get_side_repulsion(scan_points)
-    w = max(min(w + side_dw, MAX_W), -MAX_W)
+    w = max(min(w + side_dw * repulse_scale, MAX_W), -MAX_W)
 
     if DEBUG_FINAL:
         print(f"  [FINAL] v={v:.2f} w={w:+.2f} target={target_bearing:+.1f}°")
@@ -1561,7 +1568,7 @@ def _stop_set_pivot(heading_deg, target, gap_width):
         stop_pivot_w = -MAX_W if abs(target) < 5 else -math.copysign(MAX_W, target)
 
 
-def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
+def find_vw_command(scan_points, heading_deg, target_bearing=0.0, repulse_scale=1.0):
     """STOP zone 우선 검사 → 활성 시 피봇 탈출, 아니면 계층형 처리.
 
     상태 (stop_phase):
@@ -1578,7 +1585,7 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
             if DEBUG_STOP:
                 print(f"  [STOP] max pivot cycles ({STOP_MAX_CYCLES}) -> force layered")
             _stop_reset()
-            return find_vw_layered(scan_points, heading_deg, target_bearing)
+            return find_vw_layered(scan_points, heading_deg, target_bearing, repulse_scale)
 
         # ★ 이격 우선: 전방 장애물 <300mm & 후방 여유면, STOP존 해제 여부와 무관하게
         #   먼저 직선 후진해 300mm까지 벌린다. (STOP 경계 175mm에서 후진↔layered 가 토글되어
@@ -1596,7 +1603,7 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
                 err = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
                 print(f"  [STOP] zone cleared (heading err={err:.1f}°) -> layered")
             _stop_reset()
-            return find_vw_layered(scan_points, heading_deg, target_bearing)
+            return find_vw_layered(scan_points, heading_deg, target_bearing, repulse_scale)
 
         err   = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
         scale = min(1.0, err / STOP_PIVOT_SLOW_DEG)
@@ -1620,7 +1627,7 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
                   f"global={stop_locked_global_heading:.1f}°")
         return 0.0, stop_pivot_w
 
-    return find_vw_layered(scan_points, heading_deg, target_bearing)
+    return find_vw_layered(scan_points, heading_deg, target_bearing, repulse_scale)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1888,6 +1895,9 @@ def main():
     try:
         camera_tracker.start()
         t_lidar.start()
+        # 카메라/라이다 초기화 대기 — 워밍업 동안 모터 제어(주행) 시작 안 함
+        print(f"[INIT] 센서 워밍업 {CAMERA_WARMUP_SEC:.0f}s 대기...")
+        time.sleep(CAMERA_WARMUP_SEC)
         t_motor.start()
         t_stoplog.start()
         while not _shutdown.is_set():
