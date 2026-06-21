@@ -6,9 +6,10 @@ import numpy as np
 
 # ── 카메라 설정 ─────────────────────────────────────────────────────
 CAMERA_INDEX      = 0         # 인식 안 되면 1로 변경 시도
-FRAME_W           = 1280
-FRAME_H           = 720
-HFOV_DEG          = 60.0      # ★ 수평 FOV (deg) — 실측 필요, 튜닝값
+FRAME_W           = 640
+FRAME_H           = 480
+HFOV_DEG          = 38.6      # ★ 보정 후 화면 가로(_EFF_W=480) 기준 실측값
+                               #   f_px=685 실측 → 2×atan(240/685)=38.6°
 # 카메라가 90° 회전 마운트된 경우 설정. None=정방향
 # CW 회전 마운트 → ROTATE_90_COUNTERCLOCKWISE, CCW 회전 마운트 → ROTATE_90_CLOCKWISE
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
@@ -20,53 +21,60 @@ else:
     _EFF_W, _EFF_H = FRAME_W, FRAME_H
 
 # ── 도착 판정 ────────────────────────────────────────────────────────
-ARRIVE_AREA_MIN   = 12000     # px²: blob 최소 면적 (색지 위 판정 기준) — 튜닝값
-ARRIVE_Y_RATIO    = 0.5       # centroid y > H × 이 값 → 화면 하단 = 가까움 — 튜닝값
 ARRIVE_HOLD_SEC   = 1.2       # 연속 감지 유지 시간 (sec), 1초 인정 기준보다 0.2s 여유
+ARRIVE_ROI_BOTTOM = 0.1       # 하단 ROI 비율 (회전 후 화면 세로의 하단 10%)
+ARRIVE_ROI_PEAK   = 0.7       # ROI 점유율이 이 값 이상 → "꽉 참" 표시
+ARRIVE_ROI_DROP   = 0.5       # peaked 후 이 값 미만으로 떨어지면 도착 판정
+USE_ROI_ARRIVE    = 0         # 1=ROI peaked→drop 도착 판정 활성 / 0=비활성 (오도메트리만 사용)
+
+# ── 근접 접근 제어 ────────────────────────────────────────────────────────
+CLOSE_ENTER_MM     = 400.0    # 이 거리(mm) 이내로 들어오면 CLOSE 모드 전환
+CAM_HEIGHT_MM      = 430.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측 필요
+                               #   = 바퀴 반지름 + 바퀴축~카메라 높이(500mm)
+CAM_TILT_DEG       = 34.5    # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
+                               #   수평=0°, 아래로 내려다볼수록 +
+CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
+USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
+CLOSE_BEARING_SCALE = 0.8212    # ★ calibrate_bearing.py 로 구한 보정 배율 (1.0=보정 없음)
 
 # ── LAB 색상 범위 (OpenCV LAB: L[0-255], A[0-255 / 128=중립], B[0-255 / 128=중립]) ──
-# CLAHE 전처리 후 적용. 실내 조명 조건에서 반드시 튜닝 필요
-# A 채널: 128 이상=적색 방향, 128 이하=녹색 방향
-# B 채널: 128 이상=황색 방향, 128 이하=청색 방향
+# CLAHE 전처리 후 적용. REF_AB ± TOL, L >= L_MIN 기반 실측값
+# REF_AB = {'RED':(182,140), 'YELLOW':(130,165), 'BLUE':(136,94)}
+# TOL    = {'RED':30, 'YELLOW':18, 'BLUE':7}
+# L_MIN  = {'RED':28, 'YELLOW':155, 'BLUE':18}
 COLOR_RANGES = {
-    'RED': [
-        ((40, 155, 115), (220, 255, 185)),   # A 축 양수(적색)
-    ],
-    'YELLOW': [
-        ((150, 120, 155), (255, 155, 255)),  # L 밝음, B 축 양수(황색)
-    ],
-    'BLUE': [
-        ((30, 100, 0), (190, 140, 105)),     # B 축 음수(청색)
-    ],
+    'RED':    [((28,  152, 110), (255, 212, 170))],
+    'YELLOW': [((155, 112, 147), (255, 148, 183))],
+    'BLUE':   [((18,  129,  87), (255, 143, 101))],
 }
-
-# ── 미션 순서 ────────────────────────────────────────────────────────
-MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
-
-# ── 색 소실 판정 ─────────────────────────────────────────────────────
-# 현재 목표 색이 연속 COLOR_LOST_FRAMES 프레임 동안 감지 안 되면 "소실"로 판정
-COLOR_LOST_FRAMES = 60   # ~2초 (30fps 기준). 필요 시 튜닝
-
-# ── 디버그 ───────────────────────────────────────────────────────────
-DEBUG_CAMERA  = True
-SHOW_FRAME    = True     # True → imshow 디버그 창 표시 (VNC/모니터 필요)
 
 # ── CLAHE 전처리 객체 (L 채널 조명 정규화) ───────────────────────────
 _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
+# ── 미션 순서 ────────────────────────────────────────────────────────
+MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
+
+# ── 디버그 ───────────────────────────────────────────────────────────
+DEBUG_CAMERA  = 0     # 카메라 감지 로그 (0=끔, 1=켬)
+SHOW_FRAME    = 0     # imshow 디버그 창 표시 (0=끔, 1=켬, VNC/모니터 필요)
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 공유 상태 (모두 _lock 안에서 접근)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-_lock             = threading.Lock()
-_target_bearing   = None    # float(deg) 또는 None (미감지)
-_color_detected   = False
-_mission_idx      = 0       # 0=RED, 1=YELLOW, 2=BLUE, 3=DONE
-_dwell_start      = None    # 도착 판정 시작 시각 (time.time())
-_dwelling         = False   # True 동안 모터 정지
-_done             = False   # BLUE 완료 → 영구 정지
-_shutdown         = threading.Event()
-_lost_frame_count = 0       # 현재 목표 색 연속 미감지 프레임 수
-_color_lost_flag  = False   # True → 목표 색 완전 소실 → 모터 정지 권장
+_lock                = threading.Lock()
+_target_bearing      = None    # float(deg) 또는 None (미감지)
+_color_detected      = False
+_mission_idx         = 0       # 0=RED, 1=YELLOW, 2=BLUE, 3=DONE
+_dwell_start         = None    # 도착 판정 시작 시각 (time.time())
+_dwelling            = False   # True 동안 모터 정지
+_done                = False   # BLUE 완료 → 영구 정지
+_shutdown            = threading.Event()
+_arrival_signal      = threading.Event()   # 외부(오도메트리 등)에서 도착 신호
+_roi_peaked          = False   # 카메라 스레드 전용: ROI 점유율이 peak를 찍었는지
+_close               = False   # CLOSE 모드 (blob 크기 > 임계)
+_last_stable_bearing = 0.0     # 클리핑 전 마지막 유효 bearing (deg)
+_last_close_bearing  = 0.0     # CLOSE 진입 시 원근 보정 bearing (deg)
+_last_cy             = None    # 마지막 centroid y (기하 거리 추정용)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -84,8 +92,9 @@ def _to_lab(frame):
 def _detect_color(frame, color_name):
     """
     frame에서 color_name 색을 검출.
-    반환: (centroid, area) — centroid=(cx, cy) 또는 None, area=float
-    가장 큰 blob의 centroid와 면적만 반환.
+    반환: (centroid, area, clipped_l, clipped_r)
+      centroid=(cx,cy) 또는 None, area=float
+      clipped_l/r: blob이 좌/우 프레임 경계에 닿으면 True
     """
     lab  = _to_lab(frame)
     mask = np.zeros(lab.shape[:2], dtype=np.uint8)
@@ -99,41 +108,61 @@ def _detect_color(frame, color_name):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
-        return None, 0.0
+        return None, 0.0, False, False
 
     largest = max(contours, key=cv2.contourArea)
     area    = cv2.contourArea(largest)
     if area < 500:
-        return None, 0.0
+        return None, 0.0, False, False
 
     M = cv2.moments(largest)
     if M['m00'] == 0:
-        return None, 0.0
+        return None, 0.0, False, False
 
     cx = int(M['m10'] / M['m00'])
     cy = int(M['m01'] / M['m00'])
-    return (cx, cy), area
+
+    bx, _, bw, _ = cv2.boundingRect(largest)
+    clipped_l = (bx <= 1)
+    clipped_r = (bx + bw >= _EFF_W - 1)
+
+    return (cx, cy), area, clipped_l, clipped_r
 
 
-def _to_bearing(cx):
-    """
-    픽셀 x 좌표 → 로봇 좌표계 각도 (deg).
-    화면 중앙=0, 오른쪽=양수, 왼쪽=음수.
-    jw_won.py의 스캔 각도 규약과 동일.
-    """
-    offset = cx - _EFF_W / 2.0
-    return offset * (HFOV_DEG / _EFF_W)
+def _to_bearing_seek(cx):
+    """SEEK 모드: atan2 정확 모델 — cx만 사용, 거리 무관."""
+    f_px = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
+    return -math.degrees(math.atan2(cx - _EFF_W / 2.0, f_px))
 
 
-def _check_arrival(centroid, area):
+def _to_bearing_close(cx, cy):
     """
-    색지 위에 올라섰는지 판정.
-    조건: blob 면적 >= ARRIVE_AREA_MIN AND centroid가 화면 하단
+    CLOSE 모드: 원근 보정 bearing.
+    화면 하단(가까울수록) cy가 커지면 같은 cx 오프셋에서도 더 큰 각도 반환.
+    bearing = atan2(lateral, forward)
+      lateral = (cx-cx0) / f_px   (정규화 수평)
+      forward = (_EFF_H-cy)/_EFF_H + epsilon  (0=하단/가까움 ~ 1=상단/멀리)
     """
-    if centroid is None or area < ARRIVE_AREA_MIN:
-        return False
-    _, cy = centroid
-    return cy > _EFF_H * ARRIVE_Y_RATIO
+    f_px    = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
+    lateral = (cx - _EFF_W / 2.0) / f_px
+    forward = (_EFF_H - cy) / _EFF_H + CAM_POLAR_EPSILON
+    return -math.degrees(math.atan2(lateral, forward)) * CLOSE_BEARING_SCALE
+
+
+def _get_roi_fill(frame, color_name, bottom_ratio=None):
+    """하단 ROI 내 목표 색 점유율(0.0~1.0) 반환.
+    bottom_ratio 미지정 시 ARRIVE_ROI_BOTTOM 사용."""
+    ratio     = bottom_ratio if bottom_ratio is not None else ARRIVE_ROI_BOTTOM
+    roi_start = int(_EFF_H * (1.0 - ratio))
+    roi       = frame[roi_start:, :]
+    roi_total = roi.shape[0] * roi.shape[1]
+    if roi_total == 0:
+        return 0.0
+    lab  = _to_lab(roi)
+    mask = np.zeros(lab.shape[:2], dtype=np.uint8)
+    for lo, hi in COLOR_RANGES[color_name]:
+        mask |= cv2.inRange(lab, np.array(lo), np.array(hi))
+    return cv2.countNonZero(mask) / roi_total
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -143,7 +172,7 @@ def _check_arrival(centroid, area):
 def _camera_loop():
     global _target_bearing, _color_detected
     global _mission_idx, _dwell_start, _dwelling, _done
-    global _lost_frame_count, _color_lost_flag
+    global _close, _last_stable_bearing, _last_close_bearing, _last_cy
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
@@ -175,25 +204,69 @@ def _camera_loop():
             time.sleep(0.03)
             continue
 
-        target_color   = MISSION_ORDER[idx]
-        centroid, area = _detect_color(frame, target_color)   # CV 연산은 lock 밖
-        arrived        = _check_arrival(centroid, area)
+        target_color                       = MISSION_ORDER[idx]
+        centroid, area, clip_l, clip_r     = _detect_color(frame, target_color)
+        roi_fill                        = _get_roi_fill(frame, target_color)
+
+        # ── 근접 / 클리핑 판정 (lock 밖, 카메라 스레드 전용) ──────────────
+        global _roi_peaked
+
+        # bearing 계산: SEEK=atan2 / CLOSE=원근보정
+        if centroid is not None:
+            cx, cy   = centroid
+            clipped  = clip_l or clip_r
+
+            # ── 거리 기반 CLOSE 판정 ────────────────────────────────────────
+            f_px_v     = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
+            delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, f_px_v))
+            depression = CAM_TILT_DEG + delta_v
+            cam_dist   = (CAM_HEIGHT_MM / math.tan(math.radians(depression))
+                          if depression > 1.0 else 5000.0)
+            is_close_now = (cam_dist < CLOSE_ENTER_MM)
+
+            bearing_seek = _to_bearing_seek(cx)
+            if not (USE_CLIPPING_GUARD and clipped):
+                _last_stable_bearing = bearing_seek
+
+            if is_close_now:
+                bearing = _last_stable_bearing if (USE_CLIPPING_GUARD and clipped) \
+                          else _to_bearing_close(cx, cy)
+                _last_close_bearing = bearing
+            else:
+                bearing = _last_stable_bearing
+            _last_cy = cy
+        else:
+            bearing      = None
+            is_close_now = False
+            cam_dist     = 5000.0
+
+        # 도착 판정 (3가지 중 하나라도 충족 시 arrived=True)
+        if USE_ROI_ARRIVE:
+            if roi_fill >= ARRIVE_ROI_PEAK:
+                if not _roi_peaked and DEBUG_CAMERA:
+                    print(f"[CAMERA] {target_color} ROI peak! fill={roi_fill:.2f}")
+                _roi_peaked = True
+            # ① fill 높음 유지 (색지 위 정지)
+            # ② peaked 후 drop (색지 통과)
+            # ③ 오도메트리 외부 신호
+            arrived = (roi_fill >= ARRIVE_ROI_PEAK
+                       or (_roi_peaked and roi_fill < ARRIVE_ROI_DROP)
+                       or _arrival_signal.is_set())
+        else:
+            arrived = _arrival_signal.is_set()   # USE_ROI_ARRIVE=0이면 오도메트리만
 
         with _lock:
-            if centroid is not None:
-                _target_bearing   = _to_bearing(centroid[0])
-                _color_detected   = True
-                _lost_frame_count = 0
-                _color_lost_flag  = False
-            else:
-                _target_bearing    = None
-                _color_detected    = False
-                _lost_frame_count += 1
-                if _lost_frame_count >= COLOR_LOST_FRAMES:
-                    if not _color_lost_flag and DEBUG_CAMERA:
-                        print(f"[CAMERA] {target_color} 완전 소실 "
-                              f"({COLOR_LOST_FRAMES}프레임) → 정지 신호")
-                    _color_lost_flag = True
+            _target_bearing = bearing
+            _color_detected = bearing is not None
+            _close          = is_close_now
+
+            if DEBUG_CAMERA:
+                clip_str = ('L' if clip_l else '') + ('R' if clip_r else '') or '-'
+                print(f"[CAMERA] {target_color} area={area:.0f} "
+                      f"clip={clip_str} close={is_close_now} "
+                      f"bearing={bearing:+.1f}° dist={cam_dist:.0f}mm fill={roi_fill:.2f} "
+                      f"peaked={_roi_peaked}" if bearing is not None else
+                      f"[CAMERA] {target_color} 미감지 fill={roi_fill:.2f}")
 
             if arrived:
                 if _dwell_start is None:
@@ -203,25 +276,21 @@ def _camera_loop():
                 _dwelling = True
 
                 elapsed = time.time() - _dwell_start
-                if DEBUG_CAMERA:
-                    print(f"[CAMERA] {target_color} dwell {elapsed:.1f}s "
-                          f"area={area:.0f} bearing={_target_bearing}")
-
                 if elapsed >= ARRIVE_HOLD_SEC:
                     print(f"[CAMERA] {target_color} 완료! → ", end='')
-                    _mission_idx      += 1
-                    _dwell_start       = None
-                    _dwelling          = False
-                    _lost_frame_count  = 0     # 다음 색 탐색 시작 시 초기화
-                    _color_lost_flag   = False
+                    _mission_idx         += 1
+                    _dwell_start          = None
+                    _dwelling             = False
+                    _roi_peaked           = False
+                    _close                = False
+                    _last_stable_bearing  = 0.0
+                    _arrival_signal.clear()        # 외부 도착 신호 초기화
                     if _mission_idx >= len(MISSION_ORDER):
                         _done = True
                         print("DONE (완주)")
                     else:
                         print(f"{MISSION_ORDER[_mission_idx]} 탐색 시작")
             else:
-                if _dwell_start is not None and DEBUG_CAMERA:
-                    print(f"[CAMERA] {target_color} 도착 조건 해제 (타이머 리셋)")
                 _dwell_start = None
                 _dwelling    = False
 
@@ -292,13 +361,52 @@ def is_done():
         return _done
 
 
-def is_color_lost():
+def is_close():
+    """True: blob이 충분히 커서 CLOSE 모드 (원근 보정 bearing + 위치 제어 전환)."""
+    with _lock:
+        return _close
+
+
+def get_last_stable_bearing():
+    """클리핑 전 마지막 유효 bearing (deg). CLOSE 목표 좌표 계산에 사용."""
+    with _lock:
+        return _last_stable_bearing
+
+
+def get_last_close_bearing():
+    """CLOSE 모드 원근 보정 bearing (deg). _compute_close_target 용."""
+    with _lock:
+        return _last_close_bearing
+
+
+def get_estimated_distance_mm():
     """
-    True: 현재 목표 색이 COLOR_LOST_FRAMES 프레임 이상 연속으로 미감지.
-    → 모터 정지 권장. 색이 다시 보이면 자동으로 False로 복귀.
+    카메라 기하학 기반 거리 추정 (mm).
+    공식: d = CAM_HEIGHT_MM / tan(CAM_TILT_DEG + delta_v)
+      delta_v: centroid cy → 카메라 광축 기준 수직 편차 각도
+      카메라 90° 회전 마운트이므로 수직 방향 f_px = HFOV_DEG 기준으로 계산
     """
     with _lock:
-        return _color_lost_flag
+        cy = _last_cy
+    if cy is None:
+        return 500.0
+
+    # f_px는 렌즈 고유값 — HFOV_DEG가 _EFF_W 기준으로 측정됐으므로 _EFF_W로 계산
+    f_px       = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
+    delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, f_px))
+    depression = CAM_TILT_DEG + delta_v   # cy 클수록(하단) → depression 커짐 → 가까움
+
+    if depression <= 1.0:
+        return 5000.0   # 수평 이상 → 유효 범위 밖 (매우 먼 거리)
+
+    d = CAM_HEIGHT_MM / math.tan(math.radians(depression))
+    return max(d, 50.0)   # 최소 50mm 클램프
+
+
+def signal_arrival():
+    """오도메트리 등 외부 시스템이 도착을 알릴 때 호출.
+    카메라의 peaked→drop 판정이 막혀 있어도 미션이 진행된다."""
+    _arrival_signal.set()
 
 
 def get_state():
