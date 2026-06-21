@@ -280,7 +280,10 @@ def _camera_loop():
 
         target_color                       = MISSION_ORDER[idx]
         centroid, area, clip_l, clip_r     = _detect_color(frame, target_color)
-        roi_fill                        = _get_roi_fill(frame, target_color)
+        # roi_fill은 USE_ROI_ARRIVE(도착판정) 또는 DEBUG_CAMERA(로그)일 때만 쓰인다.
+        # 매 프레임 전체프레임 LAB 변환이라, 안 쓰면 건너뛰어 연산을 절감한다.
+        roi_fill = (_get_roi_fill(frame, target_color)
+                    if (USE_ROI_ARRIVE or DEBUG_CAMERA) else 0.0)
 
         # ── 후보 검출: 확정 검출이 None일 때 목표 색 후보 / 비목표 색 메모리 ──
         cand_bearing = None
