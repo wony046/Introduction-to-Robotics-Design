@@ -167,6 +167,7 @@ DEBUG_CLOSE_POS    = 0   # [CLOSE] 접근 중 위치/거리
 DEBUG_CLOSE_HDG    = 0   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
 DEBUG_CLOSE_DONE   = 0   # [CLOSE] 도달 판정
 DEBUG_CLOSE_REMAIN = 0   # [CLOSE] 남은 거리 / 진행률 (매 사이클)
+DEBUG_LOST        = 0   # [LOST] 색 미감지 시 마지막 본 색지 추종
 DEBUG_SEND        = 0   # [SEND] 모터 명령 전송
 
 # ── 전역 상태 ────────────────────────────────────────────────────────────────
@@ -185,6 +186,17 @@ CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 CLOSE_OBSERVE_SEC = 1.0   # CLOSE 진입 후 정지 관측 시간 (sec)
 CLOSE_STANDOFF_MM = 100   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
+
+# ── 마지막 본 색지 추종 (색 미감지 시 오도메트리로 추정 좌표 기억) ──────────────
+# 색지를 보다가 시야에서 놓치는 순간, 마지막 bearing + 추정거리 + 현재 오도메트리로
+# 색지의 대략적 월드 좌표를 1회 기록. 이후 그 좌표로의 상대 방위각을 target_bearing
+# 으로 넘겨 → 기존 갭 추종(②)이 장애물을 피하며 색지 방향 갭만 선택해 접근한다.
+# 오도메트리 누적 오차(회전/이동)에 대응해 허용 방향 범위(tol)를 최대 20°까지 확장.
+LOST_TOL_MAX_DEG        = 20.0  # deg: 허용 방향 범위 최대치 (오차 대응 상한)
+LOST_TOL_PER_ROT_DEG    = 0.15  # 누적 회전 1°당 tol 증가량 (deg)
+LOST_TOL_PER_M          = 8.0   # 누적 이동 1m당 tol 증가량 (deg)
+LOST_ARRIVE_DEADZONE_MM = 150   # mm: 추정 좌표에 이만큼 근접하면 베어링 노이즈 방지 위해 정면 유지
+
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터
@@ -193,6 +205,16 @@ stop_locked_target         = 0.0
 stop_locked_gap            = 0.0
 stop_locked_global_heading = 0.0
 stop_phase                 = 0     # 0=idle, 2=피봇
+
+# ── 마지막 본 색지 추종 전역 상태 ─────────────────────────────────────────────
+_lost_target_x   = None   # mm: 마지막 본 색지 추정 월드 x (색 미감지 시 1회 기록)
+_lost_target_y   = None   # mm: 추정 월드 y
+_lost_accum_rot  = 0.0    # deg: 스냅샷 이후 누적 |회전| (tol 증가 구동)
+_lost_accum_dist = 0.0    # mm:  스냅샷 이후 누적 이동거리 (tol 증가 구동)
+_lost_prev_x     = None   # 직전 사이클 오도메트리 (누적 델타 계산용)
+_lost_prev_y     = None
+_lost_prev_hdg   = None
+_have_seen_color = False  # 색지를 한 번이라도 본 적 있는지 (없으면 추정 좌표 미기록)
 
 # ── 스레드 공유 상태 ─────────────────────────────────────────────────────────
 _scan_lock   = threading.Lock()
@@ -291,6 +313,100 @@ def _compute_close_target():
               f"dist={dist_mm:.0f}→{target_dist:.0f}mm(standoff {CLOSE_STANDOFF_MM})  "
               f"global_bearing={bearing_global_deg:.1f}°")
     return x_t, y_t
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 마지막 본 색지 추종 (색 미감지 시)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def _note_color_seen():
+    """색지를 한 번이라도 보면 호출. 이후 소실 시 추정 좌표 기록 허용."""
+    global _have_seen_color
+    _have_seen_color = True
+
+
+def _clear_lost_target():
+    """색 재감지 시 호출 — 추정 좌표·누적 오차 초기화 (다음 소실 때 새로 기록)."""
+    global _lost_target_x, _lost_target_y, _lost_accum_rot, _lost_accum_dist
+    global _lost_prev_x, _lost_prev_y, _lost_prev_hdg
+    _lost_target_x = _lost_target_y = None
+    _lost_accum_rot = _lost_accum_dist = 0.0
+    _lost_prev_x = _lost_prev_y = _lost_prev_hdg = None
+
+
+def _forget_color():
+    """미션 경계(색지 도달/완주) 또는 추측 소진 시 — 색 기억 + 추정 좌표 모두 폐기.
+    _have_seen_color 까지 내려 다음 색은 '실제로 다시 봐야' 추정 좌표를 만든다.
+    → 완료한 색지의 잔여 bearing/거리로 phantom 좌표가 찍혀 되돌아가는 것 방지."""
+    global _have_seen_color
+    _have_seen_color = False
+    _clear_lost_target()
+
+
+def _update_lost_target():
+    """색 미감지 사이클마다 호출.
+      - 추정 좌표가 없으면(소실 직후) 마지막 bearing + 추정거리 + 현재 오도메트리로
+        색지의 대략적 월드 좌표를 1회 기록.
+      - 매 사이클 오도메트리 델타로 누적 회전·이동을 적산 → tol 증가에 사용.
+    색을 한 번도 본 적 없으면 기록하지 않음(정면 일반 탐색 유지)."""
+    global _lost_target_x, _lost_target_y
+    global _lost_accum_rot, _lost_accum_dist
+    global _lost_prev_x, _lost_prev_y, _lost_prev_hdg
+
+    if _lost_target_x is None:
+        if not _have_seen_color:
+            return
+        last_b = camera_tracker.get_last_stable_bearing()
+        dist   = camera_tracker.get_estimated_distance_mm()
+        g_rad  = math.radians(arduino_heading_deg + last_b)
+        _lost_target_x   = arduino_x_mm + dist * math.sin(g_rad)
+        _lost_target_y   = arduino_y_mm + dist * math.cos(g_rad)
+        _lost_accum_rot  = 0.0
+        _lost_accum_dist = 0.0
+        _lost_prev_x, _lost_prev_y, _lost_prev_hdg = \
+            arduino_x_mm, arduino_y_mm, arduino_heading_deg
+        if DEBUG_LOST:
+            print(f"[LOST] 색지 추정 좌표 기록: ({_lost_target_x:.0f},{_lost_target_y:.0f})mm "
+                  f"bearing={last_b:+.1f}° dist={dist:.0f}mm")
+        return
+
+    # 추정 좌표에 도달했는데도 색 미감지 → 추측 소진 → 폐기 (제자리 맴돌이 방지)
+    # 정면 일반 탐색으로 복귀하며, 색을 다시 봐야 새 좌표를 만든다.
+    if math.hypot(_lost_target_x - arduino_x_mm,
+                  _lost_target_y - arduino_y_mm) < LOST_ARRIVE_DEADZONE_MM:
+        if DEBUG_LOST:
+            print("  [LOST] 추정 좌표 도달했지만 색 미감지 → 추측 폐기, 정면 탐색")
+        _forget_color()
+        return
+
+    # 누적 오차 적산 (회전 + 이동)
+    if _lost_prev_hdg is not None:
+        _lost_accum_rot  += abs(normalize_angle(arduino_heading_deg - _lost_prev_hdg))
+        _lost_accum_dist += math.hypot(arduino_x_mm - _lost_prev_x,
+                                       arduino_y_mm - _lost_prev_y)
+    _lost_prev_x, _lost_prev_y, _lost_prev_hdg = \
+        arduino_x_mm, arduino_y_mm, arduino_heading_deg
+
+
+def _get_lost_target():
+    """현재 오도메트리 기준 색지 추정 좌표로의 (상대 베어링, 허용범위 tol) 반환.
+    추정 좌표 없음 → (0.0, 0.0): 정면 일반 탐색.
+    누적 회전·이동이 클수록 tol을 LOST_TOL_MAX_DEG(20°)까지 선형 확장."""
+    if _lost_target_x is None:
+        return 0.0, 0.0
+
+    dx = _lost_target_x - arduino_x_mm
+    dy = _lost_target_y - arduino_y_mm
+
+    tol = min(LOST_TOL_MAX_DEG,
+              _lost_accum_rot * LOST_TOL_PER_ROT_DEG
+              + (_lost_accum_dist / 1000.0) * LOST_TOL_PER_M)
+
+    rel_bearing = normalize_angle(math.degrees(math.atan2(dx, dy)) - arduino_heading_deg)
+    if DEBUG_LOST:
+        print(f"  [LOST] rel_b={rel_bearing:+.1f}° tol=±{tol:.1f}° "
+              f"(누적 회전={_lost_accum_rot:.0f}° 이동={_lost_accum_dist:.0f}mm)")
+    return rel_bearing, tol
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -778,14 +894,18 @@ def get_front_passable_gaps(scan_points):
     return sorted(passable, key=lambda g: g['score'], reverse=True)
 
 
-def choose_target_gap(passable_gaps, target_bearing, prev_heading):
+def choose_target_gap(passable_gaps, target_bearing, prev_heading, tol=0.0):
     """통과 가능 갭 중 목표 방향에 가장 가깝되, 직전 방향에서 급변하지 않는 갭 선택.
-    cost = 목표편차 + (직전방향편차 가중) → 비슷한 두 갭 사이 깜빡임(jitter) 억제."""
+    cost = 목표편차 + (직전방향편차 가중) → 비슷한 두 갭 사이 깜빡임(jitter) 억제.
+
+    tol > 0: 목표 ±tol 이내 갭은 목표편차 0으로 동등 취급(허용 방향 범위 확장).
+    → 오도메트리 누적 오차 시 정확한 베어링을 고집하지 않고 평활화 항이 안정적 갭 선택."""
     if not passable_gaps:
         return None
 
     def cost(g):
         d_target = abs(((g['center_angle'] - target_bearing) + 180) % 360 - 180)
+        d_target = max(0.0, d_target - tol)
         d_prev   = abs(((g['center_angle'] - prev_heading)   + 180) % 360 - 180)
         return GAP_TARGET_WEIGHT * d_target + GAP_SMOOTH_WEIGHT * d_prev
 
@@ -955,7 +1075,7 @@ def get_narrow_gap_pushes(scan_points, layer, in_stop=False):
 # 계층형 v/w 산출 (메인 로직)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
+def find_vw_layered(scan_points, heading_deg, target_bearing=0.0, target_tol=0.0):
     """
     목표 방향 막힘 여부 우선 판정 후 4-way 분기:
       ① 목표 방향 열림           → 목표로 직진 (갭 무시)
@@ -991,7 +1111,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
 
     # ── 3. 전방 통과 갭 탐색 + 목표 방향 막힘 판정 ─────────────────────────
     front_gaps = get_front_passable_gaps(scan_points)
-    chosen_gap = choose_target_gap(front_gaps, target_bearing, prev_desired_heading)
+    chosen_gap = choose_target_gap(front_gaps, target_bearing, prev_desired_heading, tol=target_tol)
     blocked    = is_target_blocked(scan_points, target_bearing)
     if DEBUG_BRANCH:
         print(f"[BRANCH] tb={target_bearing:+.0f} gaps={len(front_gaps)} "
@@ -1136,7 +1256,7 @@ def _stop_set_pivot(heading_deg, target, gap_width):
         stop_pivot_w = -MAX_W if abs(target) < 5 else -math.copysign(MAX_W, target)
 
 
-def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
+def find_vw_command(scan_points, heading_deg, target_bearing=0.0, target_tol=0.0):
     """STOP zone 우선 검사 → 활성 시 피봇 탈출, 아니면 계층형 처리.
 
     상태 (stop_phase):
@@ -1154,14 +1274,14 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
                 err = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
                 print(f"  [STOP] zone cleared (heading err={err:.1f}°) -> layered")
             _stop_reset()
-            return find_vw_layered(scan_points, heading_deg, target_bearing)
+            return find_vw_layered(scan_points, heading_deg, target_bearing, target_tol)
 
         stop_cycle_count += 1
         if stop_cycle_count >= STOP_MAX_CYCLES:
             if DEBUG_STOP:
                 print(f"  [STOP] max pivot cycles ({STOP_MAX_CYCLES}) -> force layered")
             _stop_reset()
-            return find_vw_layered(scan_points, heading_deg, target_bearing)
+            return find_vw_layered(scan_points, heading_deg, target_bearing, target_tol)
 
         err   = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
         scale = min(1.0, err / STOP_PIVOT_SLOW_DEG)
@@ -1185,7 +1305,7 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
                   f"global={stop_locked_global_heading:.1f}°")
         return 0.0, stop_pivot_w
 
-    return find_vw_layered(scan_points, heading_deg, target_bearing)
+    return find_vw_layered(scan_points, heading_deg, target_bearing, target_tol)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1300,10 +1420,12 @@ def _motor_controller(arduino):
                 v, w = 0.0, 0.0
                 prev_w = 0.0
                 _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
+                _forget_color()   # 색지 도달/완주 → 색 기억까지 리셋 (다음 색은 다시 봐야 추종)
 
             # ── 상태 2: CLOSE → 정지 관측 후 오도메트리 위치 제어 ──────────
             # _close_target_x가 이미 세팅돼 있으면 카메라 미감지 시에도 CLOSE 유지
             elif camera_tracker.is_close() or _close_target_x is not None:
+                _note_color_seen()   # CLOSE 진입 = 색지를 봤음 → 소실 시 좌표 기록 허용
                 # ── 2a: 관측 단계 (CLOSE_OBSERVE_SEC 동안 정지) ─────────────
                 if _close_target_x is None:
                     if _close_observe_start is None:
@@ -1377,10 +1499,17 @@ def _motor_controller(arduino):
                 bearing = camera_tracker.get_bearing()
                 if bearing is not None:
                     # 색 감지 중: 카메라 bearing 방향으로 주행
+                    # → 기억 초기화 (다음 소실 시 현재 위치 기준으로 새로 기록)
+                    _note_color_seen()
+                    _clear_lost_target()
                     v, w = find_vw_command(pts, arduino_heading_deg, target_bearing=bearing)
                 else:
-                    # 색 미감지: 정면(0°) 기준 일반 장애물 회피
-                    v, w = find_vw_command(pts, arduino_heading_deg)
+                    # 색 미감지: 마지막 본 색지 추정 좌표로 향함 (오도메트리 기억)
+                    # → 추정 좌표 방향 갭만 선택해 접근, 누적 오차만큼 허용 범위 확장
+                    _update_lost_target()
+                    lost_tb, lost_tol = _get_lost_target()
+                    v, w = find_vw_command(pts, arduino_heading_deg,
+                                           target_bearing=lost_tb, target_tol=lost_tol)
 
             w = W_SMOOTH * w + (1.0 - W_SMOOTH) * prev_w
             prev_w = w

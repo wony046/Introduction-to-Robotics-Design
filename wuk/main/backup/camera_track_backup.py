@@ -6,10 +6,11 @@ import numpy as np
 
 # ── 카메라 설정 ─────────────────────────────────────────────────────
 CAMERA_INDEX      = 0         # 인식 안 되면 1로 변경 시도
-FRAME_W           = 640
-FRAME_H           = 480
-HFOV_DEG          = 38.6      # ★ 보정 후 화면 가로(_EFF_W=480) 기준 실측값
-                               #   f_px=685 실측 → 2×atan(240/685)=38.6°
+FRAME_W           = 848       # ★ 16:9 (848×480) 로 변경 (기존 640, 4:3). FRAME_H=480 유지
+FRAME_H           = 480       #   → 회전축상 _EFF_W=FRAME_H=480 보존 → 조향(bearing) 축 유지
+HFOV_DEG          = 32.1      # ★ 848×480(16:9) calibrate_hfov.py 재측정값 (_EFF_W=480 기준)
+                               #   f_px=834 → 2×atan(240/834)=32.1°
+                               #   (기존 4:3 640×480: 38.6°/f_px=685 — 16:9에서 수직FOV가 좁아져 변경됨)
 # 카메라가 90° 회전 마운트된 경우 설정. None=정방향
 # CW 회전 마운트 → ROTATE_90_COUNTERCLOCKWISE, CCW 회전 마운트 → ROTATE_90_CLOCKWISE
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
@@ -29,13 +30,13 @@ USE_ROI_ARRIVE    = 0         # 1=ROI peaked→drop 도착 판정 활성 / 0=비
 
 # ── 근접 접근 제어 ────────────────────────────────────────────────────────
 CLOSE_ENTER_MM     = 400.0    # 이 거리(mm) 이내로 들어오면 CLOSE 모드 전환
-CAM_HEIGHT_MM      = 430.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측 필요
-                               #   = 바퀴 반지름 + 바퀴축~카메라 높이(500mm)
-CAM_TILT_DEG       = 34.5    # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
-                               #   수평=0°, 아래로 내려다볼수록 +
+CAM_HEIGHT_MM      = 590.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측값 (59cm)
+CAM_TILT_DEG       = 41.8    # 848×480 거리검증 보정값 (다점 실측 편향 보정, 40.4→41.8). 수평=0°, 아래로+ (4:3: 34.5)
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
 USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
-CLOSE_BEARING_SCALE = 0.8212    # ★ calibrate_bearing.py 로 구한 보정 배율 (1.0=보정 없음)
+CLOSE_BEARING_SCALE = 0.7913    # ★ 848×480 calibrate_bearing.py 재측정 (RMSE 2.6°). 기존 4:3: 0.8212
+                                #   주의: 보정도구는 X=우측+ 규약이라 부호가 -0.7913로 출력되지만,
+                                #   시스템 bearing은 우측=음수(SEEK와 동일)이므로 크기만 取해 +로 적용.
 
 # ── LAB 색상 범위 (OpenCV LAB: L[0-255], A[0-255 / 128=중립], B[0-255 / 128=중립]) ──
 # CLAHE 전처리 후 적용. REF_AB ± TOL, L >= L_MIN 기반 실측값
@@ -112,7 +113,7 @@ def _detect_color(frame, color_name):
 
     largest = max(contours, key=cv2.contourArea)
     area    = cv2.contourArea(largest)
-    if area < 500:
+    if area < 500:   # [16:9] 절대 픽셀 임계값. FOV 가로확장 방식이면 객체 픽셀크기 불변→유지 OK
         return None, 0.0, False, False
 
     M = cv2.moments(largest)

@@ -4,7 +4,7 @@ sim_logic.py  ─  Project 3 주행 로직 (하드웨어 의존 제거판)
 
 jw_won.py 의 LiDAR 회피 알고리즘(레이어 / STOP / FGM 갭 / 측면반발 /
 가상장애물 / 점수기반 회피)을 그대로 포팅한다. serial·threading·camera·
-오도메트리·boundary·CLOSE 부분은 시뮬레이터(project3_sim.py)에서 처리하므로
+오도메트리·색지기억(lost)·CLOSE 부분은 시뮬레이터(project3_sim.py)에서 처리하므로
 여기서는 제외하고, 순수하게 (scan, heading, target_bearing) → (v, w) 만 계산한다.
 
 규약 (실제 하드웨어와 동일하게 공급):
@@ -100,10 +100,11 @@ VIRTUAL_OBS_GAIN        = 1.5
 VIRTUAL_CENTER_DEADBAND = 10
 VIRTUAL_EXP_K           = 2.5
 
-# boundary / CLOSE (Phase 2~3 에서 시뮬이 사용; 여기엔 값만 보관)
-BOUNDARY_RADIUS     = 1500.0      # ★
-BOUNDARY_BLEND_DIST = 300.0
-BOUNDARY_V_MIN      = 0.5
+# 마지막 본 색지 추종 (색 미감지 시) / CLOSE (Phase 2~3 에서 시뮬이 사용)
+LOST_TOL_MAX_DEG        = 20.0    # ★ deg: 허용 방향 범위 최대치 (오차 대응 상한)
+LOST_TOL_PER_ROT_DEG    = 0.15    # 누적 회전 1°당 tol 증가량 (deg)
+LOST_TOL_PER_M          = 8.0     # 누적 이동 1m당 tol 증가량 (deg)
+LOST_ARRIVE_DEADZONE_MM = 150     # mm: 추정 좌표 근접 시 정면 유지(베어링 노이즈 방지)
 KP_CLOSE_HDG        = 0.1         # ★
 CLOSE_SPEED_MAX     = 0.2         # ★
 CLOSE_ARRIVE_MM     = 30          # ★
@@ -131,12 +132,20 @@ stop_phase                 = 0     # 0=idle, 2=pivot
 #   시뮬은 표준 월드(우+X)를 쓰므로, project3_sim 에서 매 스텝
 #     arduino_x_mm = -robot_x_world,  arduino_y_mm = robot_y_world,
 #     arduino_heading_deg = robot_h
-#   로 미러링해서 세팅해야 boundary/CLOSE 함수가 올바르게 동작한다.
+#   로 미러링해서 세팅해야 색지기억(lost)/CLOSE 함수가 올바르게 동작한다.
 arduino_x_mm        = 0.0
 arduino_y_mm        = 0.0
 arduino_heading_deg = 0.0
-_boundary_center_x  = None
-_boundary_center_y  = None
+
+# 마지막 본 색지 추종 상태 (jw_won.py 전역과 동일 역할)
+_lost_target_x   = None   # mm: 마지막 본 색지 추정 좌표 x (arduino 미러 프레임)
+_lost_target_y   = None
+_lost_accum_rot  = 0.0    # deg: 스냅샷 이후 누적 |회전|
+_lost_accum_dist = 0.0    # mm:  스냅샷 이후 누적 이동거리
+_lost_prev_x     = None   # 직전 사이클 오도메트리 (누적 델타용)
+_lost_prev_y     = None
+_lost_prev_hdg   = None
+_have_seen_color = False  # 색지를 한 번이라도 본 적 있는지
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -146,7 +155,7 @@ _boundary_center_y  = None
 SLIDER_PARAMS = [
     'FORWARD_SPEED', 'CLOSE_SPEED_MAX', 'MAX_W', 'KP_GOAL', 'KP_CLOSE_HDG',
     'STOP_FWD_MIN', 'STOP_FWD_MAX', 'STOP_HORIZ_TH', 'STOP_ESCAPE_MIN_GAP',
-    'DETECTION_RANGE', 'BOUNDARY_RADIUS', 'CLOSE_ENTER_MM', 'CLOSE_ARRIVE_MM',
+    'DETECTION_RANGE', 'LOST_TOL_MAX_DEG', 'CLOSE_ENTER_MM', 'CLOSE_ARRIVE_MM',
 ]
 
 def apply_params(values: dict):
@@ -514,11 +523,13 @@ def get_front_passable_gaps(scan_points):
     return sorted(passable, key=lambda g: g['score'], reverse=True)
 
 
-def choose_target_gap(passable_gaps, target_bearing, prev_heading):
+def choose_target_gap(passable_gaps, target_bearing, prev_heading, tol=0.0):
+    """tol > 0: 목표 ±tol 이내 갭은 목표편차 0으로 동등 취급(허용 방향 범위 확장)."""
     if not passable_gaps:
         return None
     def cost(g):
         d_target = abs(((g['center_angle'] - target_bearing) + 180) % 360 - 180)
+        d_target = max(0.0, d_target - tol)
         d_prev   = abs(((g['center_angle'] - prev_heading)   + 180) % 360 - 180)
         return GAP_TARGET_WEIGHT * d_target + GAP_SMOOTH_WEIGHT * d_prev
     return min(passable_gaps, key=cost)
@@ -608,7 +619,7 @@ def get_narrow_gap_pushes(scan_points, layer, in_stop=False):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 계층형 v/w 산출
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
+def find_vw_layered(scan_points, heading_deg, target_bearing=0.0, target_tol=0.0):
     global _last_direction, prev_desired_heading
 
     layer_results = []
@@ -625,7 +636,7 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         v = FORWARD_SPEED
 
     front_gaps = get_front_passable_gaps(scan_points)
-    chosen_gap = choose_target_gap(front_gaps, target_bearing, prev_desired_heading)
+    chosen_gap = choose_target_gap(front_gaps, target_bearing, prev_desired_heading, tol=target_tol)
     blocked    = is_target_blocked(scan_points, target_bearing)
 
     side_left_push, side_right_push = get_side_layer_push(scan_points)
@@ -723,7 +734,7 @@ def _stop_set_pivot(heading_deg, target, gap_width):
         stop_pivot_w = -MAX_W if abs(target) < 5 else -math.copysign(MAX_W, target)
 
 
-def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
+def find_vw_command(scan_points, heading_deg, target_bearing=0.0, target_tol=0.0):
     global stop_cycle_count, stop_pivot_w, stop_locked_target, stop_locked_gap, \
            stop_locked_global_heading, stop_phase
 
@@ -731,11 +742,11 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
     if stop_phase == 2:
         if not detect_stop_zone(scan_points):
             _stop_reset()
-            return find_vw_layered(scan_points, heading_deg, target_bearing)
+            return find_vw_layered(scan_points, heading_deg, target_bearing, target_tol)
         stop_cycle_count += 1
         if stop_cycle_count >= STOP_MAX_CYCLES:
             _stop_reset()
-            return find_vw_layered(scan_points, heading_deg, target_bearing)
+            return find_vw_layered(scan_points, heading_deg, target_bearing, target_tol)
         err   = abs(((heading_deg - stop_locked_global_heading) + 180) % 360 - 180)
         scale = min(1.0, err / STOP_PIVOT_SLOW_DEG)
         speed = STOP_PIVOT_MIN_W + (STOP_PIVOT_MAX_W - STOP_PIVOT_MIN_W) * scale
@@ -750,7 +761,7 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
         stop_phase       = 2
         return 0.0, stop_pivot_w
 
-    return find_vw_layered(scan_points, heading_deg, target_bearing)
+    return find_vw_layered(scan_points, heading_deg, target_bearing, target_tol)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -817,45 +828,89 @@ def compute_close_target(close_bearing_deg, dist_mm):
     return x_t, y_t
 
 
-def set_boundary_center():
-    """색 미감지 전환 시 최초 1회 현재 위치를 경계 원 중심으로 설정 (이후 고정)."""
-    global _boundary_center_x, _boundary_center_y
-    if _boundary_center_x is None:
-        _boundary_center_x = arduino_x_mm
-        _boundary_center_y = arduino_y_mm
+def note_color_seen():
+    """색지를 한 번이라도 보면 호출. 이후 소실 시 추정 좌표 기록 허용."""
+    global _have_seen_color
+    _have_seen_color = True
 
 
-def clear_boundary_center():
-    """색 감지 중 호출: 다음 소실 때 현재 위치가 새 기준이 되도록 리셋."""
-    global _boundary_center_x, _boundary_center_y
-    _boundary_center_x = None
-    _boundary_center_y = None
+def clear_lost_target():
+    """색 재감지 시 호출 — 추정 좌표·누적 오차 초기화 (다음 소실 때 새로 기록)."""
+    global _lost_target_x, _lost_target_y, _lost_accum_rot, _lost_accum_dist
+    global _lost_prev_x, _lost_prev_y, _lost_prev_hdg
+    _lost_target_x = _lost_target_y = None
+    _lost_accum_rot = _lost_accum_dist = 0.0
+    _lost_prev_x = _lost_prev_y = _lost_prev_hdg = None
 
 
-def get_boundary_correction():
-    """경계 초과 시 (중심 방향 상대 베어링[좌+], v 감속비율) 반환.
-    jw_won._get_boundary_correction 와 동일. 경계 내부 → (0.0, 1.0)."""
-    if _boundary_center_x is None:
-        return 0.0, 1.0
-    dx = _boundary_center_x - arduino_x_mm
-    dy = _boundary_center_y - arduino_y_mm
-    dist = math.sqrt(dx ** 2 + dy ** 2)
-    if dist <= BOUNDARY_RADIUS:
-        return 0.0, 1.0
-    excess = dist - BOUNDARY_RADIUS
-    blend  = min(excess / BOUNDARY_BLEND_DIST, 1.0)
-    bearing_to_center = math.degrees(math.atan2(dx, dy))
-    rel_bearing = normalize_angle(bearing_to_center - arduino_heading_deg)
-    v_scale = BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend)
-    return rel_bearing, v_scale
+def forget_color():
+    """미션 경계(색지 도달/완주) 또는 추측 소진 시 — 색 기억 + 추정 좌표 모두 폐기.
+    _have_seen_color 까지 내려 다음 색은 '실제로 다시 봐야' 추정 좌표를 만든다.
+    → 완료한 색지의 잔여 bearing/거리로 phantom 좌표가 찍혀 되돌아가는 것 방지."""
+    global _have_seen_color
+    _have_seen_color = False
+    clear_lost_target()
+
+
+def update_lost_target(last_bearing_deg, dist_mm):
+    """색 미감지 사이클마다 호출. jw_won._update_lost_target 이식 (camera 의존을 인자로 분리).
+      - 추정 좌표 없으면(소실 직후) 마지막 bearing[좌+] + 추정거리 + 현재 오도메트리로
+        색지의 대략적 좌표를 1회 기록 (compute_close_target 와 동일 수식·프레임).
+      - 매 사이클 오도메트리 델타로 누적 회전·이동 적산 → tol 증가에 사용.
+    색을 한 번도 본 적 없으면 기록하지 않음."""
+    global _lost_target_x, _lost_target_y
+    global _lost_accum_rot, _lost_accum_dist
+    global _lost_prev_x, _lost_prev_y, _lost_prev_hdg
+
+    if _lost_target_x is None:
+        if not _have_seen_color:
+            return
+        g_rad = math.radians(arduino_heading_deg + last_bearing_deg)
+        _lost_target_x   = arduino_x_mm + dist_mm * math.sin(g_rad)
+        _lost_target_y   = arduino_y_mm + dist_mm * math.cos(g_rad)
+        _lost_accum_rot  = 0.0
+        _lost_accum_dist = 0.0
+        _lost_prev_x, _lost_prev_y, _lost_prev_hdg = \
+            arduino_x_mm, arduino_y_mm, arduino_heading_deg
+        return
+
+    # 추정 좌표에 도달했는데도 색 미감지 → 추측 소진 → 폐기 (제자리 맴돌이 방지)
+    if math.hypot(_lost_target_x - arduino_x_mm,
+                  _lost_target_y - arduino_y_mm) < LOST_ARRIVE_DEADZONE_MM:
+        forget_color()
+        return
+
+    if _lost_prev_hdg is not None:
+        _lost_accum_rot  += abs(normalize_angle(arduino_heading_deg - _lost_prev_hdg))
+        _lost_accum_dist += math.hypot(arduino_x_mm - _lost_prev_x,
+                                       arduino_y_mm - _lost_prev_y)
+    _lost_prev_x, _lost_prev_y, _lost_prev_hdg = \
+        arduino_x_mm, arduino_y_mm, arduino_heading_deg
+
+
+def get_lost_target():
+    """현재 오도메트리 기준 색지 추정 좌표로의 (상대 베어링[좌+], 허용범위 tol) 반환.
+    추정 좌표 없음 → (0.0, 0.0). 누적 회전·이동이 클수록 tol을 LOST_TOL_MAX_DEG 까지 확장."""
+    if _lost_target_x is None:
+        return 0.0, 0.0
+    dx = _lost_target_x - arduino_x_mm
+    dy = _lost_target_y - arduino_y_mm
+    tol = min(LOST_TOL_MAX_DEG,
+              _lost_accum_rot * LOST_TOL_PER_ROT_DEG
+              + (_lost_accum_dist / 1000.0) * LOST_TOL_PER_M)
+    rel_bearing = normalize_angle(math.degrees(math.atan2(dx, dy)) - arduino_heading_deg)
+    return rel_bearing, tol
 
 
 def reset_odom_state():
-    """오도메트리/경계 전역 초기화 (재시작 시)."""
+    """오도메트리/색지-기억 전역 초기화 (재시작 시)."""
     global arduino_x_mm, arduino_y_mm, arduino_heading_deg
-    global _boundary_center_x, _boundary_center_y
+    global _lost_target_x, _lost_target_y, _lost_accum_rot, _lost_accum_dist
+    global _lost_prev_x, _lost_prev_y, _lost_prev_hdg, _have_seen_color
     arduino_x_mm = 0.0
     arduino_y_mm = 0.0
     arduino_heading_deg = 0.0
-    _boundary_center_x = None
-    _boundary_center_y = None
+    _lost_target_x = _lost_target_y = None
+    _lost_accum_rot = _lost_accum_dist = 0.0
+    _lost_prev_x = _lost_prev_y = _lost_prev_hdg = None
+    _have_seen_color = False
