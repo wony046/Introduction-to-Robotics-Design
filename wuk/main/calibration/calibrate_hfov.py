@@ -87,9 +87,9 @@ def _draw_crosshair(img, x, y, color, size=18, thickness=1):
 def _draw_step_panel(img, step):
     """왼쪽 상단 단계 안내 패널."""
     steps = [
-        (1, "P1 클릭  (왼쪽 테이프)"),
-        (2, "P2 클릭  (오른쪽 테이프)"),
-        (3, "s 키로 저장"),
+        (1, "P1 click  (left tape)"),
+        (2, "P2 click  (right tape)"),
+        (3, "press s to save"),
     ]
     panel_x, panel_y = 10, 10
     panel_w, panel_h = 310, len(steps) * 38 + 16
@@ -106,13 +106,13 @@ def _draw_step_panel(img, step):
         y = panel_y + 16 + i * 38
         if n < step:
             color = (80, 180, 80)
-            mark  = "✓"
+            mark  = "OK "
         elif n == step:
             color = C_YELLOW
-            mark  = "▶"
+            mark  = ">> "
         else:
             color = (120, 120, 120)
-            mark  = "  "
+            mark  = "   "
         _put(img, f"{mark} Step {n}: {text}", (panel_x + 10, y),
              scale=0.72, color=color)
 
@@ -121,11 +121,11 @@ def _draw_result_panel(img, f_px, hfov, samples):
     """오른쪽 하단 결과 패널."""
     lines = []
     if hfov is not None:
-        lines.append(("현재 HFOV", f"{hfov:.2f} deg", C_GREEN))
-        lines.append(("현재 f_px", f"{f_px:.1f} px",  C_GREEN))
+        lines.append(("HFOV now", f"{hfov:.2f} deg", C_GREEN))
+        lines.append(("f_px now", f"{f_px:.1f} px",  C_GREEN))
     if samples:
         avg = sum(samples) / len(samples)
-        lines.append(("평균 HFOV", f"{avg:.2f} deg  (n={len(samples)})", C_CYAN))
+        lines.append(("HFOV avg", f"{avg:.2f} deg  (n={len(samples)})", C_CYAN))
 
     if not lines:
         return
@@ -200,7 +200,7 @@ def _draw(frame, D_mm, W_mm, step):
     _draw_result_panel(disp, f_px_now, hfov_now, _samples)
 
     # ── 하단 조작 안내 ────────────────────────────────────────────────────
-    guide = "s = 저장    r = 초기화    q = 종료"
+    guide = "s = save    r = reset    q = quit"
     _put(disp, guide, (10, _EFF_H - 14), scale=0.62, color=C_GRAY, thickness=1)
 
     # 축소
@@ -301,7 +301,7 @@ def main():
 
                 # "저장됨!" 오버레이
                 h, w = step_disp.shape[:2]
-                _put(step_disp, f"저장됨!  HFOV={hfov:.2f}°",
+                _put(step_disp, f"Saved!  HFOV={hfov:.2f} deg",
                      (w // 2 - 140, h // 2),
                      scale=1.1, color=(60, 255, 100), thickness=2)
                 _freeze_disp  = step_disp
