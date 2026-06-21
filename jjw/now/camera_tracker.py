@@ -28,10 +28,9 @@ ARRIVE_ROI_DROP   = 0.5       # peaked 후 이 값 미만으로 떨어지면 도
 USE_ROI_ARRIVE    = 0         # 1=ROI peaked→drop 도착 판정 활성 / 0=비활성 (오도메트리만 사용)
 
 # ── 근접 접근 제어 ────────────────────────────────────────────────────────
-CLOSE_ENTER_MM     = 400.0    # 이 거리(mm) 이내로 들어오면 CLOSE 모드 전환
-CAM_HEIGHT_MM      = 430.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측 필요
-                               #   = 바퀴 반지름 + 바퀴축~카메라 높이(500mm)
-CAM_TILT_DEG       = 34.5    # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
+CLOSE_ENTER_MM     = 450.0    # 이 거리(mm) 이내로 들어오면 CLOSE 모드 전환
+CAM_HEIGHT_MM      = 590.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측값 (59cm)
+CAM_TILT_DEG       = 40.4    # ★ 캘리브레이션으로 찾은 카메라 틸트 각도
                                #   수평=0°, 아래로 내려다볼수록 +
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
 USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
