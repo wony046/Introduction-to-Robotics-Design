@@ -196,6 +196,7 @@ KP_CLOSE_HDG      = 0.1  # 헤딩 오차(deg) → w 게인  (포화: ±° → MA
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 CLOSE_OBSERVE_SEC = 1.0   # CLOSE 진입 후 정지 관측 시간 (sec)
+CLOSE_STANDOFF_MM = 100   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 stop_cycle_count           = 0     # 현재 phase 내 사이클 카운터
@@ -296,12 +297,15 @@ def _compute_close_target():
     """CLOSE 진입 시 색지 추정 좌표 계산. (x_mm, y_mm) 반환."""
     bearing_global_deg = arduino_heading_deg + camera_tracker.get_last_close_bearing()
     dist_mm            = camera_tracker.get_estimated_distance_mm()
+    # 색지 추정 위치보다 CLOSE_STANDOFF_MM 만큼 덜 접근해 정지 (음수 방지 클램프)
+    target_dist        = max(dist_mm - CLOSE_STANDOFF_MM, 0.0)
     hdg_rad            = math.radians(bearing_global_deg)
-    x_t = arduino_x_mm + dist_mm * math.sin(hdg_rad)
-    y_t = arduino_y_mm + dist_mm * math.cos(hdg_rad)
+    x_t = arduino_x_mm + target_dist * math.sin(hdg_rad)
+    y_t = arduino_y_mm + target_dist * math.cos(hdg_rad)
     if DEBUG_CLOSE_INIT:
         print(f"[CLOSE] 목표 좌표: ({x_t:.0f}, {y_t:.0f})mm  "
-              f"dist={dist_mm:.0f}mm  global_bearing={bearing_global_deg:.1f}°")
+              f"dist={dist_mm:.0f}→{target_dist:.0f}mm(standoff {CLOSE_STANDOFF_MM})  "
+              f"global_bearing={bearing_global_deg:.1f}°")
     return x_t, y_t
 
 
