@@ -7,8 +7,7 @@ import numpy as np
 # ── 카메라 설정 ─────────────────────────────────────────────────────
 CAMERA_INDEX      = 0         
 FRAME_W           = 640
-FRAME_H           = 480
-
+FRAME_H           = 480       # ★ 원래 해상도로 완벽 복구
 HFOV_DEG          = 38.6      
 
 # 카메라가 90° 회전 마운트된 경우 설정
@@ -16,7 +15,7 @@ FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
 
 # 회전 후 실효 해상도
 if FRAME_ROTATE in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
-    _EFF_W, _EFF_H = FRAME_H, FRAME_W  # 회전 후: 400 x 640
+    _EFF_W, _EFF_H = FRAME_H, FRAME_W  # 회전 후: 480 x 640
 else:
     _EFF_W, _EFF_H = FRAME_W, FRAME_H
 
@@ -28,19 +27,16 @@ ARRIVE_ROI_DROP   = 0.5
 USE_ROI_ARRIVE    = 0         
 
 # ── 근접 접근 제어 & 캘리브레이션 ──────────────────────────────────────
-CLOSE_ENTER_MM     = 450.0    # ★ 테스트 반영: 400 -> 450으로 진입 시점 앞당김
-CAM_HEIGHT_MM      = 590.0    # ★ 실측 높이 반영
-CAM_TILT_DEG       = 40.4     # ★ 캘리브레이션 각도 반영
+CLOSE_ENTER_MM     = 450.0    
+CAM_HEIGHT_MM      = 590.0    
+CAM_TILT_DEG       = 40.4     
 CAM_POLAR_EPSILON  = 0.05     
 USE_CLIPPING_GUARD = False    
 CLOSE_BEARING_SCALE = 0.8212  
 
-# ★ 새로 추가된 고정 캘리브레이션 값
-F_PX_FIXED         = 685.0    # 해상도가 크롭되어도 렌즈 고유의 초점거리를 유지
-STOP_EARLY_MM      = 50.0     # 제동 관성 밀림 보상 (절대 좌표 5cm 앞당김)
+STOP_EARLY_MM      = 50.0     # ★ 제동 관성 밀림 보상 유지
 
-# ── LAB 색상 범위 (기준값 기반 자동 계산) ───────────────────────────
-# 깨졌던 주석 내용: 색상마다 L_min 값이 다르므로 색상별 L_min 적용
+# ── LAB 색상 범위 (기준값 기반 자동 계산 유지) ────────────────────────
 REF_AB = {
     'RED':    (180, 160),
     'YELLOW': (129, 170),
@@ -54,11 +50,12 @@ for color in ['RED', 'YELLOW', 'BLUE']:
     a_ref, b_ref = REF_AB[color]
     t = TOL[color]
     l_min = L_MIN[color]
-    
-    # OpenCV LAB 범위(0~255)를 벗어나지 않도록 max/min으로 안전하게 클리핑
     lower = (l_min, max(0, a_ref - t), max(0, b_ref - t))
     upper = (255,   min(255, a_ref + t), min(255, b_ref + t))
     COLOR_RANGES[color] = [(lower, upper)]
+
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
 
 # ── 디버그 ───────────────────────────────────────────────────────────
 DEBUG_CAMERA  = 0     
@@ -81,11 +78,13 @@ _close               = False
 _last_stable_bearing = 0.0     
 _last_close_bearing  = 0.0     
 _last_cy             = None    
-_mission_changed     = False
+_mission_changed     = False   # ★ 나선 배회용 리셋 신호 유지
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 내부 함수
+# 내부 함수 (동적 f_px 계산 원복)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _get_f_px():
+    return (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
 
 def _to_lab(frame):
     lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
@@ -126,12 +125,10 @@ def _detect_color(frame, color_name):
     return (cx, cy), area, clipped_l, clipped_r
 
 def _to_bearing_seek(cx):
-    # ★ f_px 수식 대신 F_PX_FIXED 사용 (화면 잘림으로 인한 사시 현상 방지)
-    return -math.degrees(math.atan2(cx - _EFF_W / 2.0, F_PX_FIXED))
+    return -math.degrees(math.atan2(cx - _EFF_W / 2.0, _get_f_px()))
 
 def _to_bearing_close(cx, cy):
-    # ★ F_PX_FIXED 고정 적용
-    lateral = (cx - _EFF_W / 2.0) / F_PX_FIXED
+    lateral = (cx - _EFF_W / 2.0) / _get_f_px()
     forward = (_EFF_H - cy) / _EFF_H + CAM_POLAR_EPSILON
     return -math.degrees(math.atan2(lateral, forward)) * CLOSE_BEARING_SCALE
 
@@ -151,11 +148,10 @@ def _get_roi_fill(frame, color_name, bottom_ratio=None):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 카메라 스레드 루프
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 def _camera_loop():
     global _target_bearing, _color_detected
     global _mission_idx, _dwell_start, _dwelling, _done
-    global _close, _last_stable_bearing, _last_close_bearing, _last_cy
+    global _close, _last_stable_bearing, _last_close_bearing, _last_cy, _mission_changed
 
     cap = cv2.VideoCapture(CAMERA_INDEX)
     cap.set(cv2.CAP_PROP_FRAME_WIDTH,  FRAME_W)
@@ -197,14 +193,12 @@ def _camera_loop():
             cx, cy   = centroid
             clipped  = clip_l or clip_r
 
-            # ★ 거리 계산 시 F_PX_FIXED 고정 적용
-            delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, F_PX_FIXED))
+            delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, _get_f_px()))
             depression = CAM_TILT_DEG + delta_v
             
-            # 카메라가 CLOSE 모드로 진입할지 여부 판단
             if depression > 1.0:
                 raw_dist = CAM_HEIGHT_MM / math.tan(math.radians(depression))
-                cam_dist = max(raw_dist - STOP_EARLY_MM, 50.0) # 밀림 보상 미리 적용
+                cam_dist = max(raw_dist - STOP_EARLY_MM, 50.0) 
             else:
                 cam_dist = 5000.0
                 
@@ -215,8 +209,7 @@ def _camera_loop():
                 _last_stable_bearing = bearing_seek
 
             if is_close_now:
-                bearing = _last_stable_bearing if (USE_CLIPPING_GUARD and clipped) \
-                          else _to_bearing_close(cx, cy)
+                bearing = _last_stable_bearing if (USE_CLIPPING_GUARD and clipped) else _to_bearing_close(cx, cy)
                 _last_close_bearing = bearing
             else:
                 bearing = _last_stable_bearing
@@ -297,7 +290,6 @@ def _camera_loop():
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # Public API
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
 def start():
     t = threading.Thread(target=_camera_loop, daemon=True, name='camera')
     t.start()
@@ -306,47 +298,36 @@ def stop():
     _shutdown.set()
 
 def get_bearing():
-    with _lock:
-        return _target_bearing
+    with _lock: return _target_bearing
 
 def is_dwelling():
-    with _lock:
-        return _dwelling
+    with _lock: return _dwelling
 
 def is_done():
-    with _lock:
-        return _done
+    with _lock: return _done
 
 def is_close():
-    with _lock:
-        return _close
+    with _lock: return _close
 
 def get_last_stable_bearing():
-    with _lock:
-        return _last_stable_bearing
+    with _lock: return _last_stable_bearing
 
 def get_last_close_bearing():
-    with _lock:
-        return _last_close_bearing
+    with _lock: return _last_close_bearing
 
 def get_estimated_distance_mm():
-    """
-    카메라 기하학 기반 절대 거리 추정 (mm). 관성 보정치 적용됨.
-    """
     with _lock:
         cy = _last_cy
     if cy is None:
         return 500.0
 
-    # ★ 거리 계산 시 F_PX_FIXED 고정 적용
-    delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, F_PX_FIXED))
+    delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, _get_f_px()))
     depression = CAM_TILT_DEG + delta_v   
 
     if depression <= 1.0:
         return 5000.0   
 
     raw_dist = CAM_HEIGHT_MM / math.tan(math.radians(depression))
-    # ★ 밀림 보상을 위해 미리 목표 좌표를 앞으로 당김
     return max(raw_dist - STOP_EARLY_MM, 50.0)
 
 def signal_arrival():
@@ -354,14 +335,11 @@ def signal_arrival():
 
 def get_state():
     with _lock:
-        if _done:
-            return 'DONE'
-        if _mission_idx < len(MISSION_ORDER):
-            return f'SEEK_{MISSION_ORDER[_mission_idx]}'
+        if _done: return 'DONE'
+        if _mission_idx < len(MISSION_ORDER): return f'SEEK_{MISSION_ORDER[_mission_idx]}'
         return 'DONE'
 
 def check_mission_changed():
-    """새로운 미션(색지)으로 넘어갔는지 확인 (확인 즉시 False로 리셋하여 한 번만 발동)"""
     global _mission_changed
     with _lock:
         if _mission_changed:
