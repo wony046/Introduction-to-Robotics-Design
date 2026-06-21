@@ -38,15 +38,26 @@ CLOSE_BEARING_SCALE = 0.8212
 F_PX_FIXED         = 685.0    # 해상도가 크롭되어도 렌즈 고유의 초점거리를 유지
 STOP_EARLY_MM      = 50.0     # 제동 관성 밀림 보상 (절대 좌표 5cm 앞당김)
 
-# ── LAB 색상 범위 ───────────────────────────────────────────────────
-COLOR_RANGES = {
-    'RED':    [((28,  152, 110), (255, 212, 170))],
-    'YELLOW': [((155, 112, 147), (255, 148, 183))],
-    'BLUE':   [((18,  129,  87), (255, 143, 101))],
+# ── LAB 색상 범위 (기준값 기반 자동 계산) ───────────────────────────
+# 깨졌던 주석 내용: 색상마다 L_min 값이 다르므로 색상별 L_min 적용
+REF_AB = {
+    'RED':    (180, 160),
+    'YELLOW': (129, 170),
+    'BLUE':   (125,  72),
 }
+TOL   = {'RED': 35, 'YELLOW': 19, 'BLUE': 31}
+L_MIN = {'RED': 30, 'YELLOW': 25, 'BLUE': 30}
 
-_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
-MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
+COLOR_RANGES = {}
+for color in ['RED', 'YELLOW', 'BLUE']:
+    a_ref, b_ref = REF_AB[color]
+    t = TOL[color]
+    l_min = L_MIN[color]
+    
+    # OpenCV LAB 범위(0~255)를 벗어나지 않도록 max/min으로 안전하게 클리핑
+    lower = (l_min, max(0, a_ref - t), max(0, b_ref - t))
+    upper = (255,   min(255, a_ref + t), min(255, b_ref + t))
+    COLOR_RANGES[color] = [(lower, upper)]
 
 # ── 디버그 ───────────────────────────────────────────────────────────
 DEBUG_CAMERA  = 0     
