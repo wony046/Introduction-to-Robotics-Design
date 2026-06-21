@@ -24,7 +24,7 @@ ARDUINO_PORT     = "/dev/ttyAMA3"
 BAUDRATE_ARDUINO = 115200
 
 CAMERA_INDEX  = 0
-FRAME_W, FRAME_H = 640, 480
+FRAME_W, FRAME_H = 640, 400
 HFOV_DEG      = 38.6
 CAM_HEIGHT_MM = 590.0    # 새로 측정한 59cm
 CAM_TILT_DEG  = 40.4     # 캘리브레이션으로 찾은 각도
