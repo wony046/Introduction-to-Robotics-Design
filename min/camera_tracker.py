@@ -38,19 +38,19 @@ CLOSE_BEARING_SCALE = 0.7913    # ★ 848×480 calibrate_bearing.py 재측정 (R
                                 #   주의: 보정도구는 X=우측+ 규약이라 부호가 -0.7913로 출력되지만,
                                 #   시스템 bearing은 우측=음수(SEEK와 동일)이므로 크기만 取해 +로 적용.
 
-# ── LAB 색상 범위 (OpenCV LAB: L[0-255], A[0-255 / 128=중립], B[0-255 / 128=중립]) ──
-# CLAHE 전처리 후 적용. REF_AB ± TOL, L >= L_MIN 기반 실측값
-# REF_AB = {'RED':(180,160), 'YELLOW':(126,192), 'BLUE':(133,61)}
-# TOL    = {'RED':35, 'YELLOW':40, 'BLUE':41}
-# L_MIN  = {'RED':30, 'YELLOW':134, 'BLUE':53}
+# ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
+# 실내 조명 조건에서 반드시 튜닝 필요
 COLOR_RANGES = {
-    'RED':    [((30,  145, 125), (255, 215, 195))],
-    'YELLOW': [((134,  86, 152), (255, 166, 232))],
-    'BLUE':   [((53,   92,  20), (255, 174, 102))],
+    'RED': [
+        ((146, 100, 80), (179, 255, 255)),   # 실측값
+    ],
+    'YELLOW': [
+        ((18, 35, 186), (72, 177, 255)),   # 실측값
+    ],
+    'BLUE': [
+        ((79, 116, 114), (119, 162, 255)),   # 실측값
+    ],
 }
-
-# ── CLAHE 전처리 객체 (L 채널 조명 정규화) ───────────────────────────
-_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 # ── 미션 순서 ────────────────────────────────────────────────────────
 MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
@@ -82,14 +82,6 @@ _last_cy             = None    # 마지막 centroid y (기하 거리 추정용)
 # 내부 함수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-def _to_lab(frame):
-    """BGR → LAB 변환. L 채널에 CLAHE 적용 후 반환."""
-    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
-    l = _clahe.apply(l)
-    return cv2.merge([l, a, b])
-
-
 def _detect_color(frame, color_name):
     """
     frame에서 color_name 색을 검출.
@@ -97,10 +89,10 @@ def _detect_color(frame, color_name):
       centroid=(cx,cy) 또는 None, area=float
       clipped_l/r: blob이 좌/우 프레임 경계에 닿으면 True
     """
-    lab  = _to_lab(frame)
-    mask = np.zeros(lab.shape[:2], dtype=np.uint8)
+    hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for (lo, hi) in COLOR_RANGES[color_name]:
-        mask |= cv2.inRange(lab, np.array(lo), np.array(hi))
+        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
@@ -113,7 +105,7 @@ def _detect_color(frame, color_name):
 
     largest = max(contours, key=cv2.contourArea)
     area    = cv2.contourArea(largest)
-    if area < 500:   # [16:9] 절대 픽셀 임계값. FOV 가로확장 방식이면 객체 픽셀크기 불변→유지 OK
+    if area < 500:
         return None, 0.0, False, False
 
     M = cv2.moments(largest)
@@ -159,10 +151,10 @@ def _get_roi_fill(frame, color_name, bottom_ratio=None):
     roi_total = roi.shape[0] * roi.shape[1]
     if roi_total == 0:
         return 0.0
-    lab  = _to_lab(roi)
-    mask = np.zeros(lab.shape[:2], dtype=np.uint8)
+    hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
     for lo, hi in COLOR_RANGES[color_name]:
-        mask |= cv2.inRange(lab, np.array(lo), np.array(hi))
+        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
     return cv2.countNonZero(mask) / roi_total
 
 
