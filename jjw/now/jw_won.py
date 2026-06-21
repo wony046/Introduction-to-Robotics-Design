@@ -108,6 +108,10 @@ DIRECTION_HYSTERESIS = 300.0
 GAP_TARGET_WEIGHT = 1.0           # 갭 선택: 목표 방향 추종 강도 (주 항)
 GAP_SMOOTH_WEIGHT = 0.3           # 갭 선택: 직전 방향 유지 강도 (떨림 억제)
 KP_GOAL            = MAX_W / 45.0  # 비례 조향 게인 (45° → MAX_W)
+COLOR_CONFIRM_SEC  = 0.4           # sec: Mode1/2→Mode0 전환 디바운스 — 색을 이 시간 이상
+                                   #      연속 감지해야 추종(Mode0) 전환 (단일 프레임 노이즈 무시)
+COLOR_CONFIRM_JUMP_DEG = 12.0      # deg: 확정 중 bearing이 직전 대비 이 각도 초과로 튀면
+                                   #      '튀는 가짜 색'으로 보고 확정 타이머 재시작 → 모드 오전환 방지
 TARGET_ALIGN_ANGLE = 50.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
                                   #      Mode2 능동 접근은 정렬 우선이 유리 → 60→50 조임
 TARGET_CLEAR_CONE  = 18           # deg: 목표 방향 ± 이 각도 범위를 막힘 검사 대상으로
@@ -214,19 +218,19 @@ DEBUG_STOP        = 0   # [STOP] 발동 & 탈출 이벤트
 DEBUG_STOP_PIVOT  = 0   # [STOP] 피봇 중 매 사이클 (noisy)
 DEBUG_BRANCH      = 1   # [BRANCH] 분기 결정
 DEBUG_TARGET      = 0   # [TARGET] 목표 방향 직진
-DEBUG_GAP         = 1   # [GAP_FOLLOW] 갭 우회
+DEBUG_GAP         = 0   # [GAP_FOLLOW] 갭 우회
 DEBUG_FALLBACK    = 0   # [FALLBACK] 점수 기반 회피 요약
 DEBUG_SCORE       = 0   # [SCORE] 점수 상세 (FALLBACK 하위)
 DEBUG_DIR         = 0   # [DIR] 방향 결정 결과
 DEBUG_CLEAR       = 0   # [CLEAR] 장애물 없음
-DEBUG_FINAL       = 1   # [FINAL] 최종 v, w
+DEBUG_FINAL       = 0   # [FINAL] 최종 v, w
 DEBUG_SIDE        = 0   # [SIDE] 측면 반발력
 DEBUG_SIDE_LAYER  = 0   # [SIDE_LAYER] 측방 레이어
 DEBUG_VIRTUAL     = 0   # [VIRTUAL] 가상 장애물
 DEBUG_CLOSE_INIT   = 0   # [CLOSE] 목표 좌표 계산 (진입 1회)
 DEBUG_CLOSE_POS    = 0   # [CLOSE] 접근 중 위치/거리
 DEBUG_CLOSE_HDG    = 0   # [CLOSE] 헤딩 오차 계산 (arduino_hdg / target_hdg / hdg_err / w)
-DEBUG_CLOSE_DONE   = 0   # [CLOSE] 도달 판정
+DEBUG_CLOSE_DONE   = 1   # [CLOSE] 도달 판정
 DEBUG_CLOSE_REMAIN = 0   # [CLOSE] 남은 거리 / 진행률 (매 사이클)
 DEBUG_BOUNDARY    = 0   # [BOUNDARY] 가상 경계 초과 시
 DEBUG_SEND        = 0   # [SEND] 모터 명령 전송
@@ -246,7 +250,7 @@ KP_CLOSE_HDG      = 0.1  # 헤딩 오차(deg) → w 게인  (포화: ±° → MA
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 CLOSE_OBSERVE_SEC = 1.0   # CLOSE 진입 후 정지 관측 시간 (sec)
-CLOSE_STANDOFF_MM = 100   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
+CLOSE_STANDOFF_MM = 0   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 _target_block_latch   = False # is_target_blocked 히스테리시스 상태 (막힘 래치)
@@ -264,6 +268,8 @@ _last_arrival_y          = None   # mm: 이전 색지 도착 위치 y
 _last_target_est_x       = None   # mm: 마지막 감지 목표 추정 위치 x (Mode2 경계 중심)
 _last_target_est_y       = None   # mm: 마지막 감지 목표 추정 위치 y
 _last_known_mission_idx  = 0      # 미션 인덱스 변화 감지용
+_color_confirm_start     = None   # 색 연속 감지 시작 시각 (Mode1/2→Mode0 디바운스; None=미감지)
+_color_confirm_ref       = 0.0    # 확정 중 직전 bearing 기준값 (튀는 값 점프 감지용)
 
 # ── Mode 1 피버턴 상태 ────────────────────────────────────────────────────────
 _pivot_active        = False   # True: 피버턴 진행 중
@@ -1418,10 +1424,12 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         term_head_R = max(0.0,  heading_deg) * HEADING_WEIGHT_MM
         # 목표 방향 bias: 갭이 없어 회피만 할 때 '동점 깨기'로만 목표 쪽 편향.
         # GOAL_BIAS_MAX로 상한 → side/push 회피 항을 절대 override 못 함(돌진 방지).
-        # 부호 = 카메라 bearing과 동일(+ = 목표 물리적 우측 → score_R).
+        # ★ 부호: 분기①(w = +KP*target_bearing)과 같은 쪽으로 기울여야 목표로 복귀.
+        #   분기③은 score_L 우세 → direction +1 → w>0 (분기①의 target_bearing>0과 동일 방향).
+        #   따라서 target_bearing>0 → score_L(+측), target_bearing<0 → score_R(-측).
         goal_mag    = min(abs(target_bearing) * GOAL_BIAS_WEIGHT, GOAL_BIAS_MAX)
-        term_goal_L = goal_mag if target_bearing < 0 else 0.0
-        term_goal_R = goal_mag if target_bearing > 0 else 0.0
+        term_goal_L = goal_mag if target_bearing > 0 else 0.0
+        term_goal_R = goal_mag if target_bearing < 0 else 0.0
 
         score_L = term_gap_L + term_push_L + term_side_L + term_head_L + term_goal_L
         score_R = term_gap_R + term_push_R + term_side_R + term_head_R + term_goal_R
@@ -1661,7 +1669,7 @@ def _motor_controller(arduino):
            _mode2_start_time, _last_pivot_robot_x, _last_pivot_robot_y, \
            _current_boundary_radius, _boundary_exit_count, _boundary_was_outside, \
            _initial_x, _initial_y, _initial_heading, _initial_pose_set, \
-           _use_semicircle_boundary
+           _use_semicircle_boundary, _color_confirm_start, _color_confirm_ref
     last_cmd_str = ""
     while not _shutdown.is_set():
         read_arduino(arduino)
@@ -1774,6 +1782,21 @@ def _motor_controller(arduino):
                 _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
                 bearing = camera_tracker.get_bearing()
 
+                # ── 색 연속 감지 디바운스 (Mode1/2 → Mode0 전환 노이즈 방지) ──
+                # 단일 프레임 노이즈로 탐색이 끊기지 않도록, COLOR_CONFIRM_SEC 이상
+                # 연속 감지됐을 때만 Mode0(추종) 전환 허용. 이미 Mode0면 게이트 없음.
+                if bearing is not None:
+                    # 신규 감지이거나 직전 대비 크게 튀면(가짜 색) 확정 타이머 재시작 →
+                    # 튀는 색은 0.4초를 못 채워 Mode0로 못 넘어감. 진짜 색지(부드러운 이동)만 확정.
+                    if (_color_confirm_start is None
+                            or abs(bearing - _color_confirm_ref) > COLOR_CONFIRM_JUMP_DEG):
+                        _color_confirm_start = time.time()
+                    _color_confirm_ref = bearing
+                    color_confirmed = (time.time() - _color_confirm_start) >= COLOR_CONFIRM_SEC
+                else:
+                    _color_confirm_start = None
+                    color_confirmed      = False
+
                 # 미션 인덱스 변화 감지 → Mode 1 진입 (색지 도착 직후)
                 current_mission_idx = camera_tracker.get_mission_idx()
                 if current_mission_idx != _last_known_mission_idx:
@@ -1795,9 +1818,17 @@ def _motor_controller(arduino):
                     print(f"[MODE1] 탐색 시작: 도착=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
                           f"피버턴=CCW 경계={BOUNDARY_RADIUS:.0f}mm")
 
+                # 색이 보이면(확정 전이라도) 목표 추정 위치는 항상 갱신 →
+                # 노이즈가 아닌 진짜 색이었을 때 Mode2가 바로 활용 가능.
                 if bearing is not None:
-                    # 색 감지 중 → 목표 추정 위치 갱신, 탐색 모드 해제
                     _update_target_estimate()
+
+                # 추종 게이트(비대칭):
+                #   · 탐색(Mode1/2)→추종 '진입'은 color_confirmed 필요
+                #     → 단일/순간 노이즈(확정 못 채움)는 탐색을 끊지 못함
+                #   · 이미 추종 중(Mode0)이면 raw bearing 만으로 유지
+                #     → 근접 시 bearing 점프로 잠깐 미확정돼도 Mode2로 새지 않음
+                if color_confirmed or (_search_mode == 0 and bearing is not None):
                     if _search_mode != 0:
                         print(f"[MODE{_search_mode}→0] 색지 재감지")
                     _search_mode             = 0
