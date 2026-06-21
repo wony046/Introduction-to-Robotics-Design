@@ -46,7 +46,7 @@ UART_PORT = '/dev/ttyAMA3'
 BAUD_RATE = 115200
 
 # 현재 아두이노에 업로드된 값과 반드시 동일하게! (arduino_code.cpp 의 WHEEL_BASE)
-WHEEL_BASE_CURRENT = 0.207   # [m]
+WHEEL_BASE_CURRENT = 0.1802  # [m]
 
 PIVOT_W      = 0.8    # 제자리 회전 각속도 [rad/s] (+:CCW / 느릴수록 슬립↓ 정렬↑)
 SEND_DT      = 0.05   # 명령 전송 주기 [s] (아두이노 타임아웃 500ms 보다 짧게)
