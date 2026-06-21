@@ -108,6 +108,8 @@ DIRECTION_HYSTERESIS = 300.0
 GAP_TARGET_WEIGHT = 1.0           # 갭 선택: 목표 방향 추종 강도 (주 항)
 GAP_SMOOTH_WEIGHT = 0.3           # 갭 선택: 직전 방향 유지 강도 (떨림 억제)
 KP_GOAL            = MAX_W / 45.0  # 비례 조향 게인 (45° → MAX_W)
+COLOR_CONFIRM_SEC  = 0.4           # sec: Mode1/2→Mode0 전환 디바운스 — 색을 이 시간 이상
+                                   #      연속 감지해야 추종(Mode0) 전환 (단일 프레임 노이즈 무시)
 TARGET_ALIGN_ANGLE = 50.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
                                   #      Mode2 능동 접근은 정렬 우선이 유리 → 60→50 조임
 TARGET_CLEAR_CONE  = 18           # deg: 목표 방향 ± 이 각도 범위를 막힘 검사 대상으로
@@ -264,6 +266,7 @@ _last_arrival_y          = None   # mm: 이전 색지 도착 위치 y
 _last_target_est_x       = None   # mm: 마지막 감지 목표 추정 위치 x (Mode2 경계 중심)
 _last_target_est_y       = None   # mm: 마지막 감지 목표 추정 위치 y
 _last_known_mission_idx  = 0      # 미션 인덱스 변화 감지용
+_color_confirm_start     = None   # 색 연속 감지 시작 시각 (Mode1/2→Mode0 디바운스; None=미감지)
 
 # ── Mode 1 피버턴 상태 ────────────────────────────────────────────────────────
 _pivot_active        = False   # True: 피버턴 진행 중
@@ -1663,7 +1666,7 @@ def _motor_controller(arduino):
            _mode2_start_time, _last_pivot_robot_x, _last_pivot_robot_y, \
            _current_boundary_radius, _boundary_exit_count, _boundary_was_outside, \
            _initial_x, _initial_y, _initial_heading, _initial_pose_set, \
-           _use_semicircle_boundary
+           _use_semicircle_boundary, _color_confirm_start
     last_cmd_str = ""
     while not _shutdown.is_set():
         read_arduino(arduino)
@@ -1776,6 +1779,17 @@ def _motor_controller(arduino):
                 _close_target_x = _close_target_y = _close_initial_dist = _close_observe_start = None
                 bearing = camera_tracker.get_bearing()
 
+                # ── 색 연속 감지 디바운스 (Mode1/2 → Mode0 전환 노이즈 방지) ──
+                # 단일 프레임 노이즈로 탐색이 끊기지 않도록, COLOR_CONFIRM_SEC 이상
+                # 연속 감지됐을 때만 Mode0(추종) 전환 허용. 이미 Mode0면 게이트 없음.
+                if bearing is not None:
+                    if _color_confirm_start is None:
+                        _color_confirm_start = time.time()
+                    color_confirmed = (time.time() - _color_confirm_start) >= COLOR_CONFIRM_SEC
+                else:
+                    _color_confirm_start = None
+                    color_confirmed      = False
+
                 # 미션 인덱스 변화 감지 → Mode 1 진입 (색지 도착 직후)
                 current_mission_idx = camera_tracker.get_mission_idx()
                 if current_mission_idx != _last_known_mission_idx:
@@ -1797,8 +1811,8 @@ def _motor_controller(arduino):
                     print(f"[MODE1] 탐색 시작: 도착=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
                           f"피버턴=CCW 경계={BOUNDARY_RADIUS:.0f}mm")
 
-                if bearing is not None:
-                    # 색 감지 중 → 목표 추정 위치 갱신, 탐색 모드 해제
+                if bearing is not None and (_search_mode == 0 or color_confirmed):
+                    # 색 감지 확정(연속 ≥COLOR_CONFIRM_SEC) 또는 이미 추종 중 → 목표 추정 갱신·탐색 해제
                     _update_target_estimate()
                     if _search_mode != 0:
                         print(f"[MODE{_search_mode}→0] 색지 재감지")
