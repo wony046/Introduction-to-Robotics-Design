@@ -212,13 +212,13 @@ SLIDER_DEFS = [
     ('STOP_HORIZ_TH',       'STOP horiz',    60,   200),
     ('STOP_ESCAPE_MIN_GAP', 'min passage',   150,  400),
     ('DETECTION_RANGE',     'detect range',  500,  2500),
-    ('LOST_TOL_MAX_DEG',    'lost tol max',  0,    40),
+    ('BOUNDARY_RADIUS',     'bound radius',  500,  2500),
     ('CLOSE_ENTER_MM',      'CLOSE enter',   200,  800),
     ('CLOSE_ARRIVE_MM',     'CLOSE arrive',  10,   100),
 ]
 # 정수로 다뤄야 자연스러운 파라미터
 INT_KEYS = {'STOP_FWD_MIN', 'STOP_FWD_MAX', 'STOP_HORIZ_TH', 'STOP_ESCAPE_MIN_GAP',
-            'DETECTION_RANGE', 'CLOSE_ARRIVE_MM', 'LOST_TOL_MAX_DEG'}
+            'DETECTION_RANGE', 'CLOSE_ARRIVE_MM'}
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -422,7 +422,7 @@ class Sim:
                 ('lidar', 'LiDAR points', True),
                 ('gaps', 'Gaps / escape', True),
                 ('intent', 'Intent (v,w)', True),
-                ('bound', 'Lost target', True),
+                ('bound', 'Boundary circle', True),
                 ('grid', 'Grid', True)]
         for key, lab, on in defs:
             self.toggles[key] = Checkbox(x, y, w, lab, on)
@@ -561,12 +561,10 @@ class Sim:
         if CAM.is_done() or CAM.is_dwelling():
             self.prev_w = 0.0
             self._close_reset()
-            S.forget_color()             # 색지 도달/완주 → 색 기억까지 리셋 (다음 색은 다시 봐야 추종)
             return 0.0, 0.0
 
         # 상태 2: CLOSE → 관측 후 오도메트리 위치 제어
         if CAM.is_close() or self._close_target_x is not None:
-            S.note_color_seen()          # CLOSE 진입 = 색지를 봤음 → 소실 시 좌표 기록 허용
             # 2a: 관측 단계 (CLOSE_OBSERVE_SEC 동안 정지)
             if self._close_target_x is None:
                 self._close_observe_elapsed += SIM_DT
@@ -598,21 +596,17 @@ class Sim:
                 self.prev_w = w     # CLOSE 내 스무딩 관성 제거 (아래에서 identity)
                 return v, w
 
-        # 상태 3: SEEK → 카메라 bearing + 라이다 회피 / 미감지 시 마지막 본 색지 추종
+        # 상태 3: SEEK → 카메라 bearing + 라이다 회피 / 미감지 시 경계 복귀
         self._close_reset()
         bearing = CAM.get_bearing()
         if bearing is not None:
-            # 색 감지 중: 카메라 bearing 추종 + 기억 초기화
-            S.note_color_seen()
-            S.clear_lost_target()
+            S.clear_boundary_center()
             return S.find_vw_command(self.scan, S.arduino_heading_deg, bearing)
         else:
-            # 색 미감지: 마지막 본 색지 추정 좌표로 향함 (오도메트리 기억)
-            #   → 추정 좌표 방향 갭만 선택해 접근, 누적 오차만큼 허용 범위(tol) 확장
-            S.update_lost_target(CAM.get_last_stable_bearing(),
-                                 CAM.get_estimated_distance_mm())
-            tb, tol = S.get_lost_target()
-            return S.find_vw_command(self.scan, S.arduino_heading_deg, tb, target_tol=tol)
+            S.set_boundary_center()
+            tb, v_scale = S.get_boundary_correction()
+            v, w = S.find_vw_command(self.scan, S.arduino_heading_deg, tb)
+            return v * v_scale, w
 
     # ── 한 스텝 ──────────────────────────────────────────────
     def step(self):
@@ -641,13 +635,8 @@ class Sim:
                 if len(self.close_trail) > 400:
                     self.close_trail.pop(0)
 
-        # 회피 시각화용 분석 (target_bearing: 감지 bearing > 색지-기억 방향 > 0)
-        if self.detection:
-            tb_viz = self.detection['bearing']
-        elif S._lost_target_x is not None:
-            tb_viz, _ = S.get_lost_target()
-        else:
-            tb_viz = 0.0
+        # 회피 시각화용 분석 (target_bearing 은 표시 목적상 감지 bearing 또는 0)
+        tb_viz = self.detection['bearing'] if self.detection else 0.0
         self.viz = S.analyze_scan(self.scan, self.robot['h'], tb_viz)
 
 
@@ -707,24 +696,19 @@ def draw_map(screen, overlay, sim, font, font_s):
     robot = sim.robot
     rpx, rpy = w2s(robot['x'], robot['y'], cam, zoom)
 
-    # 마지막 본 색지 추정 좌표 (색 미감지 시 기록. arduino 프레임 → world 미러)
-    #   X 마커 + 로봇→좌표 선 + 허용범위(tol) 콘
-    if tg['bound'].checked and S._lost_target_x is not None:
-        lx, ly = -S._lost_target_x, S._lost_target_y        # 미러 복원
-        ox, oy = w2s(lx, ly, cam, zoom)
-        pygame.draw.line(screen, C_BOUND, (rpx, rpy), (ox, oy), 1)
-        pygame.draw.line(screen, C_BOUND, (ox - 7, oy - 7), (ox + 7, oy + 7), 2)
-        pygame.draw.line(screen, C_BOUND, (ox - 7, oy + 7), (ox + 7, oy - 7), 2)
-        # tol 콘: 로봇→좌표 방향 벡터를 ±tol 회전한 두 경계선
-        _, tol = S.get_lost_target()
-        dxw, dyw = lx - robot['x'], ly - robot['y']
-        if tol > 0.1 and (dxw or dyw):
-            for sgn in (1.0, -1.0):
-                ar = math.radians(sgn * tol)
-                ex = dxw * math.cos(ar) - dyw * math.sin(ar)
-                ey = dxw * math.sin(ar) + dyw * math.cos(ar)
-                sex, sey = w2s(robot['x'] + ex, robot['y'] + ey, cam, zoom)
-                pygame.draw.line(screen, (120, 95, 55), (rpx, rpy), (sex, sey), 1)
+    # 경계 원 (동적 중심: 색 미감지 전환 시 찍힌 위치. arduino 프레임 → world 미러)
+    if tg['bound'].checked:
+        if S._boundary_center_x is not None:
+            bcx, bcy = -S._boundary_center_x, S._boundary_center_y    # 미러 복원
+            ox, oy = w2s(bcx, bcy, cam, zoom)
+            pygame.draw.circle(screen, C_BOUND, (int(ox), int(oy)),
+                               int(S.BOUNDARY_RADIUS * zoom), 1)
+            pygame.draw.line(screen, C_BOUND, (ox - 5, oy), (ox + 5, oy), 1)
+            pygame.draw.line(screen, C_BOUND, (ox, oy - 5), (ox, oy + 5), 1)
+        else:
+            # 미설정: 현재 위치 기준 미리보기 (희미하게)
+            pygame.draw.circle(screen, (90, 70, 45), (int(rpx), int(rpy)),
+                               int(S.BOUNDARY_RADIUS * zoom), 1)
 
     # 카메라 FOV 콘 + 감지 패치 강조
     if tg['camera'].checked:
@@ -1017,12 +1001,6 @@ def draw_hud(screen, sim, font, font_s):
         derr = math.hypot(ex, ey)
         pct = (1.0 - derr / sim._close_initial_dist) * 100.0
         lines.append((f'CLOSE: remain={derr:.0f}mm  {pct:4.0f}%', (250, 160, 210)))
-    if (S._lost_target_x is not None and CAM.get_bearing() is None
-            and not (CAM.is_dwelling() or CAM.is_done())):
-        rb, tol = S.get_lost_target()
-        lines.append((f'LOST: rel={rb:+.1f}°  tol=±{tol:.1f}°  '
-                      f'rot={S._lost_accum_rot:.0f}° mov={S._lost_accum_dist:.0f}mm',
-                      (240, 200, 120)))
     if sim.viz:
         lines.append((f'STOP = {sim.viz["stop_triggered"]}   '
                       f'layers = {sorted(sim.viz["active_names"])}', C_DIM))
