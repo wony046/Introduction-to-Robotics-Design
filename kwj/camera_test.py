@@ -1,158 +1,100 @@
 import cv2
-import numpy as np
-import time
 import math
+import numpy as np
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# [1] 테스트 파라미터 설정
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CAMERA_INDEX = 0
+# ── 설정 값 (수정된 높이 반영) ──────────────────────────────────
+CAMERA_INDEX  = 0
+FRAME_W       = 640
+FRAME_H       = 480
+HFOV_DEG      = 38.6      # 기존 화각 유지
+CAM_HEIGHT_MM = 590.0     # ★ 새로 측정한 카메라 수직 높이 (59cm)
+TARGET_DIST   = 500.0     # 캘리브레이션을 위해 바닥에 놓은 색지까지의 실제 수평 거리 (mm)
 
-# 🎯 3단 분할 도착 판정 조건 (엄격도 조절 가능)
-ARRIVE_FILL_RATIO = 0.40     # [하단 0~30%] 영역: 목표 색상으로 40% 이상 채워져야 함 (차체 바로 밑)
-MID_EMPTY_LIMIT = 0.10       # [중단 30~50%] 영역: 목표 색상이 10% 미만이어야 함 (90% 이상 비어있어야 함)
-TOP_EMPTY_LIMIT = 0.10       # [상단 50~100%] 영역: 목표 색상이 10% 미만이어야 함
+# 기존 코드의 회전 설정
+FRAME_ROTATE  = cv2.ROTATE_90_COUNTERCLOCKWISE
+_EFF_W, _EFF_H = FRAME_H, FRAME_W  # 회전 후 해상도: 480 x 640
 
-MIN_CONTOUR_AREA = 500       # 무시할 노이즈 크기
+# 기존 RED 색상 범위 및 CLAHE
+COLOR_RANGES_RED = [((28, 152, 110), (255, 212, 170))]
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
-MISSION_COLORS = ['RED', 'YELLOW', 'BLUE']
+def get_recommended_tilt(cy):
+    """cy 픽셀을 바탕으로 추천 CAM_TILT_DEG를 계산"""
+    # 1. 렌즈의 초점 거리(픽셀 단위) 계산
+    f_px = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
+    
+    # 2. 화면 중심(cy = 320) 기준 수직 편차 각도
+    delta_v = math.degrees(math.atan2(cy - _EFF_H / 2.0, f_px))
+    
+    # 3. 이상적인 전체 하향 각도
+    target_depression = math.degrees(math.atan2(CAM_HEIGHT_MM, TARGET_DIST))
+    
+    # 4. 카메라 자체의 기울기 역산
+    tilt_deg = target_depression - delta_v
+    return tilt_deg, delta_v, target_depression
 
-# 💡 [수정] 조명 및 장애물 구분을 위해 튜닝된 HSV 임계값
-COLOR_HSV_RANGES = {
-    'RED':    [(0, 100, 100), (10, 255, 255), (160, 100, 100), (180, 255, 255)],
-    'YELLOW': [(20, 100, 100), (35, 255, 255)],
-    # [수정] 파란색은 명도(V) 하한을 130으로 확 올려서 어두운 장애물(남색)을 완전히 컷오프!
-    'BLUE':   [(95, 100, 130), (130, 255, 255)] 
-}
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# [2] 메인 루프
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def main():
-    print("=== Vision Only Test (3-Tier ROI & Strict Blue) ===")
-    
     cap = cv2.VideoCapture(CAMERA_INDEX)
-    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 320)
-    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 240)
-    cap.set(cv2.CAP_PROP_AUTO_EXPOSURE, 0.25)
-    
-    kernel = np.ones((5,5), np.uint8)
-    
-    current_color_idx = 0
-    mission_phase = 0  
-    arrive_time = 0.0
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_W)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_H)
+
+    if not cap.isOpened():
+        print("카메라를 열 수 없습니다.")
+        return
+
+    print(f"=== 카메라 기울기(Tilt) 캘리브레이션 시작 ===")
+    print(f"1. 로봇 렌즈(바닥 수직점)로부터 정확히 {TARGET_DIST}mm 앞 바닥에 '빨간색' 색지를 놓아주세요.")
+    print(f"2. 아래 출력되는 '추천 CAM_TILT_DEG' 값을 확인하세요.")
+    print(f"3. 종료하려면 'q'를 누르세요.\n")
 
     while True:
-        ret, raw_frame = cap.read()
-        if not ret: break
-
-        # 카메라 90도 좌측 원상복구
-        frame = cv2.rotate(raw_frame, cv2.ROTATE_90_COUNTERCLOCKWISE)
-        h, w, _ = frame.shape 
-
-        target_name = MISSION_COLORS[current_color_idx % len(MISSION_COLORS)]
-        
-        if mission_phase == 1:
-            overlay = frame.copy()
-            cv2.rectangle(overlay, (0, 0), (w, h), (0, 255, 0), -1)
-            frame = cv2.addWeighted(overlay, 0.3, frame, 0.7, 0)
-            cv2.putText(frame, f"ARRIVED: {target_name}!", (20, h//2), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 3)
-            
-            if time.time() - arrive_time > 2.0:
-                current_color_idx += 1          
-                mission_phase = 0               
-                print(f"\n[MISSION] Next Target: {MISSION_COLORS[current_color_idx % len(MISSION_COLORS)]}")
-            
-            cv2.imshow("Robot Vision Test", frame)
-            if cv2.waitKey(1) & 0xFF == ord('q'): break
+        ret, frame = cap.read()
+        if not ret:
             continue
-
-        hsv_ranges = COLOR_HSV_RANGES[target_name]
-        hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
+            
+        frame = cv2.rotate(frame, FRAME_ROTATE)
         
-        mask = None
-        if target_name == 'RED':
-            mask1 = cv2.inRange(hsv, hsv_ranges[0], hsv_ranges[1])
-            mask2 = cv2.inRange(hsv, hsv_ranges[2], hsv_ranges[3])
-            mask = cv2.bitwise_or(mask1, mask2)
-        else:
-            mask = cv2.inRange(hsv, hsv_ranges[0], hsv_ranges[1])
-
+        # LAB 변환 및 전처리
+        lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        l = _clahe.apply(l)
+        lab_frame = cv2.merge([l, a, b])
+        
+        # 색상 마스크 생성
+        mask = np.zeros(lab_frame.shape[:2], dtype=np.uint8)
+        for (lo, hi) in COLOR_RANGES_RED:
+            mask |= cv2.inRange(lab_frame, np.array(lo), np.array(hi))
+            
+        kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
         mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, kernel)
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+        
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         
-        found = False
-        bot_fill, mid_fill, top_fill, align_angle, err_x = 0.0, 0.0, 0.0, 0.0, 0.0
-        
-        # ── 3단 화면 분할 y좌표 설정 (밑에서부터 계산) ──
-        roi_mid_top_y = int(h * 0.5)  # 위에서 50% 지점 (중단 시작점)
-        roi_bot_top_y = int(h * 0.7)  # 위에서 70% 지점 (하단 시작점)
-
         if contours:
-            c = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(c) > MIN_CONTOUR_AREA:
-                found = True
-                x, y, box_w, box_h = cv2.boundingRect(c)
-                cx = x + box_w // 2
-                err_x = (cx - (w / 2)) / (w / 2)
-                
-                rect = cv2.minAreaRect(c)
-                box = np.int32(cv2.boxPoints(rect))
-                pts_y_sorted = sorted(box, key=lambda p: p[1])
-                top_2 = pts_y_sorted[:2]
-                tl, tr = sorted(top_2, key=lambda p: p[0])
-                dx = tr[0] - tl[0]
-                dy = tr[1] - tl[1]
-                align_angle = math.degrees(math.atan2(dy, dx)) if dx != 0 else 0.0
+            largest = max(contours, key=cv2.contourArea)
+            if cv2.contourArea(largest) > 500:
+                M = cv2.moments(largest)
+                if M['m00'] != 0:
+                    cx = int(M['m10'] / M['m00'])
+                    cy = int(M['m01'] / M['m00'])
+                    
+                    tilt_deg, delta_v, target_dep = get_recommended_tilt(cy)
+                    
+                    # 시각화 (선택 사항: GUI 환경이 아닐 경우 콘솔만 확인해도 됨)
+                    cv2.circle(frame, (cx, cy), 10, (0, 255, 0), -1)
+                    cv2.putText(frame, f"cy: {cy} px", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 255), 2)
+                    cv2.putText(frame, f"Tilt: {tilt_deg:.1f} deg", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+                    
+                    print(f"\r색상 감지됨! cy={cy:3d}px | 편차={delta_v:+.1f}° | 추천 CAM_TILT_DEG = {tilt_deg:.1f}°", end="")
+        else:
+            print("\r색상을 찾는 중... (빨간색 색지를 500mm 앞에 놓아주세요)", end="")
 
-                # ── 1. [하단 0~30%] 채움 비율 ──
-                bottom_roi = mask[roi_bot_top_y:h, 0:w]
-                white_bot = cv2.countNonZero(bottom_roi)
-                total_bot = (h - roi_bot_top_y) * w
-                bot_fill = (white_bot / total_bot) if total_bot > 0 else 0.0
-
-                # ── 2. [중단 30~50%] 채움 비율 (새로 추가됨!) ──
-                mid_roi = mask[roi_mid_top_y:roi_bot_top_y, 0:w]
-                white_mid = cv2.countNonZero(mid_roi)
-                total_mid = (roi_bot_top_y - roi_mid_top_y) * w
-                mid_fill = (white_mid / total_mid) if total_mid > 0 else 0.0
-
-                # ── 3. [상단 50~100%] 채움 비율 ──
-                top_roi = mask[0:roi_mid_top_y, 0:w]
-                white_top = cv2.countNonZero(top_roi)
-                total_top = roi_mid_top_y * w
-                top_fill = (white_top / total_top) if total_top > 0 else 0.0
-
-                cv2.rectangle(frame, (x, y), (x+box_w, y+box_h), (0, 255, 0), 2)
-                cv2.circle(frame, (cx, y+box_h), 5, (0, 0, 255), -1)
-                cv2.line(frame, tuple(tl), tuple(tr), (255, 0, 255), 3) 
-                
-                # 🎯 3단 조건 도착 판정
-                if (bot_fill >= ARRIVE_FILL_RATIO) and (mid_fill < MID_EMPTY_LIMIT) and (top_fill < TOP_EMPTY_LIMIT):
-                    print(f"\n[!] ARRIVE TRIGGERED!")
-                    print(f" -> Bot:{bot_fill*100:.1f}% | Mid:{mid_fill*100:.1f}% | Top:{top_fill*100:.1f}%")
-                    mission_phase = 1
-                    arrive_time = time.time()
-
-        # 화면에 3단 가이드라인 그리기
-        cv2.rectangle(frame, (0, roi_bot_top_y), (w, h), (0, 255, 0), 2)         # 하단 박스 (초록색)
-        cv2.rectangle(frame, (0, roi_mid_top_y), (w, roi_bot_top_y), (0, 165, 255), 2) # 중단 박스 (주황색)
-        cv2.rectangle(frame, (0, 0), (w, roi_mid_top_y), (0, 0, 255), 2)         # 상단 박스 (빨간색)
-
-        # 상태 텍스트 출력
-        status_color = (0, 255, 0) if found else (150, 150, 150)
-        cv2.putText(frame, f"FIND: {target_name}", (10, 25), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255,255,255), 2)
-        cv2.putText(frame, f"Bot Fill: {bot_fill*100:.1f}% (Need > {ARRIVE_FILL_RATIO*100}%)", (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,255,0), 2)
-        cv2.putText(frame, f"Mid Fill: {mid_fill*100:.1f}% (Need < {MID_EMPTY_LIMIT*100}%)", (10, 70), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,165,255), 2)
-        cv2.putText(frame, f"Top Fill: {top_fill*100:.1f}% (Need < {TOP_EMPTY_LIMIT*100}%)", (10, 90), cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0,0,255), 2)
-
-        cv2.imshow("Robot Vision Test", frame)
-        cv2.imshow("HSV Mask", mask)
-
+        cv2.imshow('Calibration', frame)
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
+    print("\n종료되었습니다.")
     cap.release()
     cv2.destroyAllWindows()
 
