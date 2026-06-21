@@ -7,7 +7,7 @@ import numpy as np
 # ── 카메라 설정 ─────────────────────────────────────────────────────
 CAMERA_INDEX      = 0         # 인식 안 되면 1로 변경 시도
 FRAME_W           = 640
-FRAME_H           = 480
+FRAME_H           = 400
 HFOV_DEG          = 38.6      # ★ 보정 후 화면 가로(_EFF_W=480) 기준 실측값
                                #   f_px=685 실측 → 2×atan(240/685)=38.6°
 # 카메라가 90° 회전 마운트된 경우 설정. None=정방향
@@ -15,10 +15,7 @@ HFOV_DEG          = 38.6      # ★ 보정 후 화면 가로(_EFF_W=480) 기준 
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
 
 # 회전 후 실효 해상도 (bearing·도착 판정에 사용)
-if FRAME_ROTATE in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
-    _EFF_W, _EFF_H = FRAME_H, FRAME_W
-else:
-    _EFF_W, _EFF_H = FRAME_W, FRAME_H
+_EFF_W, _EFF_H = 400, 640
 
 # ── 도착 판정 ────────────────────────────────────────────────────────
 ARRIVE_HOLD_SEC   = 1.2       # 연속 감지 유지 시간 (sec), 1초 인정 기준보다 0.2s 여유
@@ -28,10 +25,10 @@ ARRIVE_ROI_DROP   = 0.5       # peaked 후 이 값 미만으로 떨어지면 도
 USE_ROI_ARRIVE    = 0         # 1=ROI peaked→drop 도착 판정 활성 / 0=비활성 (오도메트리만 사용)
 
 # ── 근접 접근 제어 ────────────────────────────────────────────────────────
-CLOSE_ENTER_MM     = 400.0    # 이 거리(mm) 이내로 들어오면 CLOSE 모드 전환
-CAM_HEIGHT_MM      = 430.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측 필요
-                               #   = 바퀴 반지름 + 바퀴축~카메라 높이(500mm)
-CAM_TILT_DEG       = 34.5    # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
+CLOSE_ENTER_MM     = 450.0    # 이 거리(mm) 이내로 들어오면 CLOSE 모드 전환
+CAM_HEIGHT_MM      = 590.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측값 (59cm)
+                               #   = 바퀴 반지름 + 바퀴축~카메라 높이
+CAM_TILT_DEG       = 40.4    # 캘리브레이션으로 찾은 각도
                                #   수평=0°, 아래로 내려다볼수록 +
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
 USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
@@ -39,13 +36,13 @@ CLOSE_BEARING_SCALE = 0.8212    # ★ calibrate_bearing.py 로 구한 보정 배
 
 # ── LAB 색상 범위 (OpenCV LAB: L[0-255], A[0-255 / 128=중립], B[0-255 / 128=중립]) ──
 # CLAHE 전처리 후 적용. REF_AB ± TOL, L >= L_MIN 기반 실측값
-# REF_AB = {'RED':(187,112), 'YELLOW':(88,162), 'BLUE':(136,94)}
-# TOL    = {'RED':35, 'YELLOW':40, 'BLUE':7}
-# L_MIN  = {'RED':30, 'YELLOW':43, 'BLUE':18}
+# REF_AB = {'RED':(182,140), 'YELLOW':(130,165), 'BLUE':(136,94)}
+# TOL    = {'RED':30, 'YELLOW':18, 'BLUE':7}
+# L_MIN  = {'RED':28, 'YELLOW':155, 'BLUE':18}
 COLOR_RANGES = {
-    'RED':    [(( 30, 152,  77), (255, 222, 147))],
-    'YELLOW': [(( 43,  48, 122), (255, 128, 202))],
-    'BLUE':   [(( 18, 129,  87), (255, 143, 101))],
+    'RED':    [((28,  152, 110), (255, 212, 170))],
+    'YELLOW': [((155, 112, 147), (255, 148, 183))],
+    'BLUE':   [((18,  129,  87), (255, 143, 101))],
 }
 
 # ── CLAHE 전처리 객체 (L 채널 조명 정규화) ───────────────────────────
