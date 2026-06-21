@@ -22,12 +22,12 @@ import numpy as np
 
 # ── camera_tracker.py와 동일하게 맞출 것 ───────────────────────────────────
 CAMERA_INDEX   = 0
-FRAME_W        = 1280
-FRAME_H        = 800      # 16:10 (640 ÷ 16 × 10 = 400)
+FRAME_W        = 640
+FRAME_H        = 400     # 16:10 (640 ÷ 16 × 10 = 400)
 FRAME_ROTATE   = cv2.ROTATE_90_COUNTERCLOCKWISE
 
 HFOV_DEG       = 38.6     # 실측값
-CAM_HEIGHT_MM  = 570.0    # ★ 실측 필요 (바닥~카메라 수직 높이 mm)
+CAM_HEIGHT_MM  = 590.0    # ★ 실측 필요 (바닥~카메라 수직 높이 mm)
 CAM_TILT_DEG   = 34.5     # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
 CLOSE_ENTER_MM = 400.0    # 이 거리 이내 → CLOSE 모드 진입 (camera_tracker.py와 동일)
 
