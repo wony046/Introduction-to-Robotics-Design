@@ -5,7 +5,7 @@ import numpy as np
 # ── 설정 값 (수정된 높이 반영) ──────────────────────────────────
 CAMERA_INDEX  = 0
 FRAME_W       = 640
-FRAME_H       = 480
+FRAME_H       = 400
 HFOV_DEG      = 38.6      # 기존 화각 유지
 CAM_HEIGHT_MM = 590.0     # ★ 새로 측정한 카메라 수직 높이 (59cm)
 TARGET_DIST   = 500.0     # 캘리브레이션을 위해 바닥에 놓은 색지까지의 실제 수평 거리 (mm)
