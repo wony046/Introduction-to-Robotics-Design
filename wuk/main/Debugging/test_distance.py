@@ -26,7 +26,7 @@ FRAME_W        = 848   # 16:9 (848×480) 로 변경. FRAME_H=480 유지
 FRAME_H        = 480
 FRAME_ROTATE   = cv2.ROTATE_90_COUNTERCLOCKWISE
 
-HFOV_DEG       = 38.6     # 실측값
+HFOV_DEG       = 32.1     # 848×480(16:9) 재측정값 (기존 4:3: 38.6)
 CAM_HEIGHT_MM  = 430.0    # ★ 실측 필요 (바닥~카메라 수직 높이 mm)
 CAM_TILT_DEG   = 34.5     # 역산값: actual=500mm, est=610mm, delta_v=0 → atan(420/610)
 CLOSE_ENTER_MM = 400.0    # 이 거리 이내 → CLOSE 모드 진입 (camera_tracker.py와 동일)

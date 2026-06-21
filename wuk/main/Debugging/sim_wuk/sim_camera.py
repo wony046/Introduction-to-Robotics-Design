@@ -20,7 +20,7 @@ get_estimated_distance_mm / get_last_close_bearing / signal_arrival / get_state)
 import math
 
 # ── 카메라 기하 상수 (camera_tracker.py 값 + 시뮬 가시범위) ──────────────────
-HFOV_DEG     = 38.6      # 수평 FOV (보정 후 _EFF_W=480 기준 실측). 감지콘 = ±HFOV/2
+HFOV_DEG     = 32.1      # 수평 FOV. 848×480(16:9) _EFF_W=480 재측정값 (기존 4:3: 38.6). 감지콘 = ±HFOV/2
 ARRIVE_HOLD_SEC = 1.2    # 도착 후 정지 유지(dwell) 시간
 
 # 카메라 투영 모델 (camera_tracker.py 와 동일) — 프리뷰 창 렌더용

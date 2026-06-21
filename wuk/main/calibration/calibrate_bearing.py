@@ -24,7 +24,7 @@ CAMERA_INDEX      = 0
 FRAME_W           = 848   # 16:9 (848×480) 로 변경. FRAME_H=480 유지
 FRAME_H           = 480
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
-HFOV_DEG          = 38.6
+HFOV_DEG          = 32.1   # 848×480(16:9) 재측정값 (기존 4:3: 38.6)
 CAM_POLAR_EPSILON = 0.05
 TARGET_COLOR      = 'RED'   # 캘리브레이션에 사용할 색
 

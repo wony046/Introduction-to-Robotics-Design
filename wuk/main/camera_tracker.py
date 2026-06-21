@@ -8,10 +8,9 @@ import numpy as np
 CAMERA_INDEX      = 0         # 인식 안 되면 1로 변경 시도
 FRAME_W           = 848       # ★ 16:9 (848×480) 로 변경 (기존 640, 4:3). FRAME_H=480 유지
 FRAME_H           = 480       #   → 회전축상 _EFF_W=FRAME_H=480 보존 → 조향(bearing) 축 유지
-HFOV_DEG          = 38.6      # ★ 보정 후 화면 가로(_EFF_W=480) 기준 실측값
-                               #   f_px=685 실측 → 2×atan(240/685)=38.6°
-                               #   [16:9 변경] _EFF_W=FRAME_H=480 유지라 이론상 동일.
-                               #   ▶ 단, 16:9 모드 실제 수직FOV가 다를 수 있어 calibrate_hfov.py 재측정 권장.
+HFOV_DEG          = 32.1      # ★ 848×480(16:9) calibrate_hfov.py 재측정값 (_EFF_W=480 기준)
+                               #   f_px=834 → 2×atan(240/834)=32.1°
+                               #   (기존 4:3 640×480: 38.6°/f_px=685 — 16:9에서 수직FOV가 좁아져 변경됨)
 # 카메라가 90° 회전 마운트된 경우 설정. None=정방향
 # CW 회전 마운트 → ROTATE_90_COUNTERCLOCKWISE, CCW 회전 마운트 → ROTATE_90_CLOCKWISE
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
