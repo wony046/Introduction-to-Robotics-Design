@@ -31,7 +31,7 @@ USE_ROI_ARRIVE    = 0         # 1=ROI peaked→drop 도착 판정 활성 / 0=비
 # ── 근접 접근 제어 ────────────────────────────────────────────────────────
 CLOSE_ENTER_MM     = 400.0    # 이 거리(mm) 이내로 들어오면 CLOSE 모드 전환
 CAM_HEIGHT_MM      = 590.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측값 (59cm)
-CAM_TILT_DEG       = 40.4    # 848×480 재측정값 (CAM_HEIGHT=590, dv=0 기준 atan). 수평=0°, 아래로+ (기존 4:3: 34.5)
+CAM_TILT_DEG       = 41.8    # 848×480 거리검증 보정값 (다점 실측 편향 보정, 40.4→41.8). 수평=0°, 아래로+ (4:3: 34.5)
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
 USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
 CLOSE_BEARING_SCALE = 0.8212    # ★ calibrate_bearing.py 로 구한 보정 배율 (1.0=보정 없음)

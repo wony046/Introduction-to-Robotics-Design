@@ -26,7 +26,7 @@ else:
 HFOV_DEG          = 32.1   # 848×480(16:9) 재측정값 (기존 4:3: 38.6)
 CAM_POLAR_EPSILON = 0.05
 CAM_HEIGHT_MM     = 590.0   # 실측값 59cm
-CAM_TILT_DEG      = 40.4    # 848×480 재측정값 (기존 4:3: 34.5)
+CAM_TILT_DEG      = 41.8    # 848×480 거리검증 보정값 (40.4→41.8, 4:3: 34.5)
 CLOSE_ENTER_MM    = 400.0
 COLOR_RANGES = {
     'RED':    [((146, 100,  80), (179, 255, 255))],

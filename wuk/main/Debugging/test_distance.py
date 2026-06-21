@@ -28,7 +28,7 @@ FRAME_ROTATE   = cv2.ROTATE_90_COUNTERCLOCKWISE
 
 HFOV_DEG       = 32.1     # 848×480(16:9) 재측정값 (기존 4:3: 38.6)
 CAM_HEIGHT_MM  = 590.0    # ★ 실측값 59cm (바닥~카메라 수직 높이 mm)
-CAM_TILT_DEG   = 40.4     # 848×480 재측정값 (CAM_HEIGHT=590, dv=0 기준). (기존 4:3: 34.5)
+CAM_TILT_DEG   = 41.8     # 848×480 거리검증 보정값 (다점 실측, 40.4→41.8). (4:3: 34.5)
 CLOSE_ENTER_MM = 400.0    # 이 거리 이내 → CLOSE 모드 진입 (camera_tracker.py와 동일)
 
 TARGET_COLOR   = 'RED'    # 테스트할 색상
