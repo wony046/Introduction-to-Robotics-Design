@@ -7,7 +7,7 @@ import numpy as np
 # ── 카메라 설정 ─────────────────────────────────────────────────────
 CAMERA_INDEX      = 0         # 인식 안 되면 1로 변경 시도
 FRAME_W           = 640
-FRAME_H           = 400
+FRAME_H           = 480
 HFOV_DEG          = 38.6      # ★ 보정 후 화면 가로(_EFF_W=480) 기준 실측값
                                #   f_px=685 실측 → 2×atan(240/685)=38.6°
 # 카메라가 90° 회전 마운트된 경우 설정. None=정방향
@@ -15,7 +15,10 @@ HFOV_DEG          = 38.6      # ★ 보정 후 화면 가로(_EFF_W=480) 기준 
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
 
 # 회전 후 실효 해상도 (bearing·도착 판정에 사용)
-_EFF_W, _EFF_H = 400, 640
+if FRAME_ROTATE in (cv2.ROTATE_90_CLOCKWISE, cv2.ROTATE_90_COUNTERCLOCKWISE):
+    _EFF_W, _EFF_H = FRAME_H, FRAME_W
+else:
+    _EFF_W, _EFF_H = FRAME_W, FRAME_H
 
 # ── 도착 판정 ────────────────────────────────────────────────────────
 ARRIVE_HOLD_SEC   = 1.2       # 연속 감지 유지 시간 (sec), 1초 인정 기준보다 0.2s 여유
@@ -27,8 +30,7 @@ USE_ROI_ARRIVE    = 0         # 1=ROI peaked→drop 도착 판정 활성 / 0=비
 # ── 근접 접근 제어 ────────────────────────────────────────────────────────
 CLOSE_ENTER_MM     = 450.0    # 이 거리(mm) 이내로 들어오면 CLOSE 모드 전환
 CAM_HEIGHT_MM      = 590.0    # ★ 카메라 ~ 바닥(색지) 수직 높이 (mm) 실측값 (59cm)
-                               #   = 바퀴 반지름 + 바퀴축~카메라 높이
-CAM_TILT_DEG       = 40.4    # 캘리브레이션으로 찾은 각도
+CAM_TILT_DEG       = 40.4    # ★ 캘리브레이션으로 찾은 카메라 틸트 각도
                                #   수평=0°, 아래로 내려다볼수록 +
 CAM_POLAR_EPSILON  = 0.05     # 원근 보정 분모 하한 (0=하단끝 ±90° 폭발 방지)
 USE_CLIPPING_GUARD = False    # True: 클리핑 시 bearing 갱신 중단 / False: 항상 갱신
