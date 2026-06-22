@@ -2082,6 +2082,17 @@ def main():
 
     try:
         camera_tracker.start()
+
+        # ── 카메라 준비 대기 ──────────────────────────────────────────────
+        # 카메라 open + 첫 프레임 수신이 끝나기 전에 모터를 돌리면 색지를 못 보고
+        # 출발해 버린다. 준비 완료 신호를 받은 뒤에만 모터 스레드를 시작한다.
+        print("[INIT] 카메라 준비 대기 중...")
+        if camera_tracker.wait_ready(timeout=20.0):
+            print("[INIT] 카메라 준비 완료 → 주행 시작")
+        else:
+            print("[INIT] WARNING: 카메라 준비 타임아웃(20s). 카메라 없이 일단 출발합니다 "
+                  "(준비되면 자동으로 추종 시작).")
+
         t_lidar.start()
         t_motor.start()
         t_stoplog.start()
