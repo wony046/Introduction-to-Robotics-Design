@@ -39,16 +39,30 @@ CLOSE_BEARING_SCALE = 0.7913    # ★ 848×480 calibrate_bearing.py 재측정 (R
                                 #   시스템 bearing은 우측=음수(SEEK와 동일)이므로 크기만 取해 +로 적용.
 
 # ── LAB 색상 범위 (OpenCV LAB: L[0-255], A[0-255 / 128=중립], B[0-255 / 128=중립]) ──
-# CLAHE 전처리 후 적용. REF_AB ± TOL, L >= L_MIN 기반 실측값 (재캘리)
-# REF_AB = {'RED':(180,160), 'YELLOW':(120,200), 'BLUE':(120,80)}
-# TOL    = {'RED':35, 'YELLOW':35, 'BLUE':35}
-# L_MIN  = 30  (모든 색 공통)
-#   → lo=(L_MIN, A-TOL, B-TOL), hi=(255, A+TOL, B+TOL)
-COLOR_RANGES = {
-    'RED':    [((30, 145, 125), (255, 215, 195))],
-    'YELLOW': [((30,  85, 165), (255, 155, 235))],
-    'BLUE':   [((30,  85,  45), (255, 155, 115))],
+# CLAHE 전처리 후 적용. COLOR_PARAMS(a,b,tol) → lo/hi 자동 생성 (재캘리).
+#   각 색은 여러 클러스터(a,b 중심) 등록 가능 — BLUE는 2개로 색조 분산 커버.
+#   범위: lo=(L_MIN, a-tol, b-tol), hi=(255, a+tol, b+tol)
+COLOR_PARAMS = {
+    'RED': [
+        {'a': 180, 'b': 160, 'tol': 35},
+    ],
+    'YELLOW': [
+        {'a': 127, 'b': 177, 'tol': 20},
+    ],
+    'BLUE': [
+        {'a': 111, 'b': 80, 'tol': 26},
+        {'a': 123, 'b': 79, 'tol': 25},
+    ],
 }
+L_MIN = 30
+
+COLOR_RANGES = {}
+for color in ['RED', 'YELLOW', 'BLUE']:
+    COLOR_RANGES[color] = []
+    for p in COLOR_PARAMS[color]:
+        lower = (L_MIN, max(0, p['a'] - p['tol']), max(0, p['b'] - p['tol']))
+        upper = (255,   min(255, p['a'] + p['tol']), min(255, p['b'] + p['tol']))
+        COLOR_RANGES[color].append((lower, upper))
 
 # ── CLAHE 전처리 객체 (L 채널 조명 정규화) ───────────────────────────
 _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
