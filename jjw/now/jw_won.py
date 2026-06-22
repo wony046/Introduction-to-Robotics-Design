@@ -108,8 +108,10 @@ DIRECTION_HYSTERESIS = 300.0
 GAP_TARGET_WEIGHT = 1.0           # 갭 선택: 목표 방향 추종 강도 (주 항)
 GAP_SMOOTH_WEIGHT = 0.3           # 갭 선택: 직전 방향 유지 강도 (떨림 억제)
 KP_GOAL            = MAX_W / 45.0  # 비례 조향 게인 (45° → MAX_W)
-COLOR_CONFIRM_SEC  = 0.4           # sec: Mode1/2→Mode0 전환 디바운스 — 색을 이 시간 이상
-                                   #      연속 감지해야 추종(Mode0) 전환 (단일 프레임 노이즈 무시)
+COLOR_CONFIRM_SEC  = 0.2           # sec: Mode1/2→Mode0 전환 디바운스 — 색을 이 시간 이상
+                                   #      연속 감지해야 추종(Mode0) 전환 (단일 프레임 노이즈 무시).
+                                   #      피버턴 중 스쳐가는 먼 색지를 놓치지 않도록 0.4→0.2 단축.
+                                   #      노이즈가 다시 잡히면 0.3~0.35로 ↑ / 더 놓치면 0.15로 ↓
 COLOR_CONFIRM_JUMP_DEG = 12.0      # deg: 확정 중 bearing이 직전 대비 이 각도 초과로 튀면
                                    #      '튀는 가짜 색'으로 보고 확정 타이머 재시작 → 모드 오전환 방지
 TARGET_ALIGN_ANGLE = 50.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
