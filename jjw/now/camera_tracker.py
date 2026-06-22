@@ -53,11 +53,16 @@ COLOR_RANGES = {
 _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 
 # ── 노이즈 필터 (오검출 억제) ─────────────────────────────────────────
-MIN_BLOB_AREA      = 900     # px²: 이 미만 blob 무시 (기존 500 → 상향, 작은 노이즈 컷)
-MIN_SOLIDITY       = 0.7     # blob 채움도(contourArea / boundingRect 면적) 하한.
-                            #   색지=채워진 사각형(≈1.0) / 선·점·산발 노이즈=낮음 → 제거
+MIN_BLOB_AREA      = 350     # px²: 이 미만 blob 무시. 거리 의존적이므로 먼 색지를 잡으려면
+                            #   낮게 유지. 노이즈 방어는 거리 무관 필터(solidity·지속성·
+                            #   jj.py 확정 디바운스)에 위임. (먼 색지 놓치면 ↓, 노이즈 잡히면 ↑)
+MIN_SOLIDITY       = 0.6     # blob 채움도(contourArea / boundingRect 면적) 하한.
+                            #   색지=채워진 사각형(≈1.0) / 선·점·산발 노이즈=낮음 → 제거.
+                            #   먼 blob은 픽셀화로 다소 낮아져 0.7→0.6 완화 (거리 무관 항)
 MAX_ASPECT_RATIO   = 6.0     # boundingRect 장변/단변 비 상한. 가늘고 긴 노이즈(엣지 등) 제거
-DETECT_PERSIST_N   = 3       # 이 프레임 수 연속 검출돼야 '진짜 색'으로 보고 (시간적 지속성)
+DETECT_PERSIST_N   = 2       # 이 프레임 수 연속 검출돼야 '진짜 색'으로 보고 (시간적 지속성).
+                            #   피버턴 중 스쳐가는 먼 색지를 잡으려면 짧게. 노이즈는 형태
+                            #   필터(solidity·aspect)+jj.py 확정으로 막음. (놓치면 1까지 ↓)
 
 # ── 미션 순서 ────────────────────────────────────────────────────────
 MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
@@ -110,9 +115,12 @@ def _detect_color(frame, color_name):
     for (lo, hi) in COLOR_RANGES[color_name]:
         mask |= cv2.inRange(lab, np.array(lo), np.array(hi))
 
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
-    mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
-    mask   = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel)
+    # OPEN(노이즈 제거)은 5×5 — 7×7은 먼 색지의 작은 blob까지 지움.
+    # CLOSE(구멍 메우기)는 7×7 유지 — blob 내부 채움엔 영향만 좋음.
+    open_kernel  = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (5, 5))
+    close_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
+    mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  open_kernel)
+    mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, close_kernel)
 
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL,
                                    cv2.CHAIN_APPROX_SIMPLE)
