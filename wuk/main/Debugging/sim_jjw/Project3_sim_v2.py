@@ -558,15 +558,46 @@ class Sim:
 
     # ── 오케스트레이션 (jw_won._motor_controller 본문 이식) ──────────────────
     def _orchestrate(self):
-        """DWELL/DONE > CLOSE > SEEK 3-상태. (v, w_raw) 반환.
-        self.prev_w 는 분기 내에서 jw_won 과 동일하게 갱신(아래 스무딩 정합용)."""
-        # 상태 1: DWELL / DONE → 정지
+        """jw_won._motor_controller 본문 이식: 초기탐색 → DWELL/DONE > CLOSE > SEEK(Mode0/1/2).
+        (v, w_raw) 반환. self.prev_w 는 분기 내에서 jw_won 과 동일하게 갱신(아래 스무딩 정합).
+        ★ jw_won 은 `if pts:` 로 전체 제어를 게이팅하지만(빈 라이다=무동작), 시뮬은 빈
+          아레나(장애물 없음)에서도 주행을 봐야 하므로 이 게이트는 이식하지 않는다.
+        ★ 시간은 wall-clock(time.time()) 대신 self.sim_time 사용."""
+        pts = self.scan
+        hdg = S.arduino_heading_deg
+
+        # ── 초기 탐색 진입 (첫 사이클 1회): 정면 반원 경계 Mode1 시작 ──
+        # 빨강을 아직 못 찾은 상태 → 시작 위치 중심 정면 반원 안에서 Mode1(피버턴+회피)로 탐색.
+        if not S._initial_pose_set:
+            S._initial_x               = S.arduino_x_mm
+            S._initial_y               = S.arduino_y_mm
+            S._initial_heading         = hdg
+            S._initial_pose_set        = True
+            S._use_semicircle_boundary = True
+            S._search_mode             = 1
+            S._last_arrival_x          = S._initial_x
+            S._last_arrival_y          = S._initial_y
+            S._pivot_active            = True
+            S._pivot_prev_hdg          = hdg
+            S._pivot_total_rotated     = 0.0
+            S._pivot_direction         = 1.0
+            S._boundary_exit_count     = 0
+            S._boundary_was_outside    = False
+            S._current_boundary_radius = S.BOUNDARY_RADIUS
+            S._inspected_gaps[:]       = []
+            S._last_pivot_robot_x      = S.arduino_x_mm
+            S._last_pivot_robot_y      = S.arduino_y_mm
+            print(f"[INIT-SEARCH] 정면 반원 탐색 시작: "
+                  f"중심=({S._initial_x:.0f},{S._initial_y:.0f}) "
+                  f"hdg0={S._initial_heading:.1f}° R={S.BOUNDARY_RADIUS:.0f}mm")
+
+        # ── 상태 1: DWELL / DONE → 정지 ──
         if CAM.is_done() or CAM.is_dwelling():
             self.prev_w = 0.0
             self._close_reset()
             return 0.0, 0.0
 
-        # 상태 2: CLOSE → 관측 후 오도메트리 위치 제어
+        # ── 상태 2: CLOSE → 관측 후 오도메트리 위치 제어 ──
         if CAM.is_close() or self._close_target_x is not None:
             # 2a: 관측 단계 (CLOSE_OBSERVE_SEC 동안 정지)
             if self._close_target_x is None:
@@ -574,7 +605,7 @@ class Sim:
                 if self._close_observe_elapsed < S.CLOSE_OBSERVE_SEC:
                     self.prev_w = 0.0
                     return 0.0, 0.0
-                # 관측 완료 → 목표 좌표 확정 (true bearing/dist 사용)
+                # 관측 완료 → 목표 좌표 확정 (true bearing/dist + standoff)
                 cb = CAM.get_last_close_bearing()
                 dm = CAM.get_estimated_distance_mm()
                 self._close_target_x, self._close_target_y = S.compute_close_target(cb, dm)
@@ -599,79 +630,166 @@ class Sim:
                 self.prev_w = w     # CLOSE 내 스무딩 관성 제거 (아래에서 identity)
                 return v, w
 
-        # 상태 3: SEEK (새 로직: Mode1 도착후탐색 / Mode2 추적중소실)
+        # ── 상태 3: SEEK (Mode0 추종 / Mode1 도착후탐색 / Mode2 추적중소실) ──
         self._close_reset()
         bearing = CAM.get_bearing()
-        hdg = S.arduino_heading_deg
+
+        # 색 연속 감지 디바운스 (Mode1/2 → Mode0 전환 노이즈 방지)
+        if bearing is not None:
+            if (S._color_confirm_start is None
+                    or abs(bearing - S._color_confirm_ref) > S.COLOR_CONFIRM_JUMP_DEG):
+                S._color_confirm_start = self.sim_time
+            S._color_confirm_ref = bearing
+            color_confirmed = (self.sim_time - S._color_confirm_start) >= S.COLOR_CONFIRM_SEC
+        else:
+            S._color_confirm_start = None
+            color_confirmed = False
 
         # 미션 인덱스 변화 → Mode1 진입 (색지 도착 직후)
         cur_idx = CAM.get_mission_idx()
         if cur_idx != S._last_known_mission_idx:
-            S._last_arrival_x = S.arduino_x_mm
-            S._last_arrival_y = S.arduino_y_mm
-            S._last_known_mission_idx = cur_idx
-            S._search_mode = 1
-            S._pivot_active = True
-            S._pivot_prev_hdg = hdg
-            S._pivot_total_rotated = 0.0
-            S._pivot_direction = 1.0
-            S._boundary_exit_count = 0
-            S._boundary_was_outside = False
+            S._last_arrival_x          = S.arduino_x_mm
+            S._last_arrival_y          = S.arduino_y_mm
+            S._last_known_mission_idx  = cur_idx
+            S._search_mode             = 1
+            S._pivot_active            = True
+            S._pivot_prev_hdg          = hdg
+            S._pivot_total_rotated     = 0.0
+            S._pivot_direction         = 1.0
+            S._boundary_exit_count     = 0
+            S._boundary_was_outside    = False
             S._current_boundary_radius = S.BOUNDARY_RADIUS
+            S._use_semicircle_boundary = False   # 도착 후 탐색은 원형 경계
+            S._inspected_gaps[:]       = []
+            S._last_pivot_robot_x      = S.arduino_x_mm
+            S._last_pivot_robot_y      = S.arduino_y_mm
+            print(f"[MODE1] 탐색 시작: 도착=({S.arduino_x_mm:.0f},{S.arduino_y_mm:.0f}) "
+                  f"피버턴=CCW 경계={S.BOUNDARY_RADIUS:.0f}mm")
 
+        # 색이 보이면(확정 전이라도) 목표 추정 위치는 항상 갱신
         if bearing is not None:
-            # 색 감지 중 → 목표 추정 갱신, Mode0 복귀
             S.update_target_estimate(CAM.get_last_stable_bearing(),
                                      CAM.get_estimated_distance_mm())
-            S._search_mode = 0
-            S._pivot_active = False
-            S._boundary_exit_count = 0
-            S._boundary_was_outside = False
+
+        # 추종 게이트(비대칭): 탐색→추종 진입은 color_confirmed 필요 /
+        #                      이미 Mode0면 raw bearing 만으로 유지 (근접 점프에도 안 샘)
+        if color_confirmed or (S._search_mode == 0 and bearing is not None):
+            if S._search_mode != 0:
+                print(f"[MODE{S._search_mode}→0] 색지 재감지")
+            S._search_mode             = 0
+            S._pivot_active            = False
+            S._boundary_exit_count     = 0
+            S._boundary_was_outside    = False
             S._current_boundary_radius = S.BOUNDARY_RADIUS
-            return S.find_vw_command(self.scan, hdg, bearing)
+            S._use_semicircle_boundary = False   # 빨강 감지됨 → 이후 원형 경계
+            return S.find_vw_command(pts, hdg, bearing)
 
         elif S._search_mode == 1:
             # ── Mode 1: 도착 후 탐색 ──
             cx, cy = S._last_arrival_x, S._last_arrival_y
             if S._pivot_active:
-                if S.detect_stop_zone(self.scan):
-                    return S.find_vw_command(self.scan, hdg, 0.0)   # 회피 위임(누적 보존)
-                delta = S.normalize_angle(hdg - S._pivot_prev_hdg)
-                S._pivot_total_rotated += abs(delta)
-                S._pivot_prev_hdg = hdg
-                if S._pivot_total_rotated >= 350.0:
-                    S._pivot_active = False
-                    S._last_pivot_time = self.sim_time
-                    return 0.0, 0.0
-                return 0.0, S._pivot_direction * S.PIVOT_W_SPEED
-            else:
-                S.update_boundary_exit_tracking(cx, cy)
-                boundary_tb, v_scale = S.get_boundary_correction(
-                    cx, cy, S._current_boundary_radius)
-                if (not S.detect_stop_zone(self.scan) and
-                        self.sim_time - S._last_pivot_time > S.PIVOT_INTERVAL_SEC):
-                    S._pivot_active = True
+                # 우선순위: STOP zone / 주변 장애물 > 회피 > 피버턴
+                if (S.detect_stop_zone(pts) or
+                        not S.is_pivot_clearance_ok(pts, S.PIVOT_CLEAR_RADIUS)):
+                    # prev_hdg를 매 프레임 갱신해 회피 중 회전이 누적 회전에 안 더해지게
                     S._pivot_prev_hdg = hdg
+                    return S.find_vw_command(pts, hdg, 0.0)
+                else:
+                    delta = S.normalize_angle(hdg - S._pivot_prev_hdg)
+                    S._pivot_total_rotated += abs(delta)
+                    S._pivot_prev_hdg = hdg
+                    if S._pivot_total_rotated >= 350.0:
+                        S._pivot_active    = False
+                        S._last_pivot_time = self.sim_time
+                        print("[MODE1] 360° 피버턴 완료 → 장애물 회피 탐색")
+                        return 0.0, 0.0
+                    return 0.0, S._pivot_direction * S.PIVOT_W_SPEED
+            else:
+                # 재피버턴 트리거: ① 갭 기반(새 갭/시야 변화) ② 주기 기반
+                in_stop      = S.detect_stop_zone(pts)
+                gap_trigger  = None if in_stop else S._should_pivot_for_gap(pts, self.sim_time)
+                time_trigger = (not in_stop and
+                                self.sim_time - S._last_pivot_time >= S.PIVOT_INTERVAL_SEC)
+
+                if ((gap_trigger is not None or time_trigger) and
+                        S.is_pivot_clearance_ok(pts, S.PIVOT_CLEAR_RADIUS)):
+                    S._pivot_active        = True
+                    S._pivot_prev_hdg      = hdg
                     S._pivot_total_rotated = 0.0
-                    S._pivot_direction = 1.0 if boundary_tb <= 0 else -1.0
+                    S._last_pivot_robot_x  = S.arduino_x_mm
+                    S._last_pivot_robot_y  = S.arduino_y_mm
+                    if gap_trigger is not None:
+                        pivot_gap, gx, gy = gap_trigger
+                        S._pivot_direction = -1.0 if pivot_gap['center_angle'] > 0 else 1.0
+                        if all(math.hypot(gx - ix, gy - iy) > S.GAP_MEMORY_MERGE_MM
+                               for ix, iy in S._inspected_gaps):
+                            S._inspected_gaps.append((gx, gy))
+                        print(f"[MODE1] 재피버턴 시작 (갭글로벌=({gx:.0f},{gy:.0f}) "
+                              f"갭방향={pivot_gap['center_angle']:+.1f}°)")
+                    else:
+                        S._pivot_direction = 1.0
+                        print(f"[MODE1] 재피버턴 시작 "
+                              f"(주기 {S.PIVOT_INTERVAL_SEC:.0f}s 경과, 개활지 탐색)")
                     return 0.0, 0.0
-                v, w = S.find_vw_command(self.scan, hdg, boundary_tb)
-                return v * v_scale, w
+                else:
+                    # 장애물 회피 중 + 경계 적용
+                    S.update_boundary_exit_tracking(cx, cy)
+                    if S._use_semicircle_boundary:
+                        boundary_tb, v_scale = S.get_semicircle_boundary_correction(
+                            cx, cy, S._initial_heading, S._current_boundary_radius)
+                    else:
+                        boundary_tb, v_scale = S.get_boundary_correction(
+                            cx, cy, S._current_boundary_radius)
+                    v, w = S.find_vw_command(pts, hdg, boundary_tb)
+                    return v * v_scale, w
 
         else:
-            # ── Mode 2 (또는 Mode0→2 전환): 추적 중 소실 ──
+            # ── Mode 2 또는 Mode0→2 전환: 추적 중 소실 ──
             if S._search_mode == 0:
-                S._search_mode = 2
-            if S._last_target_est_x is not None:
+                S._search_mode      = 2
+                S._mode2_start_time = self.sim_time
+                if S._last_target_est_x is not None:
+                    print(f"[MODE2] 탐색 시작: 목표추정="
+                          f"({S._last_target_est_x:.0f},{S._last_target_est_y:.0f}) "
+                          f"경계={S._current_boundary_radius:.0f}mm")
+                else:
+                    print("[MODE2] 탐색 시작: 추정 위치 없음 → 장애물 회피")
+
+            # Mode 2 타임아웃 → Mode 1 복귀 (중심·경계 반경 유지)
+            if (S._last_target_est_x is not None and
+                    S._mode2_start_time is not None and
+                    self.sim_time - S._mode2_start_time > S.MODE2_TIMEOUT_SEC):
+                S._search_mode         = 1
+                S._last_arrival_x      = S._last_target_est_x
+                S._last_arrival_y      = S._last_target_est_y
+                S._pivot_active        = True
+                S._pivot_prev_hdg      = hdg
+                S._pivot_total_rotated = 0.0
+                S._pivot_direction     = 1.0
+                S._mode2_start_time    = None
+                S._inspected_gaps[:]   = []
+                S._last_pivot_robot_x  = S.arduino_x_mm
+                S._last_pivot_robot_y  = S.arduino_y_mm
+                print(f"[MODE2→1] {S.MODE2_TIMEOUT_SEC:.0f}s 타임아웃: "
+                      f"중심=({S._last_arrival_x:.0f},{S._last_arrival_y:.0f}) 피버턴 재시작")
+                return 0.0, 0.0
+            elif S._last_target_est_x is not None:
                 cx, cy = S._last_target_est_x, S._last_target_est_y
                 S.update_boundary_exit_tracking(cx, cy)
-                boundary_tb, v_scale = S.get_boundary_correction(
-                    cx, cy, S._current_boundary_radius)
-                v, w = S.find_vw_command(self.scan, hdg, boundary_tb)
-                return v * v_scale, w
+                # 능동 접근: 경계 안/밖 무관하게 항상 목표 추정 위치를 지향.
+                dist_to_tgt = math.hypot(cx - S.arduino_x_mm, cy - S.arduino_y_mm)
+                if dist_to_tgt < S.MODE2_NEAR_TARGET_MM:
+                    # 추정 위치 도달 → 정지 (재탐색은 타임아웃→Mode1 피버턴 담당)
+                    return 0.0, 0.0
+                else:
+                    target_tb = S.get_target_bearing(cx, cy)
+                    # 경계는 방향이 아닌 감속 leash 로만 사용
+                    _, v_scale = S.get_boundary_correction(cx, cy, S._current_boundary_radius)
+                    v, w = S.find_vw_command(pts, hdg, target_tb)
+                    return v * v_scale, w
             else:
-                # 첫 색지 탐색 전 (추정 위치 없음) → 일반 회피
-                return S.find_vw_command(self.scan, hdg, 0.0)
+                # 첫 색지 탐색 전 (추정 위치 없음) → 일반 장애물 회피
+                return S.find_vw_command(pts, hdg, 0.0)
 
     # ── 한 스텝 ──────────────────────────────────────────────
     def step(self):

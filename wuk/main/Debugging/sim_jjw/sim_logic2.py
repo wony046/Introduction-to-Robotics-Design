@@ -53,6 +53,11 @@ LAYER_PERCENTILE = 5
 STOP_FWD_MIN  = 100               # ★
 STOP_FWD_MAX  = 175               # ★
 STOP_HORIZ_TH = 105               # ★
+STOP_MIN_POINTS = 2               # 이 수 이상 포인트가 있어야 STOP 인정 (단일 노이즈 점 무시)
+
+PIVOT_CLEAR_RADIUS     = STOP_FWD_MAX   # mm: 피버턴 클리어런스 검사 반경 (= STOP_FWD_MAX)
+PIVOT_CLEAR_MIN_POINTS = 2              # 이 수 이상 포인트가 반경 내일 때만 '막힘' (단일 노이즈 점 무시)
+REAR_BLIND_HALF        = 23.0           # deg: 후방 카메라 구조물 차폐 반각 (총 46° 사각)
 
 STOP_ESCAPE_MIN_GAP = ROBOT_HALF_WIDTH * 2 + 40   # ★ (=260)
 STOP_MAX_CYCLES     = 30
@@ -78,9 +83,17 @@ DIRECTION_HYSTERESIS = 300.0
 GAP_TARGET_WEIGHT = 1.0
 GAP_SMOOTH_WEIGHT = 0.3
 KP_GOAL           = MAX_W / 45.0  # ★ (시뮬에서는 독립 슬라이더)
-TARGET_ALIGN_ANGLE = 60.0
+COLOR_CONFIRM_SEC  = 0.2          # sec: Mode1/2→Mode0 전환 디바운스 (색 연속 감지 시간)
+COLOR_CONFIRM_JUMP_DEG = 12.0     # deg: 확정 중 bearing이 직전 대비 이 각도 초과로 튀면 확정 타이머 재시작
+TARGET_ALIGN_ANGLE = 50.0         # deg: 이 각도 이상이면 v=MIN_SPEED (60→50, Mode2 정렬 우선)
 TARGET_CLEAR_CONE  = 18
 TARGET_BLOCK_DIST  = 600
+TARGET_UNBLOCK_RATIO = 1.25       # 막힘 히스테리시스: 일단 막히면 이 배(750mm)까지 비워져야 해제
+# ── 정면 진행 통로 가드 (Mode1/2 전용, Mode0는 비활성) ──
+FRONT_CORRIDOR_HALF = ROBOT_HALF_WIDTH + 40   # mm: 정면 통로 반폭 (몸체 110 + 마진 40)
+FRONT_CORRIDOR_DIST = 500                     # mm: 정면 통로 검사 깊이
+GOAL_BIAS_WEIGHT  = 8.0           # mm/deg: 분기③(갭 없는 회피)에서 목표 방향 쪽 score 가산
+GOAL_BIAS_MAX     = 250.0         # mm: goal bias 상한 (tie-breaker 전용, 회피 항을 못 이기게)
 
 SCAN_WIDE_HALF = 135
 
@@ -112,13 +125,25 @@ BOUNDARY_HYSTERESIS_MM  = 150.0       # 진입/이탈 히스테리시스
 BOUNDARY_BLEND_DIST     = 300.0
 BOUNDARY_V_MIN          = 0.5
 PIVOT_W_SPEED           = 0.6         # 탐색 피버턴 회전 속도 (rad/s)
-PIVOT_INTERVAL_SEC      = 5.0         # 회피 중 재피버턴 주기 (sec)
+PIVOT_INTERVAL_SEC      = 5.0         # 주기 기반 재피버턴 주기 (sec, 개활지에서도 주기적 360°)
+MODE2_TIMEOUT_SEC       = 40.0        # sec: Mode2에서 이 시간 초과 시 Mode1으로 복귀
+MODE2_NEAR_TARGET_MM    = 120         # mm: 목표 추정 위치 이 거리 이내면 능동 인력 OFF (정지)
+
+# Mode 1 재피버턴 — 갭 유무/시야 변화 기반 트리거
+MAX_PIVOT_GAP_WIDTH = 650    # mm: 이보다 넓은 갭은 통로가 아닌 개활지로 간주 → 피버턴 안 함
+PIVOT_EDGE_NEAR_MM  = 600    # mm: 갭 양쪽 에지가 모두 이 거리 이내여야 실제 통로(개활지 배제)
+NEW_GAP_DIST_MM     = 400    # mm: 기존 검사 갭들과 이만큼 떨어지면 '새 갭'으로 판정
+PIVOT_MOVE_TRIGGER  = 600    # mm: 마지막 피버턴 이후 이만큼 이동 → 같은 갭이라도 시야 변화로 재피버턴
+GAP_MEMORY_MERGE_MM = 300    # mm: 갭 글로벌 위치가 이 안이면 같은 갭으로 보고 중복 등록 안 함
+PIVOT_COOLDOWN_SEC      = 4.0  # sec: 피버턴 완료 후 이 시간 동안은 재피버턴 금지
+NEW_GAP_PERSIST_FRAMES  = 3    # 트리거 조건이 이 프레임 수 연속 유지될 때만 재피버턴 (디바운스)
 
 KP_CLOSE_HDG        = 0.1         # ★
 CLOSE_SPEED_MAX     = 0.2         # ★
 CLOSE_ARRIVE_MM     = 30          # ★
 CLOSE_OBSERVE_SEC   = 1.0
 CLOSE_ENTER_MM      = 400.0       # ★
+CLOSE_STANDOFF_MM   = 20          # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
 
 # 디버그 (시뮬에서는 전부 OFF; print 호출만 무력화)
 DEBUG_LAYERS = DEBUG_STOP = DEBUG_STOP_PIVOT = DEBUG_BRANCH = 0
@@ -129,6 +154,7 @@ DEBUG_SIDE_LAYER = DEBUG_VIRTUAL = 0
 # ── 회피 상태 (jw_won.py 전역과 동일 역할) ──────────────────────────────
 prev_desired_heading = 0.0
 _last_direction      = 1.0
+_target_block_latch  = False       # is_target_blocked 히스테리시스 상태 (막힘 래치)
 stop_cycle_count           = 0
 stop_pivot_w               = 0.0
 stop_locked_target         = 0.0
@@ -153,14 +179,29 @@ _last_arrival_y          = None
 _last_target_est_x       = None   # Mode2 경계 중심 (마지막 감지 목표 추정)
 _last_target_est_y       = None
 _last_known_mission_idx  = 0      # 미션 인덱스 변화 감지용
+_color_confirm_start     = None   # 색 연속 감지 시작 시각 (Mode1/2→Mode0 디바운스; None=미감지)
+_color_confirm_ref       = 0.0    # 확정 중 직전 bearing 기준값 (튀는 값 점프 감지용)
 _pivot_active            = False  # 피버턴 진행 중
 _pivot_prev_hdg          = 0.0    # 이전 사이클 헤딩 (누적 회전 계산)
 _pivot_total_rotated     = 0.0    # 누적 회전량 (deg)
 _pivot_direction         = 1.0    # +1=CCW, -1=CW
 _last_pivot_time         = 0.0    # 마지막 피버턴 완료 시각 (sim time)
+_mode2_start_time        = None   # Mode2 시작 시각 (타임아웃 계산용, sim time)
+_inspected_gaps          = []     # 이미 피버턴으로 들여다본 갭들의 글로벌 (x_mm, y_mm)
+_last_pivot_robot_x      = None   # mm: 마지막 피버턴 시점 로봇 위치 x (시야 변화 판정용)
+_last_pivot_robot_y      = None   # mm: 마지막 피버턴 시점 로봇 위치 y
+_new_gap_streak          = 0      # 재피버턴 트리거 조건 연속 충족 프레임 수 (디바운스)
 _current_boundary_radius = BOUNDARY_RADIUS  # 현재 적용 경계 반경
 _boundary_exit_count     = 0      # 경계 이탈→복귀 누적
 _boundary_was_outside    = False  # 히스테리시스: 현재 경계 외부 여부
+
+# ── 초기 탐색(첫 빨강 색지 발견 전) 상태 (jw_won.py 전역과 동일 역할) ──────────
+#   시작하자마자 Mode1(피버턴 포함) 탐색을 돌리되 경계를 '정면 반원'으로 잡는다.
+_initial_x               = 0.0     # mm: 프로그램 시작 위치 x (정면 반원 중심, arduino 프레임)
+_initial_y               = 0.0     # mm: 프로그램 시작 위치 y
+_initial_heading         = 0.0     # deg: 시작 헤딩 (정면 half-plane 정의)
+_initial_pose_set        = False   # 시작 포즈 캡처 완료 여부
+_use_semicircle_boundary = False   # True: 정면 반원 경계 사용 (초기 탐색 전용)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -185,11 +226,12 @@ def apply_params(values: dict):
 
 def reset_state():
     """주행(STOP/방향 히스테리시스) 상태 초기화. 재시작 시 호출."""
-    global prev_desired_heading, _last_direction
+    global prev_desired_heading, _last_direction, _target_block_latch
     global stop_cycle_count, stop_pivot_w, stop_locked_target
     global stop_locked_gap, stop_locked_global_heading, stop_phase
     prev_desired_heading = 0.0
     _last_direction      = 1.0
+    _target_block_latch  = False
     stop_cycle_count = 0
     stop_pivot_w = 0.0
     stop_locked_target = 0.0
@@ -209,6 +251,25 @@ def is_in_front_90(a):
 
 def is_in_wide_scan(a):
     return -SCAN_WIDE_HALF <= a <= SCAN_WIDE_HALF
+
+def is_rear_blind(angle):
+    """후방 카메라 구조물 차폐 각도(|angle| > 180-REAR_BLIND_HALF)면 True."""
+    return abs(angle) > 180.0 - REAR_BLIND_HALF
+
+def is_pivot_clearance_ok(scan_points, radius):
+    """후방 사각 제외, 반경 radius 내 유효 장애물이 없으면 True.
+    단일 노이즈 점으로 피버턴이 중단되지 않도록 PIVOT_CLEAR_MIN_POINTS 이상일 때만 막힘."""
+    count = 0
+    for angle, dist in scan_points:
+        if dist < LIDAR_MIN_VALID:
+            continue
+        if is_rear_blind(angle):
+            continue
+        if dist <= radius:
+            count += 1
+            if count >= PIVOT_CLEAR_MIN_POINTS:
+                return False
+    return True
 
 def decompose(angle_deg, dist):
     rad = math.radians(angle_deg)
@@ -244,12 +305,17 @@ def nearest_to_segments(px, py, cluster_xy):
 # STOP zone 감지 & FGM 탈출
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def detect_stop_zone(scan_points):
+    """STOP rectangle (fwd 100~175mm, horiz<105mm) 안에 장애물이 있는가?
+    단일 노이즈 점으로 STOP이 오발동하지 않도록 STOP_MIN_POINTS 이상일 때만 True."""
+    count = 0
     for angle_norm, dist in scan_points:
         if dist < LIDAR_MIN_VALID or dist > DETECTION_RANGE: continue
         if not is_in_front_90(angle_norm): continue
         horiz, fwd = decompose(angle_norm, dist)
         if STOP_FWD_MIN <= fwd <= STOP_FWD_MAX and horiz < STOP_HORIZ_TH:
-            return True
+            count += 1
+            if count >= STOP_MIN_POINTS:
+                return True
     return False
 
 
@@ -325,24 +391,157 @@ def choose_escape_gap(gaps, prefer_angle=0.0):
     return None
 
 
+def find_free_sectors(scan_points, block_dist):
+    """1° 빈 360개 점유 배열 → 원형 순회로 연속 free 구간 추출.
+    free = block_dist 이내에 유효 포인트가 없는 각도 구간(=깊이 자동 충족).
+    반환: list of {center_angle, width, ang_width, R}."""
+    blocked  = [False] * 360
+    shoulder = [block_dist] * 360
+    for a, d in scan_points:
+        if LIDAR_MIN_VALID < d < block_dist:
+            i = int(round(a)) % 360
+            blocked[i]  = True
+            shoulder[i] = min(shoulder[i], d)
+
+    if not any(blocked):
+        return [{'center_angle': 0.0, 'width': 9999.0, 'ang_width': 360.0, 'R': block_dist}]
+
+    start   = blocked.index(True)
+    sectors = []
+    k = 0
+    while k < 360:
+        if blocked[(start + k) % 360]:
+            k += 1
+            continue
+        run_begin = k
+        while k < 360 and not blocked[(start + k) % 360]:
+            k += 1
+        run_end   = k
+        ang_width = run_end - run_begin
+        left_sh   = shoulder[(start + run_begin - 1) % 360]
+        right_sh  = shoulder[(start + run_end) % 360]
+        R         = min(left_sh, right_sh, block_dist)
+        width_mm  = 2.0 * R * math.sin(math.radians(min(ang_width, 180)) / 2.0)
+        center    = normalize_angle(start + run_begin + ang_width / 2.0)
+        sectors.append({'center_angle': center, 'width': width_mm,
+                        'ang_width': ang_width, 'R': R})
+    return sectors
+
+
+def choose_escape_sector(sectors, prefer_angle=0.0):
+    """폭 >= STOP_ESCAPE_MIN_GAP 섹터 중 prefer_angle 최근접 선택. 없으면 None."""
+    passable = [s for s in sectors if s['width'] >= STOP_ESCAPE_MIN_GAP]
+    if passable:
+        return min(passable,
+                   key=lambda s: abs(((s['center_angle'] - prefer_angle) + 180) % 360 - 180))
+    return None
+
+
 def find_stop_escape_direction(scan_points, heading_deg=0.0):
+    """STOP 탈출 방향 결정. 반환: (target_angle, gap_width, info_list, method)
+    1차 FGM(에지 기반). 통과 갭 0개면 2차 빈 섹터(각도 기반)로 폴백."""
+    # ── 1차: FGM (에지 기반) ──
     gaps   = find_all_gaps(scan_points)
     chosen = choose_escape_gap(gaps, prefer_angle=heading_deg)
+    method = 'FGM'
+
+    # ── 2차: 통과 갭 0개 → 빈 섹터 탐색 ──
     if chosen is None:
-        return 0.0, 0.0, []
-    gap_info = [
-        {
-            'width':        g['width'],
-            'center_angle': g['center_angle'],
-            'edge_a':       list(g['edge_a']),
-            'edge_b':       list(g['edge_b']),
-            'depth':        g['depth'],
-            'passable':     g['width'] >= STOP_ESCAPE_MIN_GAP and g['depth'] >= FGM_MIN_DEPTH_MM,
-            'chosen':       g is chosen,
-        }
-        for g in gaps
-    ]
-    return float(chosen['center_angle']), float(chosen['width']), gap_info
+        sectors = find_free_sectors(scan_points, FGM_MAX_RANGE_MM)
+        chosen  = choose_escape_sector(sectors, prefer_angle=heading_deg)
+        method  = 'SECTOR'
+
+    if chosen is None:
+        return 0.0, 0.0, [], 'NONE'
+
+    if method == 'FGM':
+        info = [
+            {
+                'width':        g['width'],
+                'center_angle': g['center_angle'],
+                'edge_a':       list(g['edge_a']),
+                'edge_b':       list(g['edge_b']),
+                'depth':        g['depth'],
+                'passable':     g['width'] >= STOP_ESCAPE_MIN_GAP and g['depth'] >= FGM_MIN_DEPTH_MM,
+                'chosen':       g is chosen,
+            }
+            for g in gaps
+        ]
+    else:
+        info = [
+            {
+                'width':        s['width'],
+                'center_angle': s['center_angle'],
+                'ang_width':    s['ang_width'],
+                'R':            s['R'],
+                'depth':        s['R'],   # 렌더러 호환 (gap_info 그리기에서 depth 사용)
+                'passable':     s['width'] >= STOP_ESCAPE_MIN_GAP,
+                'chosen':       s is chosen,
+            }
+            for s in sectors
+        ]
+
+    return float(chosen['center_angle']), float(chosen['width']), info, method
+
+
+def find_passable_gap_for_pivot(scan_points):
+    """Mode 1 재피버턴 전용: 통과 가능하고 후방 사각이 아닌 갭 중 가장 넓은 것 반환.
+    [개활지 배제] width 상한(MAX_PIVOT_GAP_WIDTH) + 양쪽 에지 근거리(PIVOT_EDGE_NEAR_MM)로
+    실제 장애물에 둘러싸인 통로만 남긴다. 없으면 None."""
+    passable = [g for g in find_all_gaps(scan_points)
+                if STOP_ESCAPE_MIN_GAP <= g['width'] <= MAX_PIVOT_GAP_WIDTH
+                and g['depth'] >= FGM_MIN_DEPTH_MM
+                and g['edge_a'][1] <= PIVOT_EDGE_NEAR_MM
+                and g['edge_b'][1] <= PIVOT_EDGE_NEAR_MM
+                and not is_rear_blind(g['center_angle'])]
+    if not passable:
+        return None
+    return max(passable, key=lambda g: g['width'])
+
+
+def _gap_global_pos(gap):
+    """갭 입구의 글로벌 좌표 (x_mm, y_mm) 추정 (오도메트리 기반)."""
+    r   = (gap['edge_a'][1] + gap['edge_b'][1]) / 2.0
+    ang = math.radians(arduino_heading_deg + gap['center_angle'])
+    return arduino_x_mm + r * math.sin(ang), arduino_y_mm + r * math.cos(ang)
+
+
+def _should_pivot_for_gap(scan_points, now):
+    """Mode 1 재피버턴 트리거. 실제 통로 갭(개활지 제외)이 존재하고,
+      ① 기존에 들여다보지 않은 '새 갭'이거나(NEW_GAP_DIST_MM),
+      ② 마지막 피버턴 이후 충분히 이동(PIVOT_MOVE_TRIGGER)해 시야가 바뀐 경우
+    에만 (gap, gx, gy)를 반환. 아니면 None.
+    쿨다운(PIVOT_COOLDOWN_SEC) + 디바운스(NEW_GAP_PERSIST_FRAMES)로 오발동 억제.
+    now = 시뮬 시각 (jw_won 의 time.time() 대체)."""
+    global _new_gap_streak
+
+    # 쿨다운: 피버턴 완료 직후 재트리거 금지
+    if now - _last_pivot_time < PIVOT_COOLDOWN_SEC:
+        _new_gap_streak = 0
+        return None
+
+    gap = find_passable_gap_for_pivot(scan_points)
+    if gap is None:
+        _new_gap_streak = 0
+        return None
+
+    gx, gy = _gap_global_pos(gap)
+    is_new = all(math.hypot(gx - ix, gy - iy) > NEW_GAP_DIST_MM
+                 for ix, iy in _inspected_gaps)
+    moved  = (_last_pivot_robot_x is None or
+              math.hypot(arduino_x_mm - _last_pivot_robot_x,
+                         arduino_y_mm - _last_pivot_robot_y) > PIVOT_MOVE_TRIGGER)
+
+    if not (is_new or moved):
+        _new_gap_streak = 0
+        return None
+
+    # 디바운스: 연속 프레임 유지 확인
+    _new_gap_streak += 1
+    if _new_gap_streak < NEW_GAP_PERSIST_FRAMES:
+        return None
+    _new_gap_streak = 0
+    return (gap, gx, gy)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -549,10 +748,30 @@ def choose_target_gap(passable_gaps, target_bearing, prev_heading):
 
 
 def is_target_blocked(scan_points, target_bearing):
-    for a, d in scan_points:
-        if LIDAR_MIN_VALID < d < TARGET_BLOCK_DIST and abs(a - target_bearing) < TARGET_CLEAR_CONE:
-            return True
-    return False
+    """목표 방향 ±TARGET_CLEAR_CONE° 안에 장애물이 있으면 True (히스테리시스 적용).
+    진입: TARGET_BLOCK_DIST 이내. 해제: 그 TARGET_UNBLOCK_RATIO배까지 비워져야.
+    추가: Mode1/2 전용 '정면 진행 통로 가드' — 목표 방향과 무관하게 정면 통로가 막히면 True."""
+    global _target_block_latch
+    thresh = TARGET_BLOCK_DIST * (TARGET_UNBLOCK_RATIO if _target_block_latch else 1.0)
+    cone_blocked = any(
+        LIDAR_MIN_VALID < d < thresh and abs(a - target_bearing) < TARGET_CLEAR_CONE
+        for a, d in scan_points)
+    _target_block_latch = cone_blocked
+
+    # ── 정면 진행 통로 가드 (Mode 1/2 전용, Mode 0 비활성) ──
+    corridor_blocked = False
+    if _search_mode != 0:
+        for a, d in scan_points:
+            if not (LIDAR_MIN_VALID < d < FRONT_CORRIDOR_DIST):
+                continue
+            if not is_in_front_90(a):
+                continue
+            horiz, fwd = decompose(a, d)
+            if fwd > 0 and horiz < FRONT_CORRIDOR_HALF:
+                corridor_blocked = True
+                break
+
+    return cone_blocked or corridor_blocked
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -664,7 +883,8 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
     elif chosen_gap is not None:
         desired_heading      = chosen_gap['center_angle']
         prev_desired_heading = desired_heading
-        w = KP_GOAL * desired_heading
+        # ★ LiDAR center_angle(우+) ↔ heading(좌+) 반대 부호 → -KP (분기① bearing과 다름)
+        w = -KP_GOAL * desired_heading
 
     elif layer_results:
         closest   = min(layer_results, key=lambda r: r['rep_horiz'])
@@ -694,9 +914,15 @@ def find_vw_layered(scan_points, heading_deg, target_bearing=0.0):
         term_side_R = SCORE_SIDE  * side_left_push
         term_head_L = max(0.0, -heading_deg) * HEADING_WEIGHT_MM
         term_head_R = max(0.0,  heading_deg) * HEADING_WEIGHT_MM
+        # 목표 방향 bias: 갭이 없어 회피만 할 때 '동점 깨기'로만 목표 쪽 편향.
+        # GOAL_BIAS_MAX로 상한 → side/push 회피 항을 절대 override 못 함(돌진 방지).
+        # ★ 분기①(w=+KP*target_bearing)과 같은 쪽: target_bearing>0 → score_L(+측).
+        goal_mag    = min(abs(target_bearing) * GOAL_BIAS_WEIGHT, GOAL_BIAS_MAX)
+        term_goal_L = goal_mag if target_bearing > 0 else 0.0
+        term_goal_R = goal_mag if target_bearing < 0 else 0.0
 
-        score_L = term_gap_L + term_push_L + term_side_L + term_head_L
-        score_R = term_gap_R + term_push_R + term_side_R + term_head_R
+        score_L = term_gap_L + term_push_L + term_side_L + term_head_L + term_goal_L
+        score_R = term_gap_R + term_push_R + term_side_R + term_head_R + term_goal_R
 
         score_diff = score_L - score_R
         if _last_direction > 0:
@@ -768,7 +994,7 @@ def find_vw_command(scan_points, heading_deg, target_bearing=0.0):
 
     # Phase 0: 정상 → STOP 감지 시 피봇
     if detect_stop_zone(scan_points):
-        target, gap_width, gap_info = find_stop_escape_direction(scan_points, heading_deg)
+        target, gap_width, gap_info, escape_method = find_stop_escape_direction(scan_points, heading_deg)
         _stop_set_pivot(heading_deg, target, gap_width)
         stop_cycle_count = 0
         stop_phase       = 2
@@ -791,7 +1017,7 @@ def analyze_scan(scan_points, heading_deg, target_bearing=0.0):
             active_names.add(r['name'])
 
     stop_triggered = detect_stop_zone(scan_points)
-    esc_target, esc_width, gap_info = find_stop_escape_direction(scan_points, heading_deg)
+    esc_target, esc_width, gap_info, esc_method = find_stop_escape_direction(scan_points, heading_deg)
 
     # STOP 발동 시 피봇 방향 미리보기(부호만): +면 좌회전, -면 우회전
     pivot_w_preview = 0.0
@@ -831,13 +1057,15 @@ def compute_close_target(close_bearing_deg, dist_mm):
     수식 동일 — 단 camera 의존(get_last_close_bearing/get_estimated_distance_mm)을
     인자로 분리. (x_t, y_t) 반환.
         bearing_global = heading + close_bearing
-        x_t = arduino_x + dist*sin(bearing_global)
-        y_t = arduino_y + dist*cos(bearing_global)
+        target_dist    = max(dist - CLOSE_STANDOFF_MM, 0)   # 색지보다 덜 접근해 정지
+        x_t = arduino_x + target_dist*sin(bearing_global)
+        y_t = arduino_y + target_dist*cos(bearing_global)
     """
     bearing_global_deg = arduino_heading_deg + close_bearing_deg
-    hdg_rad = math.radians(bearing_global_deg)
-    x_t = arduino_x_mm + dist_mm * math.sin(hdg_rad)
-    y_t = arduino_y_mm + dist_mm * math.cos(hdg_rad)
+    target_dist        = max(dist_mm - CLOSE_STANDOFF_MM, 0.0)
+    hdg_rad            = math.radians(bearing_global_deg)
+    x_t = arduino_x_mm + target_dist * math.sin(hdg_rad)
+    y_t = arduino_y_mm + target_dist * math.cos(hdg_rad)
     return x_t, y_t
 
 
@@ -861,6 +1089,51 @@ def get_boundary_correction(center_x, center_y, radius):
     rel_bearing = normalize_angle(bearing_to_center - arduino_heading_deg)
     v_scale = BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend)
     return rel_bearing, v_scale
+
+
+def get_semicircle_boundary_correction(center_x, center_y, fwd_heading_deg, radius):
+    """정면 반원 경계 (초기 탐색 전용). jw_won._get_semicircle_boundary_correction 와 동일.
+    중심에서 반경 이내 AND 시작 헤딩 기준 '정면 half-plane' 안이면 내부.
+      - 반경 초과       → 중심 방향으로 복귀
+      - 정면선 뒤로 넘어감 → 정면(시작 헤딩) 방향으로 복귀
+      - 둘 다 위반       → 위반 깊이가 큰 쪽으로 복귀
+    반환: (rel_bearing_deg[좌+], v_scale). 경계 내부 → (0.0, 1.0)."""
+    dx   = center_x - arduino_x_mm     # 로봇 → 중심
+    dy   = center_y - arduino_y_mm
+    dist = math.sqrt(dx ** 2 + dy ** 2)
+
+    # 시작 헤딩 정면 단위벡터 (월드, x=sin·y=cos 규약)
+    fr     = math.radians(fwd_heading_deg)
+    fx, fy = math.sin(fr), math.cos(fr)
+    # (로봇−중심)·정면 = 정면 진행 성분. >0: 정면 half / <0: 정면선 뒤로 넘어감
+    proj   = (-dx) * fx + (-dy) * fy
+
+    radial_excess = max(0.0, dist - radius)
+    behind_excess = max(0.0, -proj)
+
+    if radial_excess <= 0.0 and behind_excess <= 0.0:
+        return 0.0, 1.0
+
+    if radial_excess >= behind_excess:
+        bearing_to = math.degrees(math.atan2(dx, dy))   # 중심 방향
+        excess     = radial_excess
+    else:
+        bearing_to = fwd_heading_deg                    # 정면(시작 헤딩) 방향
+        excess     = behind_excess
+
+    rel_bearing = normalize_angle(bearing_to - arduino_heading_deg)
+    blend       = min(excess / BOUNDARY_BLEND_DIST, 1.0)
+    v_scale     = BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend)
+    return rel_bearing, v_scale
+
+
+def get_target_bearing(target_x, target_y):
+    """목표 좌표로의 상대 베어링(deg, 좌+). 경계 안/밖 무관하게 항상 목표를 향함.
+    jw_won._get_target_bearing 와 동일 — Mode2 능동 접근용."""
+    dx = target_x - arduino_x_mm
+    dy = target_y - arduino_y_mm
+    bearing_to_target = math.degrees(math.atan2(dx, dy))
+    return normalize_angle(bearing_to_target - arduino_heading_deg)
 
 
 def update_target_estimate(bearing_rel_deg, dist_mm):
@@ -903,21 +1176,33 @@ def reset_search_state():
     global arduino_x_mm, arduino_y_mm, arduino_heading_deg
     global _search_mode, _last_arrival_x, _last_arrival_y
     global _last_target_est_x, _last_target_est_y, _last_known_mission_idx
+    global _color_confirm_start, _color_confirm_ref
     global _pivot_active, _pivot_prev_hdg, _pivot_total_rotated, _pivot_direction, _last_pivot_time
+    global _mode2_start_time, _inspected_gaps, _last_pivot_robot_x, _last_pivot_robot_y, _new_gap_streak
     global _current_boundary_radius, _boundary_exit_count, _boundary_was_outside
+    global _initial_x, _initial_y, _initial_heading, _initial_pose_set, _use_semicircle_boundary
     arduino_x_mm = arduino_y_mm = arduino_heading_deg = 0.0
     _search_mode = 0
     _last_arrival_x = _last_arrival_y = None
     _last_target_est_x = _last_target_est_y = None
     _last_known_mission_idx = 0
+    _color_confirm_start = None
+    _color_confirm_ref = 0.0
     _pivot_active = False
     _pivot_prev_hdg = 0.0
     _pivot_total_rotated = 0.0
     _pivot_direction = 1.0
     _last_pivot_time = 0.0
+    _mode2_start_time = None
+    _inspected_gaps = []
+    _last_pivot_robot_x = _last_pivot_robot_y = None
+    _new_gap_streak = 0
     _current_boundary_radius = BOUNDARY_RADIUS
     _boundary_exit_count = 0
     _boundary_was_outside = False
+    _initial_x = _initial_y = _initial_heading = 0.0
+    _initial_pose_set = False
+    _use_semicircle_boundary = False
 
 
 # 호환 alias (project3_sim_v2 가 호출)

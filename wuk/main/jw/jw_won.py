@@ -108,8 +108,10 @@ DIRECTION_HYSTERESIS = 300.0
 GAP_TARGET_WEIGHT = 1.0           # 갭 선택: 목표 방향 추종 강도 (주 항)
 GAP_SMOOTH_WEIGHT = 0.3           # 갭 선택: 직전 방향 유지 강도 (떨림 억제)
 KP_GOAL            = MAX_W / 45.0  # 비례 조향 게인 (45° → MAX_W)
-COLOR_CONFIRM_SEC  = 0.4           # sec: Mode1/2→Mode0 전환 디바운스 — 색을 이 시간 이상
-                                   #      연속 감지해야 추종(Mode0) 전환 (단일 프레임 노이즈 무시)
+COLOR_CONFIRM_SEC  = 0.2           # sec: Mode1/2→Mode0 전환 디바운스 — 색을 이 시간 이상
+                                   #      연속 감지해야 추종(Mode0) 전환 (단일 프레임 노이즈 무시).
+                                   #      피버턴 중 스쳐가는 먼 색지를 놓치지 않도록 0.4→0.2 단축.
+                                   #      노이즈가 다시 잡히면 0.3~0.35로 ↑ / 더 놓치면 0.15로 ↓
 COLOR_CONFIRM_JUMP_DEG = 12.0      # deg: 확정 중 bearing이 직전 대비 이 각도 초과로 튀면
                                    #      '튀는 가짜 색'으로 보고 확정 타이머 재시작 → 모드 오전환 방지
 TARGET_ALIGN_ANGLE = 50.0         # deg: 이 각도 이상이면 v=MIN_SPEED (거의 제자리 회전)
@@ -250,7 +252,7 @@ KP_CLOSE_HDG      = 0.1  # 헤딩 오차(deg) → w 게인  (포화: ±° → MA
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 CLOSE_OBSERVE_SEC = 1.0   # CLOSE 진입 후 정지 관측 시간 (sec)
-CLOSE_STANDOFF_MM = 0   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
+CLOSE_STANDOFF_MM = 20   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 _target_block_latch   = False # is_target_blocked 히스테리시스 상태 (막힘 래치)
@@ -1818,9 +1820,17 @@ def _motor_controller(arduino):
                     print(f"[MODE1] 탐색 시작: 도착=({arduino_x_mm:.0f},{arduino_y_mm:.0f}) "
                           f"피버턴=CCW 경계={BOUNDARY_RADIUS:.0f}mm")
 
+                # 색이 보이면(확정 전이라도) 목표 추정 위치는 항상 갱신 →
+                # 노이즈가 아닌 진짜 색이었을 때 Mode2가 바로 활용 가능.
                 if bearing is not None:
-                    # 색 감지 중 → 목표 추정 위치 갱신, 탐색 모드 해제
                     _update_target_estimate()
+
+                # 추종 게이트(비대칭):
+                #   · 탐색(Mode1/2)→추종 '진입'은 color_confirmed 필요
+                #     → 단일/순간 노이즈(확정 못 채움)는 탐색을 끊지 못함
+                #   · 이미 추종 중(Mode0)이면 raw bearing 만으로 유지
+                #     → 근접 시 bearing 점프로 잠깐 미확정돼도 Mode2로 새지 않음
+                if color_confirmed or (_search_mode == 0 and bearing is not None):
                     if _search_mode != 0:
                         print(f"[MODE{_search_mode}→0] 색지 재감지")
                     _search_mode             = 0

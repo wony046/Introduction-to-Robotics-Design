@@ -357,6 +357,12 @@ class Sim:
         self._close_initial_dist = None
         self._close_observe_elapsed = 0.0
         self.close_trail = []        # CLOSE 접근 중 로봇 world 경로 (req9 시각화)
+        # ── SEEK 색지 소실 시 마지막 본 방향 추정/추종 (오도메트리 헤딩 보정) ──
+        # 색 감지 중 마지막 bearing 을 월드(글로벌) 방향으로 저장 → 소실 시 현재 헤딩으로
+        # 상대 bearing 을 재계산해 마지막으로 본 색지 방향을 계속 추종. (jw_won 과 동일)
+        self._seek_last_global_bearing = None   # deg: 마지막 감지 시 색지 글로벌 방향
+        self._seek_src = None        # 'TRACK'/'LAST_BEARING'/'BOUNDARY'/'STRAIGHT' (HUD/viz)
+        self._seek_tb  = 0.0         # 마지막 SEEK 추종에 사용한 상대 bearing (viz)
         CAM.reset()
         S.reset_odom_state()
 
@@ -453,6 +459,7 @@ class Sim:
         S.reset_odom_state()
         CAM.reset()
         self._close_reset()
+        self._seek_reset()
         self.prev_w = 0.0
         self.close_trail = []
         self.running = True
@@ -466,6 +473,7 @@ class Sim:
         S.reset_odom_state()
         CAM.reset()
         self._close_reset()
+        self._seek_reset()
         self.prev_w = 0.0
         self.last_vw = (0.0, 0.0)
         self.close_trail = []
@@ -474,6 +482,12 @@ class Sim:
     def _close_reset(self):
         self._close_target_x = self._close_target_y = self._close_initial_dist = None
         self._close_observe_elapsed = 0.0
+
+    def _seek_reset(self):
+        """SEEK 색지 방향 기억 폐기 (색지 도달/재시작 시). 다음 색은 새 기억으로 탐색."""
+        self._seek_last_global_bearing = None
+        self._seek_src = None
+        self._seek_tb  = 0.0
 
     # ── 기하 카메라 감지 (모델 b: FOV콘 + 범위 + occlusion, true bearing/dist) ──
     def _bearing_to(self, px, py):
@@ -561,6 +575,7 @@ class Sim:
         if CAM.is_done() or CAM.is_dwelling():
             self.prev_w = 0.0
             self._close_reset()
+            self._seek_reset()      # 색지 도달 → 직전 색 추종 기억 폐기
             return 0.0, 0.0
 
         # 상태 2: CLOSE → 관측 후 오도메트리 위치 제어
@@ -596,16 +611,33 @@ class Sim:
                 self.prev_w = w     # CLOSE 내 스무딩 관성 제거 (아래에서 identity)
                 return v, w
 
-        # 상태 3: SEEK → 카메라 bearing + 라이다 회피 / 미감지 시 경계 복귀
+        # 상태 3: SEEK → 카메라 bearing + 라이다 회피 / 미감지 시 마지막 본 방향 추종
         self._close_reset()
         bearing = CAM.get_bearing()
         if bearing is not None:
             S.clear_boundary_center()
+            # 마지막 본 색지 방향을 월드(글로벌) 좌표로 기억 (heading + bearing).
+            # → 소실 시 현재 오도메트리 헤딩으로 상대 bearing 을 재계산해 계속 추종.
+            self._seek_last_global_bearing = S.normalize_angle(
+                S.arduino_heading_deg + bearing)
+            self._seek_src, self._seek_tb = 'TRACK', bearing
             return S.find_vw_command(self.scan, S.arduino_heading_deg, bearing)
         else:
+            # 색 미감지(카메라 갱신 종료): 마지막 본 색지의 글로벌 방향을 현재 헤딩 기준
+            # 상대 bearing 으로 변환(오도메트리 헤딩 보정)해 추종. 단, 경계
+            # (BOUNDARY_RADIUS) 초과 시엔 중심 복귀 인력이 우선(안전).
             S.set_boundary_center()
-            tb, v_scale = S.get_boundary_correction()
-            v, w = S.find_vw_command(self.scan, S.arduino_heading_deg, tb)
+            tb, v_scale, exceeded = S.get_boundary_correction()
+            if exceeded:
+                seek_tb, self._seek_src = tb, 'BOUNDARY'   # 경계 밖 → 중심 복귀
+            elif self._seek_last_global_bearing is not None:
+                seek_tb = S.normalize_angle(
+                    self._seek_last_global_bearing - S.arduino_heading_deg)
+                self._seek_src = 'LAST_BEARING'            # 헤딩 보정 추종
+            else:
+                seek_tb, self._seek_src = 0.0, 'STRAIGHT'  # 기억 없음 → 직진
+            self._seek_tb = seek_tb
+            v, w = S.find_vw_command(self.scan, S.arduino_heading_deg, seek_tb)
             return v * v_scale, w
 
     # ── 한 스텝 ──────────────────────────────────────────────
@@ -732,6 +764,15 @@ def draw_map(screen, overlay, sim, font, font_s):
                 pygame.draw.line(screen, (240, 235, 130), (rpx, rpy), (spx, spy), 1)
                 pygame.draw.circle(screen, (250, 245, 140), (int(spx), int(spy)),
                                    max(6, int(max(p['w'], p['h']) * 0.5 * zoom)) + 4, 2)
+
+    # SEEK 색지 소실 → 마지막 본 방향(오도메트리 헤딩 보정) 추종 화살표
+    if tg['camera'].checked and sim.running and sim._seek_src == 'LAST_BEARING':
+        ang = robot['h'] + sim._seek_tb          # +bearing(좌) = +heading(CCW)
+        fxs, fys = fwd_world(ang)
+        ex, ey = robot['x'] + fxs * 360.0, robot['y'] + fys * 360.0
+        sx, sy = w2s(ex, ey, cam, zoom)
+        pygame.draw.line(screen, (255, 110, 180), (rpx, rpy), (sx, sy), 2)
+        _arrow_head(screen, (rpx, rpy), (sx, sy), (255, 110, 180))
 
     # CLOSE 접근 경로 (req9): 목표점 + 추종 궤적
     if tg['approach'].checked and sim._close_target_x is not None:
@@ -1001,6 +1042,11 @@ def draw_hud(screen, sim, font, font_s):
         derr = math.hypot(ex, ey)
         pct = (1.0 - derr / sim._close_initial_dist) * 100.0
         lines.append((f'CLOSE: remain={derr:.0f}mm  {pct:4.0f}%', (250, 160, 210)))
+    if sim.running and sim._seek_src and sim._seek_src != 'TRACK':
+        gb = (f"{sim._seek_last_global_bearing:+.0f}"
+              if sim._seek_last_global_bearing is not None else "--")
+        lines.append((f'SEEK lost: {sim._seek_src}  tb={sim._seek_tb:+.1f}  '
+                      f'(last global={gb} deg)', (250, 180, 120)))
     if sim.viz:
         lines.append((f'STOP = {sim.viz["stop_triggered"]}   '
                       f'layers = {sorted(sim.viz["active_names"])}', C_DIM))

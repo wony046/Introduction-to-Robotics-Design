@@ -833,21 +833,22 @@ def clear_boundary_center():
 
 
 def get_boundary_correction():
-    """경계 초과 시 (중심 방향 상대 베어링[좌+], v 감속비율) 반환.
-    jw_won._get_boundary_correction 와 동일. 경계 내부 → (0.0, 1.0)."""
+    """경계 초과 시 (중심 방향 상대 베어링[좌+], v 감속비율, 초과여부) 반환.
+    jw_won._get_boundary_correction 와 동일. 경계 내부 → (0.0, 1.0, False).
+    exceeded=True 일 때만 중심 복귀 인력 활성."""
     if _boundary_center_x is None:
-        return 0.0, 1.0
+        return 0.0, 1.0, False
     dx = _boundary_center_x - arduino_x_mm
     dy = _boundary_center_y - arduino_y_mm
     dist = math.sqrt(dx ** 2 + dy ** 2)
     if dist <= BOUNDARY_RADIUS:
-        return 0.0, 1.0
+        return 0.0, 1.0, False
     excess = dist - BOUNDARY_RADIUS
     blend  = min(excess / BOUNDARY_BLEND_DIST, 1.0)
     bearing_to_center = math.degrees(math.atan2(dx, dy))
     rel_bearing = normalize_angle(bearing_to_center - arduino_heading_deg)
     v_scale = BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend)
-    return rel_bearing, v_scale
+    return rel_bearing, v_scale, True
 
 
 def reset_odom_state():
