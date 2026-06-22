@@ -1140,9 +1140,13 @@ def choose_target_gap(passable_gaps, target_bearing, prev_heading):
     if not passable_gaps:
         return None
 
+    # g['center_angle']는 라이다 규약(우측=+), target_bearing은 카메라 규약(우측=−).
+    # 라이다 각도와 비교하려면 부호를 뒤집어야 같은 방향을 가리킨다 (tb=0이면 영향 없음).
+    lidar_tb = -target_bearing
+
     def cost(g):
-        d_target = abs(((g['center_angle'] - target_bearing) + 180) % 360 - 180)
-        d_prev   = abs(((g['center_angle'] - prev_heading)   + 180) % 360 - 180)
+        d_target = abs(((g['center_angle'] - lidar_tb)    + 180) % 360 - 180)
+        d_prev   = abs(((g['center_angle'] - prev_heading) + 180) % 360 - 180)
         return GAP_TARGET_WEIGHT * d_target + GAP_SMOOTH_WEIGHT * d_prev
 
     return min(passable_gaps, key=cost)
@@ -1155,8 +1159,12 @@ def is_target_blocked(scan_points, target_bearing):
       분기 ①(목표 직진)↔③(회피)이 전환되어 좌우로 떨리는 것을 막는다."""
     global _target_block_latch
     thresh = TARGET_BLOCK_DIST * (TARGET_UNBLOCK_RATIO if _target_block_latch else 1.0)
+    # target_bearing은 카메라 규약(우측=−), 라이다 각도 a는 우측=+로 반대.
+    # 라이다와 같은 방향을 가리키도록 부호를 뒤집어 비교 (tb=0이면 영향 없음).
+    lidar_tb = -target_bearing
     cone_blocked = any(
-        LIDAR_MIN_VALID < d < thresh and abs(a - target_bearing) < TARGET_CLEAR_CONE
+        LIDAR_MIN_VALID < d < thresh
+        and abs(((a - lidar_tb) + 180) % 360 - 180) < TARGET_CLEAR_CONE
         for a, d in scan_points)
     # 히스테리시스 래치는 목표 콘 상태만 반영(①↔③ 깜빡임 억제 의도 유지)
     _target_block_latch = cone_blocked
