@@ -202,10 +202,18 @@ PIVOT_INTERVAL_SEC = 5.0    # sec: 주기 기반 재피버턴 주기 (개활지 
 MODE2_TIMEOUT_SEC  = 40.0   # sec: Mode2에서 이 시간 초과 시 Mode1으로 복귀
                             #      (능동 접근으로 목표 도달이 빨라져 60→40 단축;
                             #       도달 후 "여기 없음→Mode1 피버턴" 전환을 더 일찍)
-MODE2_NEAR_TARGET_MM = 120  # mm: 목표 추정 위치 이 거리 이내면 능동 인력 OFF.
-                            #      atan2 베어링 요동(제자리 회전) 방지 후
-                            #      타임아웃→Mode1 피버턴이 재탐색 담당.
-                            #      제자리 빙빙 돌면 ↑(150~200), 직전에 빗나가면 ↓
+MODE2_ARRIVE_SEARCH_SEC = 2.0  # sec: Mode2에서 standoff 도달·정지 후 이 시간 내 색지를
+                            #      재포착 못 하면 전체 타임아웃을 기다리지 않고 즉시
+                            #      Mode1 피버턴으로 전환 (재탐색 지연 단축).
+                            #      카메라 재포착 안정화에 더 필요하면 ↑(3~4)
+MODE2_NEAR_TARGET_MM = 400  # mm: 목표 추정 위치 이 거리 이내면 정지(능동 인력 OFF).
+                            #      ★ 색지 위까지 파고들면(과거 120) 카메라 근거리 사각에
+                            #        색지가 빠져 재포착 실패 → 카메라가 색지를 잘 보는
+                            #        standoff 거리(~400)에서 멈춰 재포착 기회를 준다.
+                            #        여기서 색 재감지 시 디바운스 후 Mode0 추종 전환,
+                            #        못 보면 타임아웃→Mode1 피버턴이 재탐색 담당.
+                            #      카메라가 여전히 못 보면 ↑(450~500, 더 멀리서 정지),
+                            #      너무 멀어 추정 오차로 빗나가면 ↓
 
 # Mode 1 재피버턴 — 갭 유무/시야 변화 기반 트리거
 MAX_PIVOT_GAP_WIDTH = 650    # mm: 이보다 넓은 갭은 통로가 아닌 개활지로 간주 → 피버턴 안 함
@@ -282,6 +290,7 @@ _pivot_total_rotated = 0.0    # 누적 회전량 (deg)
 _pivot_direction     = 1.0    # +1=CCW, -1=CW
 _last_pivot_time     = 0.0    # 마지막 피버턴 완료 시각
 _mode2_start_time    = None   # Mode2 시작 시각 (60초 타임아웃 계산용)
+_mode2_arrived_time  = None   # Mode2 standoff 정지 시작 시각 (도착 후 색지 미발견 조기 전환용)
 _inspected_gaps      = []     # 이미 피버턴으로 들여다본 갭들의 글로벌 (x_mm, y_mm)
 _last_pivot_robot_x  = None   # mm: 마지막 피버턴 시점 로봇 위치 x (시야 변화 판정용)
 _last_pivot_robot_y  = None   # mm: 마지막 피버턴 시점 로봇 위치 y
@@ -571,6 +580,30 @@ def _update_boundary_exit_tracking(center_x, center_y):
                 )
                 _boundary_exit_count = 0
                 print(f"  [BOUNDARY] 경계 확장 → {_current_boundary_radius:.0f}mm")
+
+
+def _switch_mode2_to_mode1(reason):
+    """Mode2 → Mode1 전환. 마지막 목표 추정 위치를 새 탐색 중심으로 삼아 피버턴 재시작.
+    타임아웃·도착후 색지 미발견 등 여러 전환 사유에서 공통으로 호출."""
+    global _search_mode, _last_arrival_x, _last_arrival_y
+    global _pivot_active, _pivot_prev_hdg, _pivot_total_rotated, _pivot_direction
+    global _mode2_start_time, _mode2_arrived_time
+    global _last_pivot_robot_x, _last_pivot_robot_y
+    _search_mode         = 1
+    _last_arrival_x      = _last_target_est_x
+    _last_arrival_y      = _last_target_est_y
+    _pivot_active        = True
+    _pivot_prev_hdg      = arduino_heading_deg
+    _pivot_total_rotated = 0.0
+    _pivot_direction     = 1.0
+    _mode2_start_time    = None
+    _mode2_arrived_time  = None
+    _inspected_gaps[:]   = []    # 새 탐색 중심 → 갭 메모리 초기화
+    _last_pivot_robot_x  = arduino_x_mm
+    _last_pivot_robot_y  = arduino_y_mm
+    print(f"[MODE2→1] {reason}: "
+          f"중심=({_last_arrival_x:.0f},{_last_arrival_y:.0f}) "
+          f"경계={_current_boundary_radius:.0f}mm 피버턴 재시작")
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -1690,7 +1723,7 @@ def _motor_controller(arduino):
     global prev_w, _close_target_x, _close_target_y, _close_initial_dist, _close_observe_start, \
            _search_mode, _last_arrival_x, _last_arrival_y, _last_known_mission_idx, \
            _pivot_active, _pivot_prev_hdg, _pivot_total_rotated, _pivot_direction, _last_pivot_time, \
-           _mode2_start_time, _last_pivot_robot_x, _last_pivot_robot_y, \
+           _mode2_start_time, _mode2_arrived_time, _last_pivot_robot_x, _last_pivot_robot_y, \
            _current_boundary_radius, _boundary_exit_count, _boundary_was_outside, \
            _initial_x, _initial_y, _initial_heading, _initial_pose_set, \
            _use_semicircle_boundary, _color_confirm_start, _color_confirm_ref
@@ -1951,20 +1984,7 @@ def _motor_controller(arduino):
                     if (_last_target_est_x is not None and
                             _mode2_start_time is not None and
                             time.time() - _mode2_start_time > MODE2_TIMEOUT_SEC):
-                        _search_mode         = 1
-                        _last_arrival_x      = _last_target_est_x
-                        _last_arrival_y      = _last_target_est_y
-                        _pivot_active        = True
-                        _pivot_prev_hdg      = arduino_heading_deg
-                        _pivot_total_rotated = 0.0
-                        _pivot_direction     = 1.0
-                        _mode2_start_time    = None
-                        _inspected_gaps[:]   = []    # 새 탐색 중심 → 갭 메모리 초기화
-                        _last_pivot_robot_x  = arduino_x_mm
-                        _last_pivot_robot_y  = arduino_y_mm
-                        print(f"[MODE2→1] {MODE2_TIMEOUT_SEC:.0f}초 타임아웃: "
-                              f"중심=({_last_arrival_x:.0f},{_last_arrival_y:.0f}) "
-                              f"경계={_current_boundary_radius:.0f}mm 피버턴 재시작")
+                        _switch_mode2_to_mode1(f"{MODE2_TIMEOUT_SEC:.0f}초 타임아웃")
                         v, w = 0.0, 0.0
                     elif _last_target_est_x is not None:
                         cx, cy = _last_target_est_x, _last_target_est_y
@@ -1974,13 +1994,23 @@ def _motor_controller(arduino):
                         # 인력 ON/OFF·갭 우회는 find_vw_layered 분기가 처리(충돌 X).
                         dist_to_tgt = math.hypot(cx - arduino_x_mm, cy - arduino_y_mm)
                         if dist_to_tgt < MODE2_NEAR_TARGET_MM:
-                            # 추정 위치 도달 → 정지.
-                            # (전속 직진으로 추정 위치를 '관통'하고, 통과 후 추정 위치가
-                            #  뒤로 가며 _get_target_bearing이 ±180° 부호 진동 → 좌우로 떨며
-                            #  전진해 경계를 탈출하던 문제 차단.)
-                            # 재탐색은 타임아웃→Mode1 피버턴이 담당.
+                            # 추정 위치 standoff 도달 → 정지(색지 위까지 파고들지 않음).
+                            # 카메라가 색지를 잘 보는 거리에서 멈춰 재포착을 기다린다.
+                            # (색지 위까지 가면 카메라 근거리 사각에 빠져 재포착 실패.
+                            #  또한 추정 위치를 '관통'하면 _get_target_bearing이 ±180°
+                            #  부호 진동 → 좌우로 떨며 경계를 탈출하던 문제도 함께 차단.)
+                            # 색 재감지 시엔 위쪽 color_confirmed 분기로 빠져 여기 안 옴.
                             v, w = 0.0, 0.0
+                            # 도착 후 MODE2_ARRIVE_SEARCH_SEC 내 색지 미발견이면 전체
+                            # 타임아웃을 안 기다리고 즉시 Mode1 피버턴으로 전환(지연 단축).
+                            if _mode2_arrived_time is None:
+                                _mode2_arrived_time = time.time()
+                            elif (time.time() - _mode2_arrived_time
+                                    > MODE2_ARRIVE_SEARCH_SEC):
+                                _switch_mode2_to_mode1(
+                                    f"도착 후 {MODE2_ARRIVE_SEARCH_SEC:.0f}초 색지 미발견")
                         else:
+                            _mode2_arrived_time = None   # 아직 접근 중 → 도착 타이머 리셋
                             target_tb = _get_target_bearing(cx, cy)
                             # 경계는 방향이 아닌 감속 leash로만 사용 (목표 이탈 시 천천히)
                             _, v_scale = _get_boundary_correction(
