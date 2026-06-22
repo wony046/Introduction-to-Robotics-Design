@@ -6,9 +6,9 @@ import numpy as np
 
 # ── 카메라 설정 ─────────────────────────────────────────────────────
 CAMERA_INDEX      = 0         
-FRAME_W           = 848       # 16:9 (848×480)
+FRAME_W           = 640
 FRAME_H           = 480       
-HFOV_DEG          = 32.1      # 848×480 calibrate_hfov.py 재측정값
+HFOV_DEG          = 38.6      
 
 FRAME_ROTATE      = cv2.ROTATE_90_COUNTERCLOCKWISE
 
@@ -24,29 +24,38 @@ ARRIVE_ROI_PEAK   = 0.7
 ARRIVE_ROI_DROP   = 0.5       
 USE_ROI_ARRIVE    = 0         
 
-CLOSE_ENTER_MM     = 450.0    # 이 거리(mm) 이내로 들어오면 CLOSE 모드 전환
-CAM_HEIGHT_MM      = 590.0    # 카메라 수직 높이 (mm) 실측값
-CAM_TILT_DEG       = 41.8     # 848×480 거리검증 보정값
+CLOSE_ENTER_MM     = 450.0    
+CAM_HEIGHT_MM      = 590.0    
+CAM_TILT_DEG       = 40.4     
 CAM_POLAR_EPSILON  = 0.05     
 USE_CLIPPING_GUARD = False    
-CLOSE_BEARING_SCALE = 0.7913  # 848×480 원근 보정 스케일
-
-# ★ 추가됨: 제동 관성 밀림 보상
+CLOSE_BEARING_SCALE = 0.8212  
 STOP_EARLY_MM      = 50.0     
 
-# ── HSV 색상 범위 (OpenCV: H[0-179], S[0-255], V[0-255]) ─────────────
-COLOR_RANGES = {
+# ── ★ 전달받은 최종 다중 영역 LAB 색상 범위 ─────────────────────────
+COLOR_PARAMS = {
     'RED': [
-        ((146, 100, 80), (179, 255, 255)),
+        {'a': 180, 'b': 160, 'tol': 35},
     ],
     'YELLOW': [
-        ((18, 35, 186), (72, 177, 255)),
+        {'a': 127, 'b': 177, 'tol': 20},
     ],
     'BLUE': [
-        ((79, 116, 114), (119, 162, 255)),
+        {'a': 111, 'b': 80, 'tol': 26},
+        {'a': 123, 'b': 79, 'tol': 25},
     ],
 }
+L_MIN = 30
 
+COLOR_RANGES = {}
+for color in ['RED', 'YELLOW', 'BLUE']:
+    COLOR_RANGES[color] = []
+    for p in COLOR_PARAMS[color]:
+        lower = (L_MIN, max(0, p['a'] - p['tol']), max(0, p['b'] - p['tol']))
+        upper = (255,   min(255, p['a'] + p['tol']), min(255, p['b'] + p['tol']))
+        COLOR_RANGES[color].append((lower, upper))
+
+_clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
 
 SHOW_FRAME    = 0     
@@ -68,16 +77,27 @@ _close               = False
 _last_stable_bearing = 0.0     
 _last_close_bearing  = 0.0     
 _last_cy             = None    
-_mission_changed     = False   # ★ 추가됨: 나선 배회용 리셋 신호
+_mission_changed     = False   
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 내부 함수 (HSV 감지 로직)
+# 내부 함수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _get_f_px():
+    return (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
+
+def _to_lab(frame):
+    lab = cv2.cvtColor(frame, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    l = _clahe.apply(l)
+    return cv2.merge([l, a, b])
+
 def _detect_color(frame, color_name):
-    hsv  = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    lab  = _to_lab(frame)
+    mask = np.zeros(lab.shape[:2], dtype=np.uint8)
+    
+    # 여러 개의 영역(범위)을 하나의 마스크로 합침
     for (lo, hi) in COLOR_RANGES[color_name]:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+        mask |= cv2.inRange(lab, np.array(lo), np.array(hi))
 
     kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (7, 7))
     mask   = cv2.morphologyEx(mask, cv2.MORPH_OPEN,  kernel)
@@ -106,12 +126,10 @@ def _detect_color(frame, color_name):
     return (cx, cy), area, clipped_l, clipped_r
 
 def _to_bearing_seek(cx):
-    f_px = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
-    return -math.degrees(math.atan2(cx - _EFF_W / 2.0, f_px))
+    return -math.degrees(math.atan2(cx - _EFF_W / 2.0, _get_f_px()))
 
 def _to_bearing_close(cx, cy):
-    f_px    = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
-    lateral = (cx - _EFF_W / 2.0) / f_px
+    lateral = (cx - _EFF_W / 2.0) / _get_f_px()
     forward = (_EFF_H - cy) / _EFF_H + CAM_POLAR_EPSILON
     return -math.degrees(math.atan2(lateral, forward)) * CLOSE_BEARING_SCALE
 
@@ -120,12 +138,11 @@ def _get_roi_fill(frame, color_name, bottom_ratio=None):
     roi_start = int(_EFF_H * (1.0 - ratio))
     roi       = frame[roi_start:, :]
     roi_total = roi.shape[0] * roi.shape[1]
-    if roi_total == 0:
-        return 0.0
-    hsv  = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-    mask = np.zeros(hsv.shape[:2], dtype=np.uint8)
+    if roi_total == 0: return 0.0
+    lab  = _to_lab(roi)
+    mask = np.zeros(lab.shape[:2], dtype=np.uint8)
     for lo, hi in COLOR_RANGES[color_name]:
-        mask |= cv2.inRange(hsv, np.array(lo), np.array(hi))
+        mask |= cv2.inRange(lab, np.array(lo), np.array(hi))
     return cv2.countNonZero(mask) / roi_total
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -145,13 +162,6 @@ def _camera_loop():
         return
 
     print(f"[CAMERA] 시작 — {FRAME_W}x{FRAME_H}, HFOV={HFOV_DEG}°")
-    
-    # ★ 추가됨: 카메라 하드웨어 워밍업 (밝기/노출 자동조절 대기)
-    print(f"[CAMERA] 카메라 하드웨어 워밍업 대기 중...")
-    for _ in range(40):
-        cap.read()
-        time.sleep(0.05)
-    print(f"[CAMERA] 밝기/초점 안정화 완료! 탐색을 시작합니다.")
 
     while not _shutdown.is_set():
         ret, frame = cap.read()
@@ -183,11 +193,9 @@ def _camera_loop():
             cx, cy   = centroid
             clipped  = clip_l or clip_r
 
-            f_px_v     = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
-            delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, f_px_v))
+            delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, _get_f_px()))
             depression = CAM_TILT_DEG + delta_v
             
-            # ★ 추가됨: 제동 밀림 방지를 위해 추정 거리에서 STOP_EARLY_MM 차감
             if depression > 1.0:
                 raw_dist = CAM_HEIGHT_MM / math.tan(math.radians(depression))
                 cam_dist = max(raw_dist - STOP_EARLY_MM, 50.0) 
@@ -234,7 +242,7 @@ def _camera_loop():
                 if elapsed >= ARRIVE_HOLD_SEC:
                     print(f"\n[CAMERA] ★★★ {target_color} 미션 도착 완료! ★★★")
                     _mission_idx         += 1
-                    _mission_changed      = True   # ★ 추가됨: 나선형 배회를 위한 신호
+                    _mission_changed      = True
                     _dwell_start          = None
                     _dwelling             = False
                     _roi_peaked           = False
@@ -303,12 +311,10 @@ def get_estimated_distance_mm():
     with _lock:
         cy = _last_cy
     if cy is None: return 500.0
-    f_px       = (_EFF_W / 2.0) / math.tan(math.radians(HFOV_DEG / 2.0))
-    delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, f_px))
+    delta_v    = math.degrees(math.atan2(cy - _EFF_H / 2.0, _get_f_px()))
     depression = CAM_TILT_DEG + delta_v   
     if depression <= 1.0: return 5000.0   
     raw_dist = CAM_HEIGHT_MM / math.tan(math.radians(depression))
-    # ★ 추가됨: 밀림 보상을 위해 미리 목표 좌표를 앞으로 당김
     return max(raw_dist - STOP_EARLY_MM, 50.0)
 
 def signal_arrival():
@@ -320,7 +326,6 @@ def get_state():
         if _mission_idx < len(MISSION_ORDER): return f'SEEK_{MISSION_ORDER[_mission_idx]}'
         return 'DONE'
 
-# ★ 추가됨: 미션 변경 확인 (main.py의 나선형 리셋을 위해)
 def check_mission_changed():
     global _mission_changed
     with _lock:
