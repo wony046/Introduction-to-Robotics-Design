@@ -32,23 +32,28 @@ USE_CLIPPING_GUARD = False
 CLOSE_BEARING_SCALE = 0.8212  
 STOP_EARLY_MM      = 50.0     
 
-# ── ★ 새로 전달받은 LAB 색상 범위 자동 계산 ────────────────────────
-REF_AB = {
-    'RED':    (180, 160),
-    'YELLOW': (102, 160),
-    'BLUE':   (111,  80),
+# ── ★ 다중 영역 LAB 색상 범위 자동 계산 ─────────────────────────────
+COLOR_PARAMS = {
+    'RED': [
+        {'a': 180, 'b': 160, 'tol': 35},
+    ],
+    'YELLOW': [
+        {'a': 102, 'b': 160, 'tol': 29},
+        {'a': 129, 'b': 173, 'tol': 29},
+    ],
+    'BLUE': [
+        {'a': 111, 'b': 80, 'tol': 35},
+    ],
 }
-TOL   = {'RED': 35, 'YELLOW': 29, 'BLUE': 35}
-L_MIN = 30  # 모든 색상에 공통으로 적용되는 최소 밝기
+L_MIN = 30
 
 COLOR_RANGES = {}
 for color in ['RED', 'YELLOW', 'BLUE']:
-    a_ref, b_ref = REF_AB[color]
-    t = TOL[color]
-    # L_MIN은 단일 정수값(30)을 그대로 사용합니다.
-    lower = (L_MIN, max(0, a_ref - t), max(0, b_ref - t))
-    upper = (255,   min(255, a_ref + t), min(255, b_ref + t))
-    COLOR_RANGES[color] = [(lower, upper)]
+    COLOR_RANGES[color] = []
+    for p in COLOR_PARAMS[color]:
+        lower = (L_MIN, max(0, p['a'] - p['tol']), max(0, p['b'] - p['tol']))
+        upper = (255,   min(255, p['a'] + p['tol']), min(255, p['b'] + p['tol']))
+        COLOR_RANGES[color].append((lower, upper))
 
 _clahe = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
 MISSION_ORDER = ['RED', 'YELLOW', 'BLUE']
@@ -89,6 +94,8 @@ def _to_lab(frame):
 def _detect_color(frame, color_name):
     lab  = _to_lab(frame)
     mask = np.zeros(lab.shape[:2], dtype=np.uint8)
+    
+    # 여러 개의 영역(범위)을 하나의 마스크로 합침
     for (lo, hi) in COLOR_RANGES[color_name]:
         mask |= cv2.inRange(lab, np.array(lo), np.array(hi))
 
