@@ -97,6 +97,7 @@ _dwell_start         = None    # 도착 판정 시작 시각 (time.time())
 _dwelling            = False   # True 동안 모터 정지
 _done                = False   # BLUE 완료 → 영구 정지
 _shutdown            = threading.Event()
+_ready               = threading.Event()   # 카메라 open + 첫 프레임 수신 완료 → 출발 허용
 _arrival_signal      = threading.Event()   # 외부(오도메트리 등)에서 도착 신호
 _roi_peaked          = False   # 카메라 스레드 전용: ROI 점유율이 peak를 찍었는지
 _close               = False   # CLOSE 모드 (blob 크기 > 임계)
@@ -225,7 +226,27 @@ def _camera_loop():
         print("[CAMERA] ERROR: 카메라를 열 수 없습니다. CAMERA_INDEX를 확인하세요.")
         return
 
-    print(f"[CAMERA] 시작 — {FRAME_W}x{FRAME_H}, HFOV={HFOV_DEG}°")
+    # ── 워밍업: 실제 프레임이 들어오는지 확인 + 자동노출 안정화 ──────────────
+    # cap.isOpened()는 장치 핸들만 확인할 뿐 프레임 수신을 보장하지 않는다.
+    # 첫 유효 프레임을 받을 때까지 기다린 뒤 _ready를 set → 로봇 출발 허용.
+    # (몇 프레임 버려 자동노출/화이트밸런스가 자리잡게 함)
+    warmup_ok = False
+    for _ in range(30):                      # 최대 30프레임(~1s) 시도
+        if _shutdown.is_set():
+            cap.release()
+            return
+        ret, _frame = cap.read()
+        if ret and _frame is not None:
+            warmup_ok = True
+            break
+        time.sleep(0.03)
+    if not warmup_ok:
+        print("[CAMERA] ERROR: 카메라는 열렸으나 프레임 수신 실패. 출발 중단.")
+        cap.release()
+        return
+
+    _ready.set()
+    print(f"[CAMERA] 준비 완료 — {FRAME_W}x{FRAME_H}, HFOV={HFOV_DEG}°")
 
     while not _shutdown.is_set():
         ret, frame = cap.read()
@@ -383,6 +404,18 @@ def start():
     """카메라 스레드 시작. main()에서 호출."""
     t = threading.Thread(target=_camera_loop, daemon=True, name='camera')
     t.start()
+
+
+def wait_ready(timeout=None):
+    """카메라 open + 첫 프레임 수신이 완료될 때까지 블록.
+    반환: True=준비 완료(출발 가능) / False=timeout 내 미준비(카메라 실패 가능).
+    timeout=None이면 준비될 때까지 무한 대기."""
+    return _ready.wait(timeout)
+
+
+def is_ready():
+    """카메라 준비 완료 여부 (논블로킹)."""
+    return _ready.is_set()
 
 
 def stop():
