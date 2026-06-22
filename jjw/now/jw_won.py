@@ -195,7 +195,9 @@ BOUNDARY_BLEND_DIST     = 300.0    # mm: 경계 초과 후 인력 100%까지 도
 BOUNDARY_V_MIN          = 0.5      # 경계 완전 초과 시 v 감속 최소 비율
 
 # Mode 1 피버턴 파라미터
-PIVOT_W_SPEED      = 0.6    # rad/s: 탐색 피버턴 회전 속도
+PIVOT_W_SPEED      = 0.9    # rad/s: 탐색 피버턴 회전 속도. 0.6에서는 배터리 전압 저하·
+                           #   바닥 마찰 변화 시 토크 부족으로 로봇이 못 돌고 멈추는 문제가
+                           #   있어 상향. 여전히 멈추면 1.1~1.3까지 ↑ (MAX_W=1.8 한도).
 PIVOT_INTERVAL_SEC = 5.0    # sec: 주기 기반 재피버턴 주기 (개활지 등 갭이 없어도 이 간격마다 360° 피버턴)
 MODE2_TIMEOUT_SEC  = 40.0   # sec: Mode2에서 이 시간 초과 시 Mode1으로 복귀
                             #      (능동 접근으로 목표 도달이 빨라져 60→40 단축;
@@ -448,6 +450,10 @@ def _get_boundary_correction(center_x, center_y, radius):
 
     v_scale = BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend)
 
+    # 오도메트리 규약(우측=양수)을 컨트롤러 규약(카메라, 우측=음수)으로 변환.
+    # 이 부호가 없으면 중심 반대로 조향 → 경계 밖에서 진동하며 발산한다.
+    rel_bearing = -rel_bearing
+
     if DEBUG_BOUNDARY:
         print(f"  [BOUNDARY] dist={dist:.0f}mm radius={radius:.0f}mm "
               f"excess={excess:.0f}mm blend={blend:.2f} "
@@ -462,7 +468,8 @@ def _get_semicircle_boundary_correction(center_x, center_y, fwd_heading_deg, rad
       - 반경 초과       → 중심 방향으로 복귀
       - 정면선 뒤로 넘어감 → 정면(시작 헤딩) 방향으로 복귀
       - 둘 다 위반       → 위반 깊이가 큰 쪽으로 복귀
-    반환: (rel_bearing_deg, v_scale)  (규약: 우측=+, _get_boundary_correction과 동일)"""
+    반환: (rel_bearing_deg, v_scale)
+    (규약: 컨트롤러용 카메라 규약 우측=−, _get_boundary_correction과 동일)"""
     dx   = center_x - arduino_x_mm     # 로봇 → 중심
     dy   = center_y - arduino_y_mm
     dist = math.sqrt(dx**2 + dy**2)
@@ -489,6 +496,8 @@ def _get_semicircle_boundary_correction(center_x, center_y, fwd_heading_deg, rad
         reason     = 'F'
 
     rel_bearing = normalize_angle(bearing_to - arduino_heading_deg)
+    # 오도메트리 규약(우측=양수) → 컨트롤러 규약(카메라, 우측=음수) 변환
+    rel_bearing = -rel_bearing
     blend       = min(excess / BOUNDARY_BLEND_DIST, 1.0)
     v_scale     = BOUNDARY_V_MIN + (1.0 - BOUNDARY_V_MIN) * (1.0 - blend)
 
@@ -509,7 +518,10 @@ def _get_target_bearing(target_x, target_y):
     dx = target_x - arduino_x_mm
     dy = target_y - arduino_y_mm
     bearing_to_target = math.degrees(math.atan2(dx, dy))
-    return normalize_angle(bearing_to_target - arduino_heading_deg)
+    # 오도메트리 bearing은 우측=양수. find_vw_command 분기①(+KP)은 카메라 규약
+    # (우측=음수) 기준이므로 부호를 뒤집어 컨트롤러 규약에 맞춘다.
+    # (배치 부호 보정과 합쳐지면 반환값이 카메라 bearing과 일치 → Mode0와 동일 입력)
+    return -normalize_angle(bearing_to_target - arduino_heading_deg)
 
 
 def _update_target_estimate():
@@ -520,7 +532,9 @@ def _update_target_estimate():
     if dist_mm >= 4000.0:
         return
     bearing_rel = camera_tracker.get_last_stable_bearing()
-    global_hdg  = arduino_heading_deg + bearing_rel
+    # 카메라 bearing은 우측=음수, world 좌표는 x=sin(hdg)로 우측=양수 →
+    # 규약이 반대이므로 카메라 bearing을 빼서(부호 변환) 물리적으로 올바른 쪽에 배치.
+    global_hdg  = arduino_heading_deg - bearing_rel
     hdg_rad     = math.radians(global_hdg)
     _last_target_est_x = arduino_x_mm + dist_mm * math.sin(hdg_rad)
     _last_target_est_y = arduino_y_mm + dist_mm * math.cos(hdg_rad)
@@ -1126,9 +1140,13 @@ def choose_target_gap(passable_gaps, target_bearing, prev_heading):
     if not passable_gaps:
         return None
 
+    # g['center_angle']는 라이다 규약(우측=+), target_bearing은 카메라 규약(우측=−).
+    # 라이다 각도와 비교하려면 부호를 뒤집어야 같은 방향을 가리킨다 (tb=0이면 영향 없음).
+    lidar_tb = -target_bearing
+
     def cost(g):
-        d_target = abs(((g['center_angle'] - target_bearing) + 180) % 360 - 180)
-        d_prev   = abs(((g['center_angle'] - prev_heading)   + 180) % 360 - 180)
+        d_target = abs(((g['center_angle'] - lidar_tb)    + 180) % 360 - 180)
+        d_prev   = abs(((g['center_angle'] - prev_heading) + 180) % 360 - 180)
         return GAP_TARGET_WEIGHT * d_target + GAP_SMOOTH_WEIGHT * d_prev
 
     return min(passable_gaps, key=cost)
@@ -1141,8 +1159,12 @@ def is_target_blocked(scan_points, target_bearing):
       분기 ①(목표 직진)↔③(회피)이 전환되어 좌우로 떨리는 것을 막는다."""
     global _target_block_latch
     thresh = TARGET_BLOCK_DIST * (TARGET_UNBLOCK_RATIO if _target_block_latch else 1.0)
+    # target_bearing은 카메라 규약(우측=−), 라이다 각도 a는 우측=+로 반대.
+    # 라이다와 같은 방향을 가리키도록 부호를 뒤집어 비교 (tb=0이면 영향 없음).
+    lidar_tb = -target_bearing
     cone_blocked = any(
-        LIDAR_MIN_VALID < d < thresh and abs(a - target_bearing) < TARGET_CLEAR_CONE
+        LIDAR_MIN_VALID < d < thresh
+        and abs(((a - lidar_tb) + 180) % 360 - 180) < TARGET_CLEAR_CONE
         for a, d in scan_points)
     # 히스테리시스 래치는 목표 콘 상태만 반영(①↔③ 깜빡임 억제 의도 유지)
     _target_block_latch = cone_blocked
