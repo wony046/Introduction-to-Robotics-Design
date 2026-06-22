@@ -195,7 +195,7 @@ BOUNDARY_BLEND_DIST     = 300.0    # mm: 경계 초과 후 인력 100%까지 도
 BOUNDARY_V_MIN          = 0.5      # 경계 완전 초과 시 v 감속 최소 비율
 
 # Mode 1 피버턴 파라미터
-PIVOT_W_SPEED      = 0.9    # rad/s: 탐색 피버턴 회전 속도. 0.6에서는 배터리 전압 저하·
+PIVOT_W_SPEED      = 1.0    # rad/s: 탐색 피버턴 회전 속도. 0.6에서는 배터리 전압 저하·
                            #   바닥 마찰 변화 시 토크 부족으로 로봇이 못 돌고 멈추는 문제가
                            #   있어 상향. 여전히 멈추면 1.1~1.3까지 ↑ (MAX_W=1.8 한도).
 PIVOT_INTERVAL_SEC = 5.0    # sec: 주기 기반 재피버턴 주기 (개활지 등 갭이 없어도 이 간격마다 360° 피버턴)
@@ -262,7 +262,7 @@ KP_CLOSE_HDG      = 0.1  # 헤딩 오차(deg) → w 게인  (포화: ±° → MA
 CLOSE_SPEED_MAX   = 0.2   # CLOSE 모드 최대 전진 속도 (m/s)
 CLOSE_ARRIVE_MM   = 30    # 추정 좌표까지 이 거리 이내 → 색지 위 도달로 판정
 CLOSE_OBSERVE_SEC = 1.0   # CLOSE 진입 후 정지 관측 시간 (sec)
-CLOSE_STANDOFF_MM = 20   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
+CLOSE_STANDOFF_MM = 50   # 색지 추정 위치보다 이만큼 '덜' 접근해 정지 (0=색지 위까지)
 prev_desired_heading  = 0.0   # 직전 사이클 조향 목표 각도 (갭 선택 평활화용)
 _last_direction       = 1.0   # 마지막으로 결정된 방향 (+1=왼쪽, -1=오른쪽)
 _target_block_latch   = False # is_target_blocked 히스테리시스 상태 (막힘 래치)

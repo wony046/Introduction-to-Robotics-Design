@@ -124,10 +124,15 @@ BOUNDARY_EXPAND_TRIGGER = 2           # 이탈→복귀 N회 누적 시 확장
 BOUNDARY_HYSTERESIS_MM  = 150.0       # 진입/이탈 히스테리시스
 BOUNDARY_BLEND_DIST     = 300.0
 BOUNDARY_V_MIN          = 0.5
-PIVOT_W_SPEED           = 0.6         # 탐색 피버턴 회전 속도 (rad/s)
+PIVOT_W_SPEED           = 0.9         # 탐색 피버턴 회전 속도 (rad/s). 0.6→0.9 (저전압·마찰 시 토크 부족 정지 방지)
 PIVOT_INTERVAL_SEC      = 5.0         # 주기 기반 재피버턴 주기 (sec, 개활지에서도 주기적 360°)
 MODE2_TIMEOUT_SEC       = 40.0        # sec: Mode2에서 이 시간 초과 시 Mode1으로 복귀
-MODE2_NEAR_TARGET_MM    = 120         # mm: 목표 추정 위치 이 거리 이내면 능동 인력 OFF (정지)
+MODE2_ARRIVE_SEARCH_SEC = 2.0         # sec: Mode2 standoff 도달·정지 후 이 시간 내 색지 미발견 시
+                                      #      전체 타임아웃 안 기다리고 즉시 Mode1 피버턴 전환
+MODE2_NEAR_TARGET_MM    = 400         # mm: 목표 추정 위치 이 거리 이내면 정지(능동 인력 OFF).
+                                      #      ★ 색지 위까지(과거 120) 파고들면 카메라 근거리 사각에
+                                      #        색지가 빠져 재포착 실패 → 카메라가 잘 보는 standoff(~400)에서
+                                      #        멈춰 재포착 기회를 준다. (sim CAM_NEAR_MM=250 < 400)
 
 # Mode 1 재피버턴 — 갭 유무/시야 변화 기반 트리거
 MAX_PIVOT_GAP_WIDTH = 650    # mm: 이보다 넓은 갭은 통로가 아닌 개활지로 간주 → 피버턴 안 함
@@ -187,6 +192,7 @@ _pivot_total_rotated     = 0.0    # 누적 회전량 (deg)
 _pivot_direction         = 1.0    # +1=CCW, -1=CW
 _last_pivot_time         = 0.0    # 마지막 피버턴 완료 시각 (sim time)
 _mode2_start_time        = None   # Mode2 시작 시각 (타임아웃 계산용, sim time)
+_mode2_arrived_time      = None   # Mode2 standoff 정지 시작 시각 (도착 후 색지 미발견 조기 전환용)
 _inspected_gaps          = []     # 이미 피버턴으로 들여다본 갭들의 글로벌 (x_mm, y_mm)
 _last_pivot_robot_x      = None   # mm: 마지막 피버턴 시점 로봇 위치 x (시야 변화 판정용)
 _last_pivot_robot_y      = None   # mm: 마지막 피버턴 시점 로봇 위치 y
@@ -740,9 +746,12 @@ def get_front_passable_gaps(scan_points):
 def choose_target_gap(passable_gaps, target_bearing, prev_heading):
     if not passable_gaps:
         return None
+    # g['center_angle']는 라이다 규약(우측=+), target_bearing은 카메라 규약(우측=−).
+    # 라이다 각도와 비교하려면 부호를 뒤집어 같은 방향을 가리키게 한다 (tb=0이면 영향 없음).
+    lidar_tb = -target_bearing
     def cost(g):
-        d_target = abs(((g['center_angle'] - target_bearing) + 180) % 360 - 180)
-        d_prev   = abs(((g['center_angle'] - prev_heading)   + 180) % 360 - 180)
+        d_target = abs(((g['center_angle'] - lidar_tb)    + 180) % 360 - 180)
+        d_prev   = abs(((g['center_angle'] - prev_heading) + 180) % 360 - 180)
         return GAP_TARGET_WEIGHT * d_target + GAP_SMOOTH_WEIGHT * d_prev
     return min(passable_gaps, key=cost)
 
@@ -752,9 +761,13 @@ def is_target_blocked(scan_points, target_bearing):
     진입: TARGET_BLOCK_DIST 이내. 해제: 그 TARGET_UNBLOCK_RATIO배까지 비워져야.
     추가: Mode1/2 전용 '정면 진행 통로 가드' — 목표 방향과 무관하게 정면 통로가 막히면 True."""
     global _target_block_latch
+    # target_bearing은 카메라 규약(우측=−), 라이다 각도 a는 우측=+로 반대.
+    # 라이다와 같은 방향을 가리키도록 부호를 뒤집어 비교 (tb=0이면 영향 없음).
+    lidar_tb = -target_bearing
     thresh = TARGET_BLOCK_DIST * (TARGET_UNBLOCK_RATIO if _target_block_latch else 1.0)
     cone_blocked = any(
-        LIDAR_MIN_VALID < d < thresh and abs(a - target_bearing) < TARGET_CLEAR_CONE
+        LIDAR_MIN_VALID < d < thresh
+        and abs(((a - lidar_tb) + 180) % 360 - 180) < TARGET_CLEAR_CONE
         for a, d in scan_points)
     _target_block_latch = cone_blocked
 
@@ -1075,9 +1088,11 @@ def set_boundary_center():
 
 
 def get_boundary_correction(center_x, center_y, radius):
-    """경계 초과 시 (중심 방향 상대 베어링[좌+], v 감속비율) 반환.
-    새 jw_won._get_boundary_correction(center, radius) 와 동일.
-    경계 내부 → (0.0, 1.0)."""
+    """경계 초과 시 (중심 방향 상대 베어링[좌+], v 감속비율) 반환. 경계 내부 → (0.0, 1.0).
+    ★ jw_won 새 버전은 여기서 rel_bearing 부호를 뒤집는다(우+ 오도메트리→카메라 규약).
+      시뮬은 harness 가 arduino_x = -robot_x 로 '좌+ 미러 프레임'을 쓰므로(_set_arduino_odom)
+      atan2(dx,dy) 가 이미 좌+(카메라) 규약을 내놓는다 → 부호 뒤집으면 이중반전으로 발산.
+      따라서 여기서는 의도적으로 flip 하지 않는다 (결과값은 jw_won 과 동일)."""
     dx = center_x - arduino_x_mm
     dy = center_y - arduino_y_mm
     dist = math.sqrt(dx ** 2 + dy ** 2)
@@ -1097,7 +1112,8 @@ def get_semicircle_boundary_correction(center_x, center_y, fwd_heading_deg, radi
       - 반경 초과       → 중심 방향으로 복귀
       - 정면선 뒤로 넘어감 → 정면(시작 헤딩) 방향으로 복귀
       - 둘 다 위반       → 위반 깊이가 큰 쪽으로 복귀
-    반환: (rel_bearing_deg[좌+], v_scale). 경계 내부 → (0.0, 1.0)."""
+    반환: (rel_bearing_deg[좌+], v_scale). 경계 내부 → (0.0, 1.0).
+    ★ get_boundary_correction 과 동일 이유로 jw_won 의 부호 flip 은 이식하지 않는다(미러 프레임)."""
     dx   = center_x - arduino_x_mm     # 로봇 → 중심
     dy   = center_y - arduino_y_mm
     dist = math.sqrt(dx ** 2 + dy ** 2)
@@ -1128,8 +1144,9 @@ def get_semicircle_boundary_correction(center_x, center_y, fwd_heading_deg, radi
 
 
 def get_target_bearing(target_x, target_y):
-    """목표 좌표로의 상대 베어링(deg, 좌+). 경계 안/밖 무관하게 항상 목표를 향함.
-    jw_won._get_target_bearing 와 동일 — Mode2 능동 접근용."""
+    """목표 좌표로의 상대 베어링(deg, 좌+). 경계 안/밖 무관하게 항상 목표를 향함. Mode2 능동 접근용.
+    ★ jw_won 새 버전은 반환값 부호를 뒤집지만(우+ 오도메트리), 시뮬 미러 프레임에서는
+      atan2 가 이미 좌+(카메라) 규약 → flip 미이식 (get_boundary_correction 과 동일 이유)."""
     dx = target_x - arduino_x_mm
     dy = target_y - arduino_y_mm
     bearing_to_target = math.degrees(math.atan2(dx, dy))
@@ -1138,8 +1155,9 @@ def get_target_bearing(target_x, target_y):
 
 def update_target_estimate(bearing_rel_deg, dist_mm):
     """색 감지 중 목표 색지 추정 위치 갱신 (Mode2 경계 중심용).
-    거리 추정이 신뢰 범위(4000mm) 밖이면 갱신 생략.
-    jw_won._update_target_estimate 와 동일 — camera 의존은 인자로 분리."""
+    거리 추정이 신뢰 범위(4000mm) 밖이면 갱신 생략. camera 의존은 인자로 분리.
+    ★ jw_won 새 버전은 global_hdg = heading - bearing_rel (우+ 프레임)이지만,
+      시뮬 미러 프레임(좌+)에서는 +bearing_rel 이 올바른 배치 → 부호 유지."""
     global _last_target_est_x, _last_target_est_y
     if dist_mm >= 4000.0:
         return
@@ -1171,6 +1189,31 @@ def update_boundary_exit_tracking(center_x, center_y):
                 _boundary_exit_count = 0
 
 
+def switch_mode2_to_mode1(reason):
+    """Mode2 → Mode1 전환. 마지막 목표 추정 위치를 새 탐색 중심으로 삼아 피버턴 재시작.
+    타임아웃·도착후 색지 미발견 등 여러 전환 사유에서 공통 호출.
+    jw_won._switch_mode2_to_mode1 와 동일."""
+    global _search_mode, _last_arrival_x, _last_arrival_y
+    global _pivot_active, _pivot_prev_hdg, _pivot_total_rotated, _pivot_direction
+    global _mode2_start_time, _mode2_arrived_time
+    global _last_pivot_robot_x, _last_pivot_robot_y
+    _search_mode         = 1
+    _last_arrival_x      = _last_target_est_x
+    _last_arrival_y      = _last_target_est_y
+    _pivot_active        = True
+    _pivot_prev_hdg      = arduino_heading_deg
+    _pivot_total_rotated = 0.0
+    _pivot_direction     = 1.0
+    _mode2_start_time    = None
+    _mode2_arrived_time  = None
+    _inspected_gaps[:]   = []    # 새 탐색 중심 → 갭 메모리 초기화
+    _last_pivot_robot_x  = arduino_x_mm
+    _last_pivot_robot_y  = arduino_y_mm
+    print(f"[MODE2→1] {reason}: "
+          f"중심=({_last_arrival_x:.0f},{_last_arrival_y:.0f}) "
+          f"경계={_current_boundary_radius:.0f}mm 피버턴 재시작")
+
+
 def reset_search_state():
     """오도메트리 + 탐색 모드 + 가변 경계 전역 초기화 (재시작 시)."""
     global arduino_x_mm, arduino_y_mm, arduino_heading_deg
@@ -1178,7 +1221,7 @@ def reset_search_state():
     global _last_target_est_x, _last_target_est_y, _last_known_mission_idx
     global _color_confirm_start, _color_confirm_ref
     global _pivot_active, _pivot_prev_hdg, _pivot_total_rotated, _pivot_direction, _last_pivot_time
-    global _mode2_start_time, _inspected_gaps, _last_pivot_robot_x, _last_pivot_robot_y, _new_gap_streak
+    global _mode2_start_time, _mode2_arrived_time, _inspected_gaps, _last_pivot_robot_x, _last_pivot_robot_y, _new_gap_streak
     global _current_boundary_radius, _boundary_exit_count, _boundary_was_outside
     global _initial_x, _initial_y, _initial_heading, _initial_pose_set, _use_semicircle_boundary
     arduino_x_mm = arduino_y_mm = arduino_heading_deg = 0.0
@@ -1194,6 +1237,7 @@ def reset_search_state():
     _pivot_direction = 1.0
     _last_pivot_time = 0.0
     _mode2_start_time = None
+    _mode2_arrived_time = None
     _inspected_gaps = []
     _last_pivot_robot_x = _last_pivot_robot_y = None
     _new_gap_streak = 0

@@ -759,19 +759,7 @@ class Sim:
             if (S._last_target_est_x is not None and
                     S._mode2_start_time is not None and
                     self.sim_time - S._mode2_start_time > S.MODE2_TIMEOUT_SEC):
-                S._search_mode         = 1
-                S._last_arrival_x      = S._last_target_est_x
-                S._last_arrival_y      = S._last_target_est_y
-                S._pivot_active        = True
-                S._pivot_prev_hdg      = hdg
-                S._pivot_total_rotated = 0.0
-                S._pivot_direction     = 1.0
-                S._mode2_start_time    = None
-                S._inspected_gaps[:]   = []
-                S._last_pivot_robot_x  = S.arduino_x_mm
-                S._last_pivot_robot_y  = S.arduino_y_mm
-                print(f"[MODE2→1] {S.MODE2_TIMEOUT_SEC:.0f}s 타임아웃: "
-                      f"중심=({S._last_arrival_x:.0f},{S._last_arrival_y:.0f}) 피버턴 재시작")
+                S.switch_mode2_to_mode1(f"{S.MODE2_TIMEOUT_SEC:.0f}s 타임아웃")
                 return 0.0, 0.0
             elif S._last_target_est_x is not None:
                 cx, cy = S._last_target_est_x, S._last_target_est_y
@@ -779,9 +767,20 @@ class Sim:
                 # 능동 접근: 경계 안/밖 무관하게 항상 목표 추정 위치를 지향.
                 dist_to_tgt = math.hypot(cx - S.arduino_x_mm, cy - S.arduino_y_mm)
                 if dist_to_tgt < S.MODE2_NEAR_TARGET_MM:
-                    # 추정 위치 도달 → 정지 (재탐색은 타임아웃→Mode1 피버턴 담당)
+                    # 추정 위치 standoff 도달 → 정지(색지 위까지 파고들지 않음).
+                    # 카메라가 색지를 잘 보는 거리에서 멈춰 재포착을 기다린다.
+                    # (색 재감지 시엔 위 color_confirmed 분기로 빠져 여기 안 옴.)
+                    # 도착 후 MODE2_ARRIVE_SEARCH_SEC 내 색지 미발견이면 전체 타임아웃을
+                    # 안 기다리고 즉시 Mode1 피버턴으로 전환(지연 단축).
+                    if S._mode2_arrived_time is None:
+                        S._mode2_arrived_time = self.sim_time
+                    elif (self.sim_time - S._mode2_arrived_time
+                            > S.MODE2_ARRIVE_SEARCH_SEC):
+                        S.switch_mode2_to_mode1(
+                            f"도착 후 {S.MODE2_ARRIVE_SEARCH_SEC:.0f}s 색지 미발견")
                     return 0.0, 0.0
                 else:
+                    S._mode2_arrived_time = None   # 아직 접근 중 → 도착 타이머 리셋
                     target_tb = S.get_target_bearing(cx, cy)
                     # 경계는 방향이 아닌 감속 leash 로만 사용
                     _, v_scale = S.get_boundary_correction(cx, cy, S._current_boundary_radius)
